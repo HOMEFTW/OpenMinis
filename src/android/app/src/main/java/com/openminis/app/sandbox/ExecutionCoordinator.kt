@@ -89,7 +89,7 @@ object ExecutionCoordinator {
 
             // [diag] trace the sessionId that shell_execute is dispatched with —
             // suspected source of the Chinese-emoji filename vanishing bug
-            Log.w(TAG, "[diag] execute sessionId=$sessionId cmd=${command.take(120).replace('\n', ' ')}")
+            Log.w(TAG, "[diag] execute sessionId=$sessionId cmd=${com.openminis.app.logging.LogRedactor.redact(command).take(120).replace('\n', ' ')}")
 
             // Get or create shell — protected by globalLock to avoid duplicate creation
             val shell = getOrCreateShell(sessionId)

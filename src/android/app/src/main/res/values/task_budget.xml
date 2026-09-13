@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="task_budget_title">Task budget</string>
+    <string name="task_budget_description">Limit the number of agent rounds per run. Applies to new runs on this device; running tasks keep their current limit. Paused tasks can be continued. This is not a money limit: retries and tools may incur additional usage.</string>
+    <string name="task_budget_rounds">%1$d rounds</string>
+    <string name="task_budget_save">Save</string>
+    <string name="task_budget_retry">Retry %1$d · waiting %2$d s. Retrying may incur additional usage.</string>
+    <string name="task_budget_near">Round %1$d of %2$d. The task will pause at the limit; you can continue it.</string>
+</resources>

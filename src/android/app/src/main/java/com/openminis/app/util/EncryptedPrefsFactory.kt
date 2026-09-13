@@ -5,54 +5,81 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.openminis.app.logging.LogRedactor
 import java.io.File
-import java.security.KeyStore
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * T-android-keystore-aead-fail: self-healing wrapper around
- * [EncryptedSharedPreferences.create].
- *
- * The default flow throws `AEADBadTagException` (wrapped as
- * `GeneralSecurityException`) on launch when the AndroidKeystore master
- * key can no longer decrypt the Tink keyset blob — observed on Samsung
- * One UI / Android 16 after backup-restore or biometric re-enroll. The
- * exception bubbles to the main thread and the app dies in a relaunch
- * loop because every cold start hits the same lazy init.
- *
- * Strategy:
- *  1. Try the normal create.
- *  2. On any crypto error: drop the encrypted XML file + the on-disk
- *     Tink keyset prefs file + the AndroidKeystore alias, then retry
- *     once. The user loses stored credentials (they need to re-paste
- *     their API key / re-login OAuth) but the app boots.
- *  3. If recreate still fails: fall back to a PLAIN-TEXT
- *     SharedPreferences so the rest of the app sees an empty,
- *     read-write store and never crashes. Plain-text fallback is a
- *     last-resort safety net — the on-disk file is named with a
- *     "_plain_fallback" suffix so it's distinguishable from real
- *     encrypted state and never gets promoted back to the encrypted
- *     slot on the next launch.
+ * Creates encrypted preference stores without allowing one broken store to
+ * destroy another store's key material. Keystore failures use a process-only
+ * store and publish a visible health signal for the settings/provider UI.
  */
 object EncryptedPrefsFactory {
     private const val TAG = "EncryptedPrefsFactory"
+    private const val LEGACY_SUFFIX = "_plain_fallback"
+
+    data class StorageStatus(
+        val fileName: String,
+        val storage: EncryptedPrefsStorage,
+        val warning: String? = null,
+    )
+
+    private val memoryStores = mutableMapOf<String, MemorySharedPreferences>()
+    private val statusLock = Any()
+    private val _storageStatuses = MutableStateFlow<Map<String, StorageStatus>>(emptyMap())
+
+    /** Current encrypted/memory mode for every preference store touched here. */
+    val storageStatuses: StateFlow<Map<String, StorageStatus>> = _storageStatuses.asStateFlow()
+
+    fun statusFor(fileName: String): StorageStatus? = _storageStatuses.value[fileName]
+
+    fun hasMemoryFallback(): Boolean = _storageStatuses.value.values.any {
+        it.storage == EncryptedPrefsStorage.MEMORY
+    }
 
     fun safeCreate(context: Context, fileName: String): SharedPreferences {
-        runCatching { return build(context, fileName) }
-            .onFailure { Log.w(TAG, "first create($fileName) failed: ${it.message}") }
-
-        // First wipe attempt — the encrypted XML + Tink keyset blob +
-        // master-key alias all need to go. The Tink keyset lives in its
-        // own __androidx_security_crypto_encrypted_prefs__ file keyed
-        // by the SP file name; drop both so create() regenerates them.
-        wipeEncryptedState(context, fileName)
-
-        runCatching { return build(context, fileName) }
-            .onFailure {
-                Log.e(TAG, "rebuild($fileName) after wipe failed: ${it.message}", it)
+        val appContext = context.applicationContext
+        val storeKey = "${appContext.filesDir.absolutePath}:$fileName"
+        val memory = synchronized(memoryStores) {
+            memoryStores.getOrPut(storeKey) { MemorySharedPreferences() }
+        }
+        val legacyName = fileName + LEGACY_SUFFIX
+        val legacy = appContext.getSharedPreferences(legacyName, Context.MODE_PRIVATE)
+        // Bring a legacy value into process memory before trying Keystore. This
+        // never writes or deletes the legacy file; cleanup is gated by a later
+        // successful encrypted write and verification.
+        runCatching { legacy.all }
+            .onSuccess(memory::putAllIfAbsent)
+            .onFailure { failure ->
+                Log.w(
+                    TAG,
+                    LogRedactor.redact(
+                        "legacy fallback read($fileName) failed: " +
+                            "${failure.javaClass.simpleName}: ${failure.message ?: "no message"}",
+                    ),
+                )
             }
 
-        Log.w(TAG, "falling back to plain SharedPreferences for $fileName — credentials lost")
-        return context.getSharedPreferences("${fileName}_plain_fallback", Context.MODE_PRIVATE)
+        val resolution = EncryptedPrefsRecovery(
+            fileName = fileName,
+            createEncrypted = { build(appContext, fileName) },
+            memoryPrefs = memory,
+            legacyPrefs = legacy,
+            clearLegacy = { clearLegacy(appContext, legacyName, legacy) },
+            policy = EncryptedPrefsRecoveryPolicy.RETRY_ONCE,
+            onFailure = { stage, failure ->
+                val details = "${stage}($fileName) failed: ${failure.javaClass.simpleName}: ${failure.message ?: "no message"}"
+                Log.w(TAG, LogRedactor.redact(details))
+            },
+        ).resolve()
+
+        updateStatus(fileName, StorageStatus(fileName, resolution.storage, resolution.warning))
+        if (resolution.storage == EncryptedPrefsStorage.ENCRYPTED) {
+            synchronized(memoryStores) { memoryStores.remove(storeKey) }
+        }
+        return SecretTrackingSharedPreferences(resolution.prefs)
     }
 
     private fun build(context: Context, fileName: String): SharedPreferences {
@@ -68,20 +95,22 @@ object EncryptedPrefsFactory {
         )
     }
 
-    private fun wipeEncryptedState(context: Context, fileName: String) {
-        // XML file the SP itself reads/writes.
-        runCatching {
-            val dir = File(context.applicationInfo.dataDir, "shared_prefs")
-            File(dir, "$fileName.xml").delete()
-            // Tink keyset blob is stashed in this companion prefs file.
-            File(dir, "__androidx_security_crypto_encrypted_prefs__.xml").delete()
-        }.onFailure { Log.w(TAG, "wipe prefs files failed: ${it.message}") }
+    private fun clearLegacy(
+        context: Context,
+        fileName: String,
+        prefs: SharedPreferences,
+    ): Boolean {
+        if (!prefs.edit().clear().commit()) return false
+        return runCatching {
+            context.deleteSharedPreferences(fileName)
+            val path = File(context.applicationInfo.dataDir, "shared_prefs/$fileName.xml")
+            !path.exists()
+        }.getOrDefault(false)
+    }
 
-        runCatching {
-            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            if (ks.containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
-                ks.deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
-            }
-        }.onFailure { Log.w(TAG, "wipe master-key alias failed: ${it.message}") }
+    private fun updateStatus(fileName: String, status: StorageStatus) {
+        synchronized(statusLock) {
+            _storageStatuses.value = _storageStatuses.value + (fileName to status)
+        }
     }
 }

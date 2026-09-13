@@ -9,7 +9,11 @@ data class LLMModel(
     val provider: String,
     val contextWindow: Int? = null,
     val maxOutputTokens: Int? = null,
-    val supportsReasoning: Boolean? = null,
+    val supportsReasoning: Boolean? = when {
+        isGPT6AstraId(id) -> true
+        isGPTImage25Id(id) -> false
+        else -> null
+    },
     val interleavedReasoningField: String? = null,
     // [T-reasoning-effort-data-driven] Effort tiers this model accepts, from the
     // models.dev `reasoning_options` entry of type `effort` (e.g. ["high","max"]
@@ -19,7 +23,7 @@ data class LLMModel(
     // replaces the old hardcoded deepseek/glm/kimi/minimax skip list; the
     // contents are the ALLOWED tiers, which the request builder clamps onto
     // (the catalog's sets vary: ["low","medium","high"], ["high","max"], …).
-    val reasoningEffortValues: List<String>? = null,
+    val reasoningEffortValues: List<String>? = if (isGPT6AstraId(id)) astraEfforts else null,
     // [OpenMinis#163] The catalog affirmatively declares NO effort tiers for
     // this model — it reasons, but takes no `reasoning_effort` parameter.
     // Mirrors iOS LLMModel.declaresNoEffortTiers.
@@ -35,10 +39,25 @@ data class LLMModel(
     val declaresNoEffortTiers: Boolean? = null,
     // Input/output modalities from models.dev (e.g. "text", "image", "audio", "video", "pdf").
     // Mirrors iOS ModelModality flags. When null, treat as text-in/text-out only.
-    val inputModalities: List<String>? = null,
-    val outputModalities: List<String>? = null,
+    val inputModalities: List<String>? = if (isGPT6AstraId(id) || isGPTImage25Id(id)) listOf("text", "image") else null,
+    val outputModalities: List<String>? = if (isGPTImage25Id(id)) listOf("image") else null,
 ) {
+    val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
+    val isGPTImage25: Boolean get() = isGPTImage25Id(id)
+
     companion object {
+        val astraEfforts = listOf("low", "medium", "high", "xhigh", "max")
+
+        // Include snapshots and provider-prefixed IDs, but not lookalike names.
+        private fun matchesModelId(id: String, name: String): Boolean {
+            val bare = id.substringAfterLast('/').lowercase()
+            return bare == name || Regex("${Regex.escape(name)}-\\d{4}-\\d{2}-\\d{2}").matches(bare)
+        }
+
+        fun isGPT6AstraId(id: String): Boolean = matchesModelId(id, "gpt-6-astra")
+        fun isGPTImage25Id(id: String): Boolean =
+            matchesModelId(id, "gpt-image-2.5-flare") || matchesModelId(id, "gpt-image-2.5-sunburst")
+
         // Anthropic — mirrors iOS LLMTypes.swift allAnthropic.
         // [T-android-claude-opus48-thinking-toggle] (Sow Sow 38845/38850) Every
         // Claude 4.x model supports extended thinking, so hard-stamp
@@ -92,6 +111,9 @@ data class LLMModel(
         // honours it. Mirrors iOS LLMTypes.swift defaults plus the
         // OpenAIAgentProvider `supportsReasoning ?? true` GPT-5.x
         // assumption (T119).
+        val gpt6Astra = LLMModel("gpt-6-astra", "GPT-6 Astra", "OpenAI")
+        val gptImage25Flare = LLMModel("gpt-image-2.5-flare", "GPT Image 2.5 Flare", "OpenAI")
+        val gptImage25Sunburst = LLMModel("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst", "OpenAI")
         val gpt55 = LLMModel("gpt-5.5", "GPT-5.5", "OpenAI", supportsReasoning = true)
         val gpt53Codex = LLMModel("gpt-5.3-codex", "GPT-5.3 Codex", "OpenAI", supportsReasoning = true)
         val gpt52Codex = LLMModel("gpt-5.2-codex", "GPT-5.2 Codex", "OpenAI", supportsReasoning = true)
@@ -103,7 +125,7 @@ data class LLMModel(
         val o4Mini = LLMModel("o4-mini", "o4 Mini", "OpenAI", supportsReasoning = true)
         val codexMini = LLMModel("codex-mini-latest", "Codex Mini", "OpenAI", supportsReasoning = true)
 
-        val allOpenAI = listOf(gpt55, gpt53Codex, gpt52Codex, gpt51CodexMax, gpt52, gpt4o, gpt4oMini, o3, o4Mini, codexMini)
+        val allOpenAI = listOf(gpt6Astra, gptImage25Flare, gptImage25Sunburst, gpt55, gpt53Codex, gpt52Codex, gpt51CodexMax, gpt52, gpt4o, gpt4oMini, o3, o4Mini, codexMini)
 
         // OpenRouter (matching iOS built-in set)
         val orClaudeSonnet4 = LLMModel("anthropic/claude-sonnet-4", "Claude Sonnet 4", "OpenRouter")

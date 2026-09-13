@@ -22,7 +22,8 @@ import com.openminis.app.logging.AppLogger
  */
 class ScheduledTaskManager(private val context: Context) {
 
-    private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    private val alarmManager: AlarmManager?
+        get() = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
     private val store = ScheduledTaskStore(context)
 
     init { ensureNotificationChannel() }
@@ -94,22 +95,40 @@ class ScheduledTaskManager(private val context: Context) {
         registerAlarm(t)
     }
 
-    fun markFired(taskId: String, sessionId: String?, resultPreview: String?, ok: Boolean = true) {
-        val t = store.get(taskId) ?: return
-        val now = System.currentTimeMillis()
-        // [T-android-scheduled-tasks-run-records] Prepend a run record
-        // (newest-first), capped at MAX_RUN_HISTORY. lastResult* are kept in
-        // sync for back-compat but are no longer surfaced in the list UI.
-        val run = ScheduledRun(firedAt = now, sessionId = sessionId, preview = resultPreview, ok = ok)
-        val history = (listOf(run) + t.runHistory).take(ScheduledTask.MAX_RUN_HISTORY)
-        store.upsert(
-            t.copy(
-                lastFiredAt = now,
-                lastResultPreview = resultPreview,
-                lastResultSessionId = sessionId,
-                runHistory = history,
-            ),
-        )
+    fun markFired(
+        taskId: String,
+        sessionId: String?,
+        resultPreview: String?,
+        ok: Boolean = true,
+        executionId: String? = null,
+    ) {
+        synchronized(runHistoryLock) {
+            val t = store.get(taskId) ?: return
+            // Receiver handoff failures can be observed both by the runner and by
+            // the receiver catch block. Persisted execution ids make that one
+            // trigger produce one history row even across manager instances.
+            if (executionId != null && t.runHistory.any { it.executionId == executionId }) return
+            val now = System.currentTimeMillis()
+            // [T-android-scheduled-tasks-run-records] Prepend a run record
+            // (newest-first), capped at MAX_RUN_HISTORY. lastResult* are kept in
+            // sync for back-compat but are no longer surfaced in the list UI.
+            val run = ScheduledRun(
+                firedAt = now,
+                sessionId = sessionId,
+                preview = resultPreview,
+                ok = ok,
+                executionId = executionId,
+            )
+            val history = (listOf(run) + t.runHistory).take(ScheduledTask.MAX_RUN_HISTORY)
+            store.upsert(
+                t.copy(
+                    lastFiredAt = now,
+                    lastResultPreview = resultPreview,
+                    lastResultSessionId = sessionId,
+                    runHistory = history,
+                ),
+            )
+        }
     }
 
     private fun registerAlarm(task: ScheduledTask) {
@@ -119,7 +138,11 @@ class ScheduledTaskManager(private val context: Context) {
         }
         val pi = buildPendingIntent(task.id)
         try {
-            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            val alarms = alarmManager ?: run {
+                AppLogger.error(TAG, "AlarmManager unavailable for task=${task.id}")
+                return
+            }
+            alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
             AppLogger.info(TAG, "registered task=${task.id} label=\"${task.label}\" triggerAt=$triggerAt")
         } catch (e: SecurityException) {
             // S+ users may have revoked SCHEDULE_EXACT_ALARM — fall back
@@ -129,7 +152,7 @@ class ScheduledTaskManager(private val context: Context) {
                 "exact-alarm denied for task=${task.id} (${e.message}); falling back to inexact",
             )
             try {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+                alarmManager?.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
             } catch (t2: Throwable) {
                 AppLogger.error(TAG, "inexact fallback failed for task=${task.id}: ${t2.message}")
             }
@@ -138,7 +161,7 @@ class ScheduledTaskManager(private val context: Context) {
 
     private fun cancelAlarm(taskId: String) {
         val pi = buildPendingIntent(taskId)
-        alarmManager.cancel(pi)
+        alarmManager?.cancel(pi)
         pi.cancel()
     }
 
@@ -154,7 +177,7 @@ class ScheduledTaskManager(private val context: Context) {
 
     private fun ensureNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         if (nm.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -167,6 +190,7 @@ class ScheduledTaskManager(private val context: Context) {
     }
 
     companion object {
+        private val runHistoryLock = Any()
         private const val TAG = "ScheduledTaskManager"
         const val ACTION_FIRE = "com.openminis.app.scheduled.FIRE"
         const val EXTRA_TASK_ID = "task_id"

@@ -344,7 +344,7 @@ object ThinkingRuleResolver {
             }
 
             is ThinkingWireFormat.ReasoningEffort -> {
-                val isOpenAINative = lid.startsWith("o") || lid.startsWith("gpt-5")
+                val isOpenAINative = lid.startsWith("o") || lid.startsWith("gpt-5") || com.openminis.app.data.model.LLMModel.isGPT6AstraId(lid)
                 if (!ctx.level.isEnabled) {
                     // OFF is a separate dispatch on Android, reproduced verbatim from the
                     // pre-refactor chain. Order matters: OpenAI-native ids send the tier

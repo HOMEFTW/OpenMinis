@@ -29,6 +29,7 @@ object OpenAIModelsApi {
     // so set supportsReasoning = true up front. Without it the Thinking
     // pill in chat is disabled and the user can't pick low/medium/high.
     fun fetchModelsOAuth(): List<LLMModel> = listOf(
+        LLMModel.gpt6Astra,
         // [T-android-thinking-level-arch] GPT-5.6 family — Codex OAuth only
         // (not in LLMModel.allOpenAI, matching iOS). sol/terra reach ULTRA,
         // luna reaches MAX (see ThinkingLevelCatalog).
@@ -57,6 +58,8 @@ object OpenAIModelsApi {
         AppLogger.info(TAG, "Codex OAuth model list (${it.size} models): ${it.joinToString { m -> m.id }}")
         ModelsDevApi.enrichModels(it)
     } + listOf(
+        LLMModel.gptImage25Flare,
+        LLMModel.gptImage25Sunburst,
         // [T-codex-gpt-image2-oauth-android] Special image-generation model on
         // the Codex OAuth path. Appended AFTER enrichModels so its declared
         // image input/output modalities survive (models.dev doesn't know it).
@@ -154,20 +157,21 @@ object OpenAIModelsApi {
                 // the `reasoning` flag yet, and without this the pill
                 // stays disabled.
                 val idLower = id.lowercase()
-                val knownReasoning = idLower.startsWith("gpt-5") ||
+                val knownReasoning = LLMModel.isGPT6AstraId(id) || idLower.startsWith("gpt-5") ||
                     idLower.startsWith("o1") ||
                     idLower.startsWith("o3") ||
                     idLower.startsWith("o4") ||
                     idLower.contains("codex")
 
+                val defaults = LLMModel(id, displayName, "OpenAI")
                 parsed.add(
                     LLMModel(
                         id = id,
                         displayName = displayName,
                         provider = if (isCustomBase) "Custom" else "OpenAI",
-                        inputModalities = inputModalities,
-                        outputModalities = outputModalities,
-                        supportsReasoning = if (knownReasoning) true else null,
+                        inputModalities = inputModalities ?: defaults.inputModalities,
+                        outputModalities = outputModalities ?: defaults.outputModalities,
+                        supportsReasoning = if (knownReasoning) true else defaults.supportsReasoning,
                     )
                 )
             }

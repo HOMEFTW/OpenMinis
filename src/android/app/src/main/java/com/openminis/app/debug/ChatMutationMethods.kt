@@ -105,6 +105,7 @@ internal object ChatMutationMethods {
             put("isNewSession", isNew)
             put("modelName", displayedModelName ?: JSONObject.NULL)
             put("status", result.status)
+            put("runId", result.runId ?: JSONObject.NULL)
             put("prompt", text)
             put("responseText", result.responseText ?: JSONObject.NULL)
             put("userMessageId", userMsg?.id ?: JSONObject.NULL)
@@ -143,6 +144,7 @@ internal object ChatMutationMethods {
         return JSONObject().apply {
             put("sessionId", sessionId)
             put("status", result.status)
+            put("runId", result.runId ?: JSONObject.NULL)
             put("retriedMessageId", result.retriedMessageId ?: JSONObject.NULL)
             put("deletedMessageCount", result.deletedMessageCount)
             put("modelName", displayedModelName ?: JSONObject.NULL)
@@ -182,6 +184,7 @@ internal object ChatMutationMethods {
         return JSONObject().apply {
             put("sessionId", sessionId)
             put("status", result.status)
+            put("runId", result.runId ?: JSONObject.NULL)
             put("deletedMessageCount", result.deletedMessageCount)
             put("responseText", result.responseText ?: JSONObject.NULL)
             if (result.timedOut) put("timedOut", true)

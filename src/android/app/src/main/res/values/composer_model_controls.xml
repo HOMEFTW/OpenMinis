@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="composer_thinking_label">Thinking · %1$s</string>
+    <string name="composer_model_group">Model group · automatic routing</string>
+    <string name="composer_more_models">More models and groups</string>
+    <string name="composer_selected">Selected</string>
+    <string name="composer_thinking_hint">Slide to adjust. Higher effort may take longer and use more tokens.</string>
+    <string name="composer_thinking_capped">This model supports up to %1$s. Your higher saved setting is retained until you move the slider.</string>
+</resources>

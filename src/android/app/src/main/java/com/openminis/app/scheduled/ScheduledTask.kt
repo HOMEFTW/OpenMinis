@@ -5,6 +5,11 @@ import org.json.JSONObject
 import java.util.Calendar
 import java.util.UUID
 
+/** A scheduled run is successful only after the invocation reaches Completed. */
+internal object ScheduledRunPolicy {
+    fun isSuccess(status: String): Boolean = status == "Completed"
+}
+
 /**
  * [T-android-scheduled-tasks-run-records] One recorded execution of a
  * scheduled task. The run-records screen lists these newest-first; a run with
@@ -15,12 +20,15 @@ data class ScheduledRun(
     val sessionId: String?,
     val preview: String?,
     val ok: Boolean,
+    /** Stable id for one alarm / Run now trigger; null for legacy records. */
+    val executionId: String? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("firedAt", firedAt)
         if (sessionId != null) put("sessionId", sessionId)
         if (preview != null) put("preview", preview)
         put("ok", ok)
+        if (executionId != null) put("executionId", executionId)
     }
 
     companion object {
@@ -29,6 +37,7 @@ data class ScheduledRun(
             sessionId = if (o.has("sessionId")) o.optString("sessionId", null) else null,
             preview = if (o.has("preview")) o.optString("preview", null) else null,
             ok = o.optBoolean("ok", true),
+            executionId = if (o.has("executionId")) o.optString("executionId", null) else null,
         )
     }
 }

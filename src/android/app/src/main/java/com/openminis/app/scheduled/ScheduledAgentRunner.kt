@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 /**
  * [T-android-scheduled-tasks-design] Headless agent launch for scheduled
@@ -67,6 +68,7 @@ object ScheduledAgentRunner {
         context: Context,
         task: ScheduledTask,
         waitForCompletion: Boolean = true,
+        executionId: String = "scheduled_${UUID.randomUUID()}",
     ): String? {
         // [T-android-scheduled-lateinit-crash-156] `as? MinisApp` only rules out
         // a null / wrong-type Application — it does NOT mean the Application is
@@ -87,6 +89,7 @@ object ScheduledAgentRunner {
         // call, so a skipped fire self-heals on the following launch.
         val app = context.applicationContext as? MinisApp ?: run {
             AppLogger.error(TAG, "Application is not MinisApp — skipping task ${task.id}")
+            recordFailure(context, task, executionId, null, "application_not_initialized")
             return null
         }
         if (!app.subsystemsReady()) {
@@ -94,21 +97,35 @@ object ScheduledAgentRunner {
                 TAG,
                 "MinisApp subsystems not initialized (safe-mode or failed init) — skipping task ${task.id}",
             )
+            recordFailure(app, task, executionId, null, "application_not_initialized")
             return null
         }
 
         // Kick the FGS so the agent loop survives Doze / screen-off. The
         // existing service is idempotent and reused by chat UI; we pass a
         // generic status string so it shows up in the ongoing notification.
-        AgentForegroundService.startService(
-            context = app,
-            sessionCount = 1,
-            toolStatus = "Scheduled: ${task.label.ifBlank { "task" }}",
-        )
+        try {
+            AgentForegroundService.startService(
+                context = app,
+                sessionCount = 1,
+                toolStatus = "Scheduled: ${task.label.ifBlank { "task" }}",
+            )
+        } catch (t: Throwable) {
+            AppLogger.error(TAG, "task ${task.id} handoff failed: ${t.message}")
+            recordFailure(app, task, executionId, null, "handoff_failed: ${t.message}")
+            return null
+        }
 
-        val sessionId = withContext(Dispatchers.IO) {
-            resolveSessionId(app, task)
-        } ?: return null
+        val sessionId = try {
+            withContext(Dispatchers.IO) { resolveSessionId(app, task) }
+        } catch (t: Throwable) {
+            AppLogger.error(TAG, "task ${task.id} session resolution failed: ${t.message}")
+            recordFailure(app, task, executionId, null, "session_resolution_failed: ${t.message}")
+            return null
+        } ?: run {
+            recordFailure(app, task, executionId, null, "session_not_found_or_provider_unavailable")
+            return null
+        }
 
         AppLogger.info(
             TAG,
@@ -118,10 +135,7 @@ object ScheduledAgentRunner {
 
         if (waitForCompletion) {
             val result = dispatch(app, task, sessionId, wait = true)
-            val preview = (result.responseText ?: "").take(200).ifBlank { "(no response)" }
-            val ok = result.status != "Error" && result.status != "Timeout"
-            ScheduledTaskManager(app).markFired(task.id, sessionId, preview, ok = ok)
-            postCompletionNotification(app, task, sessionId, preview)
+            finishRun(app, task, sessionId, executionId, result)
             return sessionId
         }
 
@@ -133,12 +147,50 @@ object ScheduledAgentRunner {
         // can't cancel it because bgScope outlives the screen.
         bgScope.launch {
             val result = dispatch(app, task, sessionId, wait = true)
-            val preview = (result.responseText ?: "").take(200).ifBlank { "(no response)" }
-            val ok = result.status != "Error" && result.status != "Timeout"
-            ScheduledTaskManager(app).markFired(task.id, sessionId, preview, ok = ok)
-            postCompletionNotification(app, task, sessionId, preview)
+            finishRun(app, task, sessionId, executionId, result)
         }
         return sessionId
+    }
+
+    /** Persist and announce one terminal result for one trigger. */
+    private fun finishRun(
+        app: MinisApp,
+        task: ScheduledTask,
+        sessionId: String,
+        executionId: String,
+        result: HeadlessChatRunner.PromptResult,
+    ) {
+        val ok = ScheduledRunPolicy.isSuccess(result.status)
+        val response = result.responseText.orEmpty().ifBlank { "(no response)" }
+        val preview = (if (ok) response else "${result.status}: $response").take(200)
+        ScheduledTaskManager(app).markFired(
+            taskId = task.id,
+            sessionId = sessionId,
+            resultPreview = preview,
+            ok = ok,
+            executionId = executionId,
+        )
+        postCompletionNotification(app, task, sessionId, preview)
+    }
+
+    private fun recordFailure(
+        context: Context,
+        task: ScheduledTask,
+        executionId: String,
+        sessionId: String?,
+        reason: String,
+    ) {
+        runCatching {
+            ScheduledTaskManager(context.applicationContext).markFired(
+                taskId = task.id,
+                sessionId = sessionId,
+                resultPreview = reason.take(200),
+                ok = false,
+                executionId = executionId,
+            )
+        }.onFailure { t ->
+            AppLogger.error(TAG, "task ${task.id} failure history write failed: ${t.message}")
+        }
     }
 
     /**

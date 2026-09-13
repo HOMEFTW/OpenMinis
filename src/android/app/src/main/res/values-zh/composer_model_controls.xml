@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="composer_thinking_label">思考 · %1$s</string>
+    <string name="composer_model_group">模型分组 · 自动路由</string>
+    <string name="composer_more_models">更多模型与分组</string>
+    <string name="composer_selected">已选择</string>
+    <string name="composer_thinking_hint">滑动调整强度。强度越高，可能需要更长时间和更多用量。</string>
+    <string name="composer_thinking_capped">此模型最高支持“%1$s”。拖动滑块前，会保留你原先设置的更高强度。</string>
+</resources>

@@ -62,6 +62,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.logging.AppLogger
@@ -97,7 +98,7 @@ fun ProviderDetailScreen(
     // re-creates them from ProviderType.builtInModels on next refresh anyway —
     // mirrors DebugProviderMutationMethods note "Built-in entries can't be
     // deleted — set isHidden=true instead".
-    var entryToDelete by remember { mutableStateOf<com.openminis.app.data.model.ModelEntry?>(null) }
+    var entryToDelete by remember { mutableStateOf<ModelEntry?>(null) }
     // [T-android-model-row-hide-action] Id of the entry whose long-press menu is
     // open. Keyed by id rather than holding the ModelEntry so the menu re-reads
     // the CURRENT entry after a hide toggle — holding a stale copy would leave
@@ -132,6 +133,9 @@ fun ProviderDetailScreen(
     var customUserAgent by remember { mutableStateOf(instance.customUserAgent ?: "") }
 
     val entries = providerRepository.entriesFor(instanceId)
+    val textEntries = textCallCheckEntries(entries)
+    var callCheckEntry by remember(instanceId) { mutableStateOf<ModelEntry?>(null) }
+    var showCallCheckModelPicker by remember(instanceId) { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
@@ -222,6 +226,7 @@ fun ProviderDetailScreen(
                 }
             }
         }
+        CredentialsStorageWarning(modifier = Modifier.padding(top = 8.dp))
 
         // Manual Bearer Token (OAuth providers only — proxy override)
         if (isOAuthProvider) {
@@ -524,6 +529,39 @@ fun ProviderDetailScreen(
         // ─── Thinking Rules [T-android-thinking-rules-phase2 §3] ─────
         ThinkingRulesSection(instance = instance, providerRepository = providerRepository)
 
+        // ─── Provider call check ────────────────────────────────────
+        SettingsSection(
+            header = stringResource(R.string.provider_call_check_section),
+            footer = stringResource(R.string.provider_call_check_footer),
+        ) {
+            SettingsRow(
+                title = stringResource(R.string.provider_call_check_action),
+                subtitle = if (textEntries.isEmpty()) {
+                    stringResource(R.string.provider_call_check_no_text_model)
+                } else {
+                    null
+                },
+                onClick = if (textEntries.isEmpty()) {
+                    null
+                } else {
+                    {
+                        if (textEntries.size == 1) {
+                            callCheckEntry = textEntries.first()
+                        } else {
+                            showCallCheckModelPicker = true
+                        }
+                    }
+                },
+                showChevron = textEntries.isNotEmpty(),
+                showDivider = false,
+                titleColor = if (textEntries.isEmpty()) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+        }
+
         // ─── Models ─────────────────────────────────────────────────
         SettingsSection(
             header = stringResource(R.string.provider_detail_models_count_header, entries.size),
@@ -772,6 +810,26 @@ fun ProviderDetailScreen(
                 AppLogger.info(TAG, "Deleted model entry ${e.id} (${e.model.displayName})")
                 entryToDelete = null
             },
+        )
+    }
+
+    if (showCallCheckModelPicker) {
+        ProviderCallCheckModelPicker(
+            entries = textEntries,
+            onSelect = { entry ->
+                showCallCheckModelPicker = false
+                callCheckEntry = entry
+            },
+            onDismiss = { showCallCheckModelPicker = false },
+        )
+    }
+
+    callCheckEntry?.let { entry ->
+        ProviderCallCheckDialog(
+            instance = instance,
+            entry = entry,
+            providerRepository = providerRepository,
+            onDismiss = { callCheckEntry = null },
         )
     }
 }

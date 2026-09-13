@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="task_budget_title">任务预算</string>
+    <string name="task_budget_description">限制每次任务的执行轮数。对本机后续运行生效，当前任务保持原上限；暂停后可以继续。这不是金额上限，重试与工具调用仍可能增加用量。</string>
+    <string name="task_budget_rounds">%1$d 轮</string>
+    <string name="task_budget_save">保存</string>
+    <string name="task_budget_retry">正在进行第 %1$d 次重试 · 等待 %2$d 秒。重试可能增加用量。</string>
+    <string name="task_budget_near">已执行 %1$d / %2$d 轮。达到上限后将暂停，可手动继续。</string>
+</resources>

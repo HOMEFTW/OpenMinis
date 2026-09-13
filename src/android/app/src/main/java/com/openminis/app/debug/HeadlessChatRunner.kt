@@ -24,9 +24,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  *  - The runner caches one VM per sessionId so a follow-up `chat.prompt` on
  *    the same id reuses the same `viewModelScope` (no double-starts).
  *
- * Concurrency: [ChatViewModel.sendMessage] auto-enqueues if `_isStreaming` is
- * true, but we still serialize per-session via the cache: a second `wait=true`
- * on the same session can collect the same `isStreaming` Flow.
+ * Concurrency: [ChatViewModel.sendMessage] auto-enqueues while another run is
+ * active. Each RPC invocation receives its own run id, so a second `wait=true`
+ * call on the same session observes only its own terminal state.
  */
 internal object HeadlessChatRunner {
 
@@ -144,12 +144,7 @@ internal object HeadlessChatRunner {
         return@withContext group.name
     }
 
-    /**
-     * Send a prompt into [sessionId]. When `wait` is true, suspend until
-     * `isStreaming` flips back to false (or `timeoutMs` elapses) and return
-     * the concatenated text of the last assistant message; otherwise return
-     * immediately with `responseText=null`.
-     */
+    /** Send a prompt and observe the state of this invocation only. */
     suspend fun prompt(
         context: Context,
         sessionId: String,
@@ -160,90 +155,28 @@ internal object HeadlessChatRunner {
         timeoutMs: Long,
     ): PromptResult = withContext(Dispatchers.Main) {
         val vm = viewModel(context, sessionId)
-        // Apply per-call thinking override BEFORE sendMessage so streamMessage
-        // picks up the new level. Caller passes null to keep the VM's existing
-        // setting (default OFF for a fresh VM, last user-set value otherwise).
-        //
-        // ChatViewModel.setThinkingLevel silently no-ops when the active model
-        // hasn't resolved yet (currentModelSupportsReasoning checks
-        // `currentModel?.supportsReasoning == true`, and `currentModel` is
-        // populated on a viewModelScope coroutine). For a freshly-created VM
-        // bound to a new session, the resolver may not have run by the time we
-        // reach this line — wait until activeEntryId flips non-null so the
-        // override actually applies.
+        val runId = vm.allocateRunId()
         if (thinkingLevel != null) {
-            // Wait off Main: ChatViewModel's init coroutine runs on viewModelScope
-            // (Main.immediate), and Flow.first() suspends the calling dispatcher
-            // until the value arrives. If we wait on Main here we deadlock — the
-            // VM's loadSession() never gets to populate _activeEntryId. Hop to
-            // Default for the wait, then come back to Main for setThinkingLevel.
-            // setThinkingLevel itself silently no-ops on a model that doesn't
-            // support reasoning — that gating is intentional UI parity, the
-            // 3 s ceiling here just keeps us from blocking forever if the VM
-            // never resolves a model (no provider configured, etc.).
             withContext(Dispatchers.Default) {
-                withTimeoutOrNull(3000L) {
-                    vm.activeEntryId.first { it != null }
-                }
+                withTimeoutOrNull(3000L) { vm.activeEntryId.first { it != null } }
             }
             vm.setThinkingLevel(thinkingLevel)
         }
-        // Wait for ChatViewModel.currentProvider to resolve before sendMessage.
-        // The VM populates currentProvider on a viewModelScope (Main.immediate)
-        // coroutine driven by providerRepository.config + the session's bound
-        // entry. activeEntryId flips non-null in the SAME block that assigns
-        // currentProvider (see ChatViewModel.kt ~L2030/2230/2265/2558), so we
-        // use it as the readiness signal. Without this wait, sendMessage hits
-        // its `currentProvider == null` early-return and the RPC returns
-        // status:Completed responseText:null — the bug that blocked Step 2 e2e.
-        //
-        // Hop off Main for the wait: the VM's resolver runs on Main.immediate,
-        // so suspending Main here would deadlock the resolver (same pattern as
-        // the thinkingLevel wait above).
         val ready = withContext(Dispatchers.Default) {
-            withTimeoutOrNull(5000L) {
-                vm.activeEntryId.first { it != null }
-            }
+            withTimeoutOrNull(5000L) { vm.activeEntryId.first { it != null } }
         }
         if (ready == null) {
+            vm.rejectRun(runId, "no_provider_resolved_in_5s")
             return@withContext PromptResult(
                 status = "Error",
                 responseText = "no_provider_resolved_in_5s",
                 timedOut = false,
+                runId = runId,
             )
         }
         for (att in attachments) vm.addAttachment(att)
-        vm.sendMessage(text)
-        if (!wait) return@withContext PromptResult(status = "Running", responseText = null, timedOut = false)
-
-        // Wait for isStreaming to be false (sendMessage flips it true synchronously
-        // before launching its coroutine; if it never flips true the message was
-        // dropped — return immediately as Completed-but-empty).
-        val started = vm.isStreaming.value
-        if (!started) {
-            // Either dropped (e.g. compacting in flight) or completed before we
-            // returned to the suspension point — fall through to drain.
-        }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            // Skip the initial false (if we were called before sendMessage flipped true)
-            if (vm.isStreaming.value) {
-                // Wait for the next false transition.
-                vm.isStreaming.first { !it }
-            }
-            true
-        } ?: false
-
-        // Best-effort: read the last assistant text from the DB so we don't
-        // depend on the in-memory UI list (which may not have flushed yet).
-        val app = app(context)
-        val msgs = app.chatRepository.dao.loadMessages(sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        val responseText = lastAssistant?.let { extractText(it.partsJson) }
-        PromptResult(
-            status = if (finished) "Completed" else "Timeout",
-            responseText = responseText,
-            timedOut = !finished,
-        )
+        vm.startPromptForRun(text, runId)
+        awaitResult(vm, runId, wait, timeoutMs)
     }
 
     suspend fun retry(
@@ -255,6 +188,7 @@ internal object HeadlessChatRunner {
     ): PromptResult = withContext(Dispatchers.Main) {
         val app = app(context)
         val vm = viewModel(context, sessionId)
+        val runId = vm.allocateRunId()
         val targetMsgId = messageId ?: run {
             val msgs = app.chatRepository.dao.loadMessages(sessionId)
             msgs.lastOrNull { it.role == "user" }?.id
@@ -275,37 +209,22 @@ internal object HeadlessChatRunner {
             }
         }
         if (ready == null) {
+            vm.rejectRun(runId, "no_provider_resolved_in_5s")
             return@withContext PromptResult(
                 status = "Error",
                 responseText = "no_provider_resolved_in_5s",
                 timedOut = false,
                 deletedMessageCount = deletedCount,
                 retriedMessageId = targetMsgId,
+                runId = runId,
             )
         }
-        vm.retryFromMessage(targetMsgId)
-        if (!wait) {
-            return@withContext PromptResult(
-                status = "Retrying",
-                responseText = null,
-                timedOut = false,
-                deletedMessageCount = deletedCount,
-                retriedMessageId = targetMsgId,
-            )
-        }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            if (vm.isStreaming.value) {
-                vm.isStreaming.first { !it }
-            }
-            true
-        } ?: false
-        val msgs = app.chatRepository.dao.loadMessages(sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        val responseText = lastAssistant?.let { extractText(it.partsJson) }
-        PromptResult(
-            status = if (finished) "Completed" else "Timeout",
-            responseText = responseText,
-            timedOut = !finished,
+        vm.startRetryForRun(targetMsgId, runId)
+        awaitResult(
+            vm,
+            runId,
+            wait,
+            timeoutMs,
             deletedMessageCount = deletedCount,
             retriedMessageId = targetMsgId,
         )
@@ -330,16 +249,19 @@ internal object HeadlessChatRunner {
     ): PromptResult = withContext(Dispatchers.Main) {
         val app = app(context)
         val vm = viewModel(context, sessionId)
+        val runId = vm.allocateRunId()
         val ready = withContext(Dispatchers.Default) {
             withTimeoutOrNull(5000L) { vm.activeEntryId.first { it != null } }
         }
         if (ready == null) {
+            vm.rejectRun(runId, "no_provider_resolved_in_5s")
             return@withContext PromptResult(
                 status = "Error",
                 responseText = "no_provider_resolved_in_5s",
                 timedOut = false,
                 deletedMessageCount = 0,
                 retriedMessageId = assistantMessageId,
+                runId = runId,
             )
         }
         val before = app.chatRepository.dao.loadMessages(sessionId).size
@@ -349,37 +271,74 @@ internal object HeadlessChatRunner {
         // caller-supplied id (covers a freshly-reloaded session whose bubble id
         // IS the DB row id).
         val liveAssistantId = vm.assistantMessageIdForToolBlock(blockId) ?: assistantMessageId
-        val accepted = vm.rerunFromToolBlock(liveAssistantId, blockId)
-        if (!accepted) {
+        val admission = vm.startRerunForRun(liveAssistantId, blockId, runId)
+        if (!admission.accepted) {
             return@withContext PromptResult(
-                status = "Error",
-                responseText = "rerun_rejected (streaming / not_found / not_tool_block)",
+                status = admission.state.status.wireName,
+                responseText = admission.state.error
+                    ?: "rerun_rejected (streaming / not_found / not_tool_block)",
                 timedOut = false,
                 deletedMessageCount = 0,
                 retriedMessageId = assistantMessageId,
+                runId = runId,
             )
         }
+        val result = awaitResult(
+            vm,
+            runId,
+            wait,
+            timeoutMs,
+            deletedMessageCount = 0,
+            retriedMessageId = assistantMessageId,
+        )
+        val deletedCount = (before - app.chatRepository.dao.loadMessages(sessionId).size).coerceAtLeast(0)
+        result.copy(deletedMessageCount = deletedCount)
+    }
+
+    private suspend fun awaitResult(
+        vm: ChatViewModel,
+        runId: String,
+        wait: Boolean,
+        timeoutMs: Long,
+        deletedMessageCount: Int = 0,
+        retriedMessageId: String? = null,
+    ): PromptResult {
+        val initial = vm.runState(runId)
         if (!wait) {
-            return@withContext PromptResult(
-                status = "Rerunning",
+            val state = initial ?: return PromptResult(
+                status = "NotStarted",
                 responseText = null,
                 timedOut = false,
-                deletedMessageCount = 0,
-                retriedMessageId = assistantMessageId,
+                deletedMessageCount = deletedMessageCount,
+                retriedMessageId = retriedMessageId,
+                runId = runId,
+            )
+            return PromptResult(
+                status = state.status.wireName,
+                responseText = null,
+                timedOut = false,
+                deletedMessageCount = deletedMessageCount,
+                retriedMessageId = retriedMessageId,
+                runId = runId,
             )
         }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            if (vm.isStreaming.value) vm.isStreaming.first { !it }
-            true
-        } ?: false
-        val msgs = app.chatRepository.dao.loadMessages(sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        PromptResult(
-            status = if (finished) "Completed" else "Timeout",
-            responseText = lastAssistant?.let { extractText(it.partsJson) },
-            timedOut = !finished,
-            deletedMessageCount = (before - msgs.size).coerceAtLeast(0),
-            retriedMessageId = assistantMessageId,
+
+        val terminal = if (initial?.status?.isTerminal == true) {
+            initial
+        } else {
+            withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) {
+                vm.runStateFlow(runId).first { it.status.isTerminal }
+            }
+        }
+        val timedOut = terminal == null
+        val state = terminal ?: vm.runState(runId)
+        return PromptResult(
+            status = if (timedOut) "Timeout" else state?.status?.wireName ?: "NotStarted",
+            responseText = vm.assistantTextForRun(runId) ?: state?.error,
+            timedOut = timedOut,
+            deletedMessageCount = deletedMessageCount,
+            retriedMessageId = retriedMessageId,
+            runId = runId,
         )
     }
 
@@ -556,6 +515,7 @@ internal object HeadlessChatRunner {
         val timedOut: Boolean,
         val deletedMessageCount: Int = 0,
         val retriedMessageId: String? = null,
+        val runId: String? = null,
     )
 
     data class CompactResult(

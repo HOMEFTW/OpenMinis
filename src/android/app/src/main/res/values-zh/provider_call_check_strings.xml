@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="provider_call_check_section">连接测试</string>
+    <string name="provider_call_check_footer">向选定模型发送一次简短文本请求，用于验证此服务商。请求不会自动发送，并可能产生服务商费用。</string>
+    <string name="provider_call_check_action">测试模型调用</string>
+    <string name="provider_call_check_no_text_model">没有可用的文本模型</string>
+    <string name="provider_call_check_select_model">选择模型</string>
+    <string name="provider_call_check_disclosure_title">测试服务商连接？</string>
+    <string name="provider_call_check_disclosure_message">这会使用 %2$s 向 %1$s 发送一次简短文本请求，服务商可能会收取费用。</string>
+    <string name="provider_call_check_send">发送测试</string>
+    <string name="provider_call_check_cancel">取消请求</string>
+    <string name="provider_call_check_close">关闭</string>
+    <string name="provider_call_check_try_again">再次尝试</string>
+    <string name="provider_call_check_running">正在测试 %1$s…</string>
+    <string name="provider_call_check_success">已收到响应，用时 %1$d 毫秒</string>
+    <string name="provider_call_check_output">输出</string>
+    <string name="provider_call_check_empty_output">（空响应）</string>
+    <string name="provider_call_check_failure">请求失败，用时 %1$d 毫秒</string>
+    <string name="provider_call_check_cancelled">测试已取消</string>
+</resources>

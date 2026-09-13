@@ -11,37 +11,21 @@ object TerminalSanitizer {
     //   ESC ] ... ST (OSC sequences terminated by BEL or ESC\)
     //   ESC followed by single character (simple escapes)
     private val ANSI_REGEX = Regex(
-        """\x1B(?:\[[0-9;]*[A-Za-z]|\][^\x07]*(?:\x07|\x1B\\)|\[[0-9;]*m|[()][0-2AB]|[A-Za-z])"""
+        """\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[()][0-2AB]|[A-Za-z])"""
     )
 
     /**
-     * Sanitize terminal output in two passes:
-     * 1. CR folding — simulate carriage return overwriting
-     * 2. Strip remaining ANSI/VT escape sequences
+     * Strip formatting escapes, then simulate carriage-return overwrites.
+     * Text content, null values and whitespace remain intact.
      */
     fun sanitize(raw: String): String {
         if (raw.isEmpty()) return raw
 
-        // Pass 1: CR folding
-        val crFolded = foldCarriageReturns(raw)
+        // Escape sequences have zero display width; strip before simulating CR.
+        // Preserve legitimate whitespace and null values in program output.
+        val plain = ANSI_REGEX.replace(raw, "")
+        return foldCarriageReturns(plain).filter { it == '\n' || it == '\t' || it.code >= 0x20 }
 
-        // Pass 2: Strip ANSI sequences
-        val stripped = ANSI_REGEX.replace(crFolded, "")
-
-        // Pass 3: Remove null bytes and non-printable control chars (except \n \t)
-        val cleaned = stripped.filter { it == '\n' || it == '\t' || it.code >= 0x20 }
-
-        // Pass 4: Remove "null" artifacts from PRoot/pipe issues
-        // - Lines that are entirely "null"
-        // - Runs of repeated "null" (e.g., "nullnullnull" → "")
-        // - Lines that are just "null" appended to a prefix (e.g., "file:nullnullnull")
-        val noNullLines = cleaned.lines()
-            .filter { it.trim() != "null" }
-            .joinToString("\n")
-            .replace(Regex("(?:null){2,}"), "") // Remove runs of 2+ consecutive "null"
-
-        // Pass 5: Collapse excessive blank lines (3+ consecutive → 2)
-        return noNullLines.replace(Regex("\n{3,}"), "\n\n").trim()
     }
 
     /**
@@ -60,30 +44,23 @@ object TerminalSanitizer {
     /**
      * Simulate CR (\r) behavior: when a line contains \r (without \n),
      * the text after \r overwrites from the beginning of the line.
-     * Each \r resets the cursor to position 0, so only the last segment's
-     * content (up to its length) is visible.
+     * Each \r resets the cursor to position 0; characters not overwritten
+     * by the next segment remain visible.
      */
     private fun foldCarriageReturns(text: String): String {
-        val lines = text.split('\n')
         val result = StringBuilder()
-
-        for ((index, line) in lines.withIndex()) {
-            if (index > 0) result.append('\n')
-
-            if ('\r' !in line) {
-                result.append(line)
-                continue
-            }
-
-            // Split on CR and simulate overwriting.
-            // Each CR resets cursor to column 0. The last non-empty segment wins.
-            val segments = line.split('\r')
-            val lastNonEmpty = segments.lastOrNull { it.isNotEmpty() }
-            if (lastNonEmpty != null) {
-                result.append(lastNonEmpty)
+        val line = StringBuilder()
+        var cursor = 0
+        for (char in text) {
+            when (char) {
+                '\r' -> cursor = 0
+                '\n' -> { result.append(line).append('\n'); line.setLength(0); cursor = 0 }
+                else -> {
+                    if (cursor < line.length) line.setCharAt(cursor, char) else line.append(char)
+                    cursor++
+                }
             }
         }
-
-        return result.toString()
+        return result.append(line).toString()
     }
 }

@@ -117,9 +117,9 @@ object AppLogger {
 
     /**
      * Redirect [System.out] and [System.err] through line-buffered writers
-     * that prepend a timestamp to each line and append it to today's log file
-     * before forwarding the original bytes to the previous stream. The forward
-     * is essential — without it, anything written through stdout (println,
+     * that redact each line, prepend a timestamp to the file copy, and then
+     * forward the safe text to the previous stream. The forward is essential
+     * — without it, anything written through stdout (println,
      * Throwable.printStackTrace, third-party libs that write to System.err)
      * would silently disappear from logcat.
      *
@@ -152,6 +152,10 @@ object AppLogger {
     @Synchronized
     private fun stopCapture() {
         if (!captureActive) return
+        // Flush a partial line through the redacting stream before restoring
+        // the original descriptors; otherwise it would bypass sanitization.
+        System.out.flush()
+        System.err.flush()
         originalOut?.let { System.setOut(it) }
         originalErr?.let { System.setErr(it) }
         logcatTailer?.stop()
@@ -187,7 +191,7 @@ object AppLogger {
             val now = Date()
             val today = dateFormat.format(now)
             val w = getWriter(today)
-            w.println("[LOGCAT] $rawLine")
+            w.println("[LOGCAT] ${LogRedactor.redact(rawLine)}")
             w.flush()
         } catch (_: Exception) {
             // Swallow — must not feed back into logcat or we loop forever.
@@ -196,11 +200,10 @@ object AppLogger {
 
     /**
      * OutputStream wrapper that:
-     *   1. Forwards every byte to [delegate] (the original stdout/stderr) so
-     *      logcat / adb still receives the output unchanged.
-     *   2. Buffers bytes into [buffer] until a `\n` arrives, then writes the
-     *      complete line — prefixed with `[HH:mm:ss.SSS] [LEVEL] [tag]` — to
-     *      the daily log file. Partial lines are flushed on close().
+     *   1. Buffers bytes until a `\n` arrives, then redacts the complete line
+     *      before forwarding it to the original stdout/stderr stream.
+     *   2. Writes the same redacted line — prefixed with a timestamp/channel —
+     *      to the daily log file. Partial lines are redacted on flush().
      */
     private class LineCapturingStream(
         private val delegate: PrintStream,
@@ -209,8 +212,6 @@ object AppLogger {
         private val buffer = ByteArrayOutputStream(256)
 
         override fun write(b: Int) {
-            // Always forward first; any failure to capture must NOT swallow output.
-            delegate.write(b)
             if (b == '\n'.code) {
                 emitLine()
             } else {
@@ -219,7 +220,6 @@ object AppLogger {
         }
 
         override fun write(b: ByteArray, off: Int, len: Int) {
-            delegate.write(b, off, len)
             var lineStart = off
             val end = off + len
             for (i in off until end) {
@@ -233,6 +233,7 @@ object AppLogger {
         }
 
         override fun flush() {
+            if (buffer.size() > 0) emitPartialLine()
             delegate.flush()
         }
 
@@ -243,9 +244,27 @@ object AppLogger {
                 buffer.toString()
             }
             buffer.reset()
+            val safeLine = LogRedactor.redact(line)
+            // Keep stdout/stderr behavior visible to adb/logcat, while
+            // ensuring the forwarded bytes have the same redaction policy.
+            delegate.print(safeLine)
+            delegate.write('\n'.code)
+            delegate.flush()
             // Drop empty lines so the file isn't full of bare timestamps.
+            if (safeLine.isNotEmpty()) writeFileLine(tag, safeLine)
+        }
+
+        private fun emitPartialLine() {
+            val line = try {
+                buffer.toString("UTF-8")
+            } catch (_: Exception) {
+                buffer.toString()
+            }
+            buffer.reset()
             if (line.isEmpty()) return
-            writeFileLine(tag, line)
+            val safeLine = LogRedactor.redact(line)
+            delegate.print(safeLine)
+            writeFileLine(tag, safeLine)
         }
     }
 
@@ -261,10 +280,10 @@ object AppLogger {
             val today = dateFormat.format(now)
             val timestamp = timestampFormat.format(now)
             val w = getWriter(today)
-            w.println("[$timestamp] [$channel] $line")
+            w.println("[$timestamp] [$channel] ${LogRedactor.redact(line)}")
             w.flush()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write captured line: ${e.message}")
+            Log.w(TAG, LogRedactor.redact("Failed to write captured line: ${e.message}"))
         }
     }
 
@@ -304,24 +323,25 @@ object AppLogger {
         val now = Date()
         val today = dateFormat.format(now)
         val timestamp = timestampFormat.format(now)
+        val safeMessage = LogRedactor.redact(message)
 
         // Also output to logcat
         val logcatTag = "Minis.$category"
         when (level) {
-            "ERROR" -> Log.e(logcatTag, message)
-            "WARN" -> Log.w(logcatTag, message)
-            "DEBUG" -> Log.d(logcatTag, message)
-            else -> Log.i(logcatTag, message)
+            "ERROR" -> Log.e(logcatTag, safeMessage)
+            "WARN" -> Log.w(logcatTag, safeMessage)
+            "DEBUG" -> Log.d(logcatTag, safeMessage)
+            else -> Log.i(logcatTag, safeMessage)
         }
 
         // Write to file (only if enabled)
         if (!enabled) return
         try {
             val w = getWriter(today)
-            w.println("[$timestamp] [$level] [$category] $message")
+            w.println("[$timestamp] [$level] [$category] $safeMessage")
             w.flush()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write log: ${e.message}")
+            Log.w(TAG, LogRedactor.redact("Failed to write log: ${e.message}"))
         }
     }
 
@@ -397,7 +417,33 @@ object AppLogger {
     fun readLog(filename: String): String? {
         val dir = resolveLogDir() ?: return null
         val file = File(dir, filename)
-        return if (file.exists()) file.readText() else null
+        return if (file.exists()) LogRedactor.redact(file.readText()) else null
+    }
+
+    /**
+     * Create a redacted, cache-only copy for external sharing. The original
+     * log remains private to the app; callers must share the returned file.
+     * Lines are processed incrementally so a large diagnostic file does not
+     * become one large temporary String.
+     */
+    fun createRedactedShareFile(context: Context, source: File): File? {
+        if (!source.isFile) return null
+        return runCatching {
+            val shareDir = File(context.cacheDir, "share").also { it.mkdirs() }
+            val safeName = source.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val target = File(shareDir, "$safeName.redacted")
+            source.bufferedReader(Charsets.UTF_8).use { reader ->
+                target.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    reader.forEachLine { line ->
+                        writer.append(LogRedactor.redact(line))
+                        writer.newLine()
+                    }
+                }
+            }
+            target
+        }.onFailure { failure ->
+            Log.w(TAG, LogRedactor.redact("Failed to prepare log share copy: ${failure.message}"))
+        }.getOrNull()
     }
 
     /**

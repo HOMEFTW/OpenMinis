@@ -5,6 +5,19 @@ import org.junit.Test
 
 class TerminalSanitizerTest {
 
+    @Test fun `private and intermediate CSI sequences do not leak into text`() {
+        assertEquals("hello", TerminalSanitizer.sanitize("\u001B[?25l\u001B[>0chello\u001B[0 q"))
+    }
+
+    @Test fun `separate OSC sequences preserve the visible hyperlink label`() {
+        assertEquals("label", TerminalSanitizer.sanitize("\u001B]8;;https://example.com\u001B\\label\u001B]8;;\u001B\\"))
+    }
+
+    @Test fun `legitimate null whitespace and blank lines are preserved`() {
+        val raw = "  null\nnullnull\n\n\n  "
+        assertEquals(raw, TerminalSanitizer.sanitize(raw))
+    }
+
     // ==================== sanitize: empty / plain text ====================
 
     @Test

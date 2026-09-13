@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,7 +52,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.FileProvider
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.logging.LogRedactor
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -415,6 +418,7 @@ fun LogDetailScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val shareScope = rememberCoroutineScope()
     var lazyLog by remember(fileName) { mutableStateOf<LazyLogFile?>(null) }
     var loadError by remember(fileName) { mutableStateOf<String?>(null) }
     var loading by remember(fileName) { mutableStateOf(true) }
@@ -424,15 +428,15 @@ fun LogDetailScreen(
         loadError = null
         lazyLog = withContext(Dispatchers.IO) {
             try {
-                val file = File(File(context.filesDir, "logs"), fileName)
-                if (!file.exists()) {
+                val file = resolveLogFile(context, fileName)
+                if (file == null) {
                     loadError = context.getString(R.string.log_not_found)
                     null
                 } else {
                     LazyLogFile.open(file)
                 }
             } catch (e: Exception) {
-                loadError = context.getString(R.string.log_error_reading, e.message ?: "")
+                loadError = context.getString(R.string.log_error_reading, "unable to open log")
                 null
             }
         }
@@ -454,8 +458,15 @@ fun LogDetailScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        val file = File(File(context.filesDir, "logs"), fileName)
-                        if (file.exists()) shareLogFile(context, file)
+                        val file = resolveLogFile(context, fileName)
+                        if (file != null) {
+                            shareScope.launch {
+                                val redactedFile = withContext(Dispatchers.IO) {
+                                    AppLogger.createRedactedShareFile(context, file)
+                                } ?: return@launch
+                                shareLogFile(context, file, redactedFile)
+                            }
+                        }
                     }) {
                         Icon(Icons.Default.Share, contentDescription = stringResource(R.string.common_share))
                     }
@@ -502,7 +513,7 @@ fun LogDetailScreen(
                 ) {
                     items(log.lineCount) { i ->
                         Text(
-                            text = log.readLine(i),
+                            text = LogRedactor.redact(log.readLine(i)),
                             style = TextStyle(
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
@@ -520,9 +531,9 @@ fun LogDetailScreen(
 
 // ─── Share Utilities ───────────────────────────────────────────────────────────
 
-private fun shareLogFile(context: Context, file: File) {
+private suspend fun shareLogFile(context: Context, file: File, redactedFile: File) {
     try {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", redactedFile)
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_STREAM, uri)
@@ -531,7 +542,7 @@ private fun shareLogFile(context: Context, file: File) {
             // alone isn't enough (Issue #17 — SecurityException
             // "Permission Denial: opening provider … requires the
             // provider be exported, or grantUriPermission()").
-            clipData = android.content.ClipData.newRawUri(file.name, uri)
+            clipData = android.content.ClipData.newRawUri(redactedFile.name, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         val chooser = Intent.createChooser(intent, context.getString(R.string.log_share_chooser))
@@ -551,12 +562,24 @@ private fun shareLogFile(context: Context, file: File) {
             "LogShare",
             "FileProvider share failed for ${file.name}: ${e.message} — falling back to EXTRA_TEXT",
         )
-        val text = try { file.readText().take(100_000) } catch (_: Exception) { return }
+        val text = try {
+            withContext(Dispatchers.IO) { LogRedactor.redact(redactedFile.readText()).take(100_000) }
+        } catch (_: Exception) {
+            return
+        }
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, text)
         }
         context.startActivity(Intent.createChooser(intent, context.getString(R.string.log_share_chooser)))
     }
+}
+
+private fun resolveLogFile(context: Context, fileName: String): File? {
+    return runCatching {
+        val root = File(context.filesDir, "logs").canonicalFile
+        val file = File(root, fileName).canonicalFile
+        if (file.parentFile == root && file.extension == "log" && file.isFile) file else null
+    }.getOrNull()
 }
 

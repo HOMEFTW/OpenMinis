@@ -203,6 +203,8 @@ data class QueuedPrompt(
     val id: String,
     val text: String,
     val attachments: List<InputAttachment> = emptyList(),
+    /** Run that owns this queued prompt, when it came from a tracked call. */
+    val runId: String? = null,
 )
 
 /**

@@ -170,7 +170,9 @@ val stageDebugSkillAssets by tasks.registering(Exec::class) {
     if (skillDir.isDirectory) inputs.dir(skillDir)
     if (script.isFile) inputs.file(script)
     outputs.dir(layout.projectDirectory.dir("src/debug/assets/debug-skill"))
-    commandLine("bash", script.absolutePath)
+    // On Windows use Git Bash instead of the unrelated WSL bash launcher.
+    val bashExecutable = providers.gradleProperty("minisBashPath").getOrElse("bash")
+    commandLine(bashExecutable, script.invariantSeparatorsPath)
 }
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") && it.name.contains("Debug") }
     .configureEach { dependsOn(stageDebugSkillAssets) }

@@ -561,6 +561,18 @@ fun ChatScreen(
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
+    var showTaskBudget by remember { mutableStateOf(false) }
+    if (showTaskBudget) TaskBudgetDialog(onDismiss = { showTaskBudget = false })
+    val taskBudget by viewModel.taskBudget.collectAsState()
+    val taskRetryAttempt by viewModel.autoRetryAttempt.collectAsState()
+    val taskRetryCountdown by viewModel.autoRetryCountdown.collectAsState()
+    var showTaskArtifacts by remember { mutableStateOf(false) }
+    if (showTaskArtifacts) TaskArtifactsDialog(
+        sessionId = viewModel.currentSessionId,
+        onDismiss = { showTaskArtifacts = false },
+        onPreview = onPreviewAttachment,
+    )
+
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()
@@ -836,41 +848,37 @@ fun ChatScreen(
     val coroutineScope = rememberCoroutineScope()
 
     var showModelPicker by remember { mutableStateOf(false) }
-    // [T-android-modelpicker-stuck-ripple] Interaction source for the navbar
-    // model-picker row, owned here so the press can be drained when the picker
-    // closes. See the clickable's comment for why the release never arrives on
-    // its own.
-    // [T-android-modelpicker-stuck-ripple] The row owns an InteractionSource
-    // that is REPLACED whenever the picker closes, rather than one whose
-    // presses we try to cancel individually.
-    //
-    // Why replacement: opening the picker puts a modal sheet over this row, so
-    // the pointer's UP never reaches the clickable — Compose emits
-    // PressInteraction.Press with no matching Release and the ripple stays
-    // lit, still visible after the sheet closes as a permanent grey highlight.
-    //
-    // The obvious fix (collect the interactions, remember the open presses,
-    // emit Cancel for each on close) does NOT work reliably, and shipping it
-    // was the first attempt: MutableInteractionSource's flow has replay=0 and
-    // the collector is started by a LaunchedEffect coroutine, so a Press that
-    // lands before that coroutine is dispatched is never observed. The
-    // bookkeeping list is then empty, no Cancel is emitted, and the ripple
-    // stays exactly as stuck as before — while the ripple's own internal
-    // subscriber, registered during composition, did see it.
-    //
-    // Handing the clickable a brand-new source drops every interaction the old
-    // one was holding, with no dependence on collector timing.
-    var modelPickerInteractionGeneration by remember { mutableIntStateOf(0) }
-    val modelPickerInteraction = remember(modelPickerInteractionGeneration) {
-        MutableInteractionSource()
+    val composerConfig by providerRepository.config.collectAsState()
+    val composerEntryId by viewModel.activeEntryId.collectAsState()
+    val composerThinking by viewModel.thinkingLevel.collectAsState()
+    val composerFastEligible by viewModel.showFastModeToggle.collectAsState()
+    val composerFastOn by viewModel.fastModeEnabled.collectAsState()
+    var pendingNonTextSelection by remember { mutableStateOf<PendingNonTextSelection?>(null) }
+
+    fun selectFromComposer(entryId: String?, groupId: String?) {
+        val entry = if (entryId != null) composerConfig.modelEntries.firstOrNull { it.id == entryId }
+            else availableGroups.firstOrNull { it.id == groupId }?.memberEntryIds?.firstNotNullOfOrNull { id ->
+                composerConfig.modelEntries.firstOrNull { it.id == id }
+            }
+        val modalities = entry?.model?.outputModalities.orEmpty().map { it.lowercase() }
+        val modalityLabel = when {
+            "image" in modalities -> context.getString(R.string.model_picker_modality_image)
+            "audio" in modalities -> context.getString(R.string.model_picker_modality_audio)
+            "video" in modalities -> context.getString(R.string.model_picker_modality_video)
+            else -> null
+        }
+        if (entry != null && modalityLabel != null) {
+            pendingNonTextSelection = when {
+                entryId == null && groupId != null -> PendingNonTextSelection.Group(groupId, entry.model.displayName, modalityLabel)
+                groupId != null -> PendingNonTextSelection.GroupEntry(groupId, entry.id, entry.model.displayName, modalityLabel)
+                else -> PendingNonTextSelection.Entry(entry.id, entry.model.displayName, modalityLabel)
+            }
+        } else when {
+            entryId == null && groupId != null -> viewModel.selectGroup(groupId)
+            entryId != null && groupId != null -> viewModel.selectGroupEntry(groupId, entryId)
+            entryId != null -> viewModel.selectEntry(entryId)
+        }
     }
-    LaunchedEffect(showModelPicker) {
-        if (!showModelPicker) modelPickerInteractionGeneration++
-    }
-    // [T-android-thinking-badge-navbar] Whether the thinking-level sheet
-    // (opened by tapping the navbar thinking badge) is presented. Mirrors iOS
-    // AIChatView.showThinkingLevelSheet.
-    var showThinkingLevelSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showSkillsSheet by remember { mutableStateOf(false) }
@@ -2523,7 +2531,7 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    // iOS-style centered layout: "Minis" + group row + provider·model row
+                    // Centered session title; model and reasoning controls live in the composer.
                     Box(
                         modifier = Modifier.fillMaxWidth(),
                         contentAlignment = Alignment.Center,
@@ -2546,14 +2554,6 @@ fun ChatScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color.Red.copy(alpha = 0.35f * fallbackPulseAlpha.value))
-                                // [T-android-topbar-shrink] vertical 4dp→2dp.
-                                // Combined with the expandedHeight drop below,
-                                // closes the dead-space gap between the model
-                                // name row and the TopAppBar bottom edge that
-                                // T-topbar-model-row-clip's 76dp overshoot left
-                                // behind. Horizontal 32dp keeps the fallback
-                                // pulse highlight comfortably padded around
-                                // the longest title.
                                 .padding(horizontal = 32.dp, vertical = 2.dp),
                         ) {
                             // Nav title: current session title when one
@@ -2594,196 +2594,6 @@ fun ChatScreen(
                                     }
                                     .padding(horizontal = 4.dp, vertical = 2.dp),
                             )
-                            // Model picker subtitle: green dot + group +
-                            // provider/model. Tap opens the model picker —
-                            // separated from the title above so tapping the
-                            // title rows opens the rename sheet instead.
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    // [T-android-modelpicker-stuck-ripple] Own the
-                                    // interaction source so the press can be
-                                    // released explicitly. Opening the picker
-                                    // sheet puts a modal window over this row, so
-                                    // the pointer's UP never reaches the clickable:
-                                    // Compose emits PressInteraction.Press with no
-                                    // matching Release and the ripple stays lit
-                                    // behind the sheet — still there after the
-                                    // sheet closes, reading as a permanent grey
-                                    // highlight on the title bar.
-                                    .clickable(
-                                        interactionSource = modelPickerInteraction,
-                                        indication = ripple(),
-                                    ) { showModelPicker = true }
-                                    .padding(horizontal = 4.dp, vertical = 1.dp),
-                            ) {
-                                // Line 1: green dot + group name + dropdown arrow (iOS: "● Default ⌄")
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .background(
-                                                if (modelName.isNotEmpty()) Color(0xFF34C759) else Color(0xFFFF9500),
-                                                CircleShape,
-                                            ),
-                                    )
-                                    // T-android-topbar-group-name-fallback:
-                                    // _selectedGroupName is empty during the
-                                    // brief window before loadSession's group
-                                    // resolve runs, or whenever a binding
-                                    // resolve fails. Falling straight to the
-                                    // "Default" badge string masks the
-                                    // active group's real name (e.g. the
-                                    // onboarding-created "Default Models" or
-                                    // any user-renamed group). Insert a real
-                                    // fallback chain: collected VM value →
-                                    // active/default group name from the live
-                                    // config → terminal badge string. Mirrors
-                                    // the #476 TopBar title fallback pattern
-                                    // (commit b4c88775).
-                                    //
-                                    // [T-android-group-resolve-skip-uncredentialed]
-                                    // ...but only while a group is ACTUALLY
-                                    // bound. This chain used to run
-                                    // unconditionally, so a session that failed
-                                    // to resolve its group — and was therefore
-                                    // running on a model from the new-chat
-                                    // default chain, unrelated to any group —
-                                    // still displayed the default group's name.
-                                    // The header then contradicted the model
-                                    // line right below it and made a real
-                                    // routing failure read as normal operation,
-                                    // which is what made that bug hard to spot.
-                                    // Mirrors iOS, which keys the group glyph
-                                    // off the binding (`isGroupBound`) rather
-                                    // than off a name lookup.
-                                    val groupNameDisplay = selectedGroupName.ifEmpty {
-                                        if (selectedGroupId == null) {
-                                            ""
-                                        } else {
-                                            val defaultGroupId = providerRepository.defaultPrimaryGroupId
-                                            availableGroups.firstOrNull { it.id == defaultGroupId }?.name
-                                                ?: stringResource(R.string.model_picker_default_badge)
-                                        }
-                                    }
-                                    // Drop the whole affordance when no group is
-                                    // bound — an empty label would still leave
-                                    // a dangling chevron pointing at nothing.
-                                    if (groupNameDisplay.isNotEmpty()) {
-                                        Text(
-                                            text = groupNameDisplay,
-                                            fontSize = 12.sp,
-                                            lineHeight = 14.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = ChatColors.secondaryText,
-                                            maxLines = 1,
-                                            style = noFontPad,
-                                        )
-                                        Icon(
-                                            Icons.Default.KeyboardArrowDown,
-                                            contentDescription = null,
-                                            tint = ChatColors.tertiaryText,
-                                            modifier = Modifier.size(14.dp),
-                                        )
-                                    }
-                                }
-                                // Line 2: "provider · model" (iOS: "MiniMax ·
-                                // MiniMax-M2.7") + the thinking-level badge laid
-                                // out as a Row of two SEPARATE tappable siblings
-                                // (mirrors iOS AIChatView row-2 HStack).
-                                //
-                                // [T-android-thinking-badge-navbar] Gesture
-                                // separation: the whole subtitle Column above owns
-                                // `clickable { showModelPicker = true }`, so a tap
-                                // on the model text still opens the model picker.
-                                // The badge declares its OWN `clickable` (see
-                                // ThinkingLevelBadge), and in Compose the innermost
-                                // clickable consumes the down/up events — so a tap
-                                // that lands on the badge opens the thinking sheet
-                                // and never bubbles up to the Column's model-picker
-                                // handler. Two hit targets, zero gesture conflict,
-                                // no pointerInput plumbing needed.
-                                //
-                                // Sizing: the model text takes `weight(1f, fill =
-                                // false)` so it truncates first (Ellipsis) when the
-                                // navbar is narrow; the badge has no weight, so it
-                                // keeps its intrinsic width and always renders in
-                                // full — the level label never gets clipped.
-                                if (providerName.isNotEmpty() || modelName.isNotEmpty()) {
-                                    val thinkingLevelBadgeState by viewModel.thinkingLevel.collectAsState()
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        // [T-codex-fast-mode] ⚡ badge ahead of the
-                                        // resolved model name — small orange circle
-                                        // + white bolt, shown only while Fast Mode
-                                        // is enabled AND the active model is
-                                        // eligible (iOS 9e3c76ef row-3 placement,
-                                        // 09944220 9pt sizing).
-                                        val fastBadgeEligible by viewModel.showFastModeToggle.collectAsState()
-                                        val fastBadgeOn by viewModel.fastModeEnabled.collectAsState()
-                                        if (fastBadgeEligible && fastBadgeOn) {
-                                            Box(
-                                                contentAlignment = Alignment.Center,
-                                                modifier = Modifier
-                                                    .size(11.dp)
-                                                    .background(Color(0xFFFF9500), CircleShape),
-                                            ) {
-                                                Icon(
-                                                    Icons.Default.Bolt,
-                                                    contentDescription = null,
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(9.dp),
-                                                )
-                                            }
-                                        }
-                                        Text(
-                                            text = if (providerName.isNotEmpty() && modelName.isNotEmpty()) {
-                                                "$providerName · $modelName"
-                                            } else {
-                                                modelName.ifEmpty { providerName }
-                                            },
-                                            fontSize = 11.sp,
-                                            lineHeight = 13.sp,
-                                            color = ChatColors.tertiaryText,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = noFontPad,
-                                            // Yield first when space is tight; the
-                                            // badge to the right stays intrinsic.
-                                            modifier = Modifier.weight(1f, fill = false),
-                                        )
-                                        // Show the badge whenever thinking is on,
-                                        // and ALSO when it's Off but the active
-                                        // model supports deep thinking (iOS
-                                        // parity, e6bd75efc): the icon + "Off"
-                                        // pill is then a discoverable tap target
-                                        // for enabling thinking via the level
-                                        // sheet. The Off pill is gated on
-                                        // currentModelSupportsReasoning so
-                                        // non-reasoning models don't grow a dead
-                                        // toggle; an enabled level still shows
-                                        // unconditionally (user may have opted in
-                                        // on an unknown-capability model).
-                                        if (viewModel.availableThinkingLevels.isNotEmpty() &&
-                                            (
-                                                thinkingLevelBadgeState.isEnabled ||
-                                                    viewModel.currentModelSupportsReasoning
-                                            )
-                                        ) {
-                                            ThinkingLevelBadge(
-                                                level = thinkingLevelBadgeState,
-                                                onClick = { showThinkingLevelSheet = true },
-                                            )
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 },
@@ -2820,36 +2630,9 @@ fun ChatScreen(
                         // glyphs now share a baseline to the pixel. Menu is
                         // also the conventional sidebar-toggle icon.
                         //
-                        // [T-android-split-toggle-align] Two corrections, both
-                        // measured on a Mate Pad against the SESSION LIST's
-                        // toolbar rather than this bar's own ⋮ — the toggle sits
-                        // hard against the pane seam, so the icons it is read
-                        // beside are the list's Schedule/Terminal, not the
-                        // kebab at the far end of this bar. Aligned only to the
-                        // kebab, it measured 8px shorter and 3.5px lower than
-                        // its actual neighbours.
-                        //
-                        // 1. `offset(y = -2.dp)`: this bar is 68dp (see
-                        //    expandedHeight below — sized for the 3-row title
-                        //    and NOT reducible without re-triggering
-                        //    T-topbar-model-row-clip), while the list's bar is
-                        //    M3's default 64dp. A TopAppBar centres its
-                        //    navigation icon in its OWN height, so the 4dp
-                        //    difference put this glyph 2dp below the list's row.
-                        //    Offsetting by half the delta lands it on the list's
-                        //    baseline while leaving the taller bar intact.
-                        //
-                        // 2. `size(28.dp)`: Menu's three bars ink only ~12 of
-                        //    their 24dp viewport (bars at y=6/11/16), where the
-                        //    circular Schedule and boxy Terminal fill ~20 of
-                        //    theirs. At a matched box size Menu therefore reads
-                        //    markedly lighter and smaller. Scaling the box to
-                        //    28dp brings its ink to ~14dp, closing most of the
-                        //    optical gap. The IconButton's 48dp touch target is
-                        //    unchanged, so this is purely visual weight.
+                        // Match the standard 64dp toolbar used by the session list.
                         IconButton(
                             onClick = onToggleSidebar,
-                            modifier = Modifier.offset(y = (-2).dp),
                         ) {
                             Icon(
                                 Icons.Filled.Menu,
@@ -2933,6 +2716,15 @@ fun ChatScreen(
                                 leadingIcon = {
                                     Icon(Icons.Default.Language, contentDescription = null)
                                 },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.task_artifacts_title)) },
+                                onClick = { showChatMenu = false; showTaskArtifacts = true },
+                                leadingIcon = { Icon(Icons.Default.Description, contentDescription = null) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.task_budget_title)) },
+                                onClick = { showChatMenu = false; showTaskBudget = true },
                             )
                             // Browse Chat Files (iOS parity) — opens file browser at /var/minis
                             DropdownMenuItem(
@@ -3122,20 +2914,7 @@ fun ChatScreen(
                     containerColor = ChatColors.background.copy(alpha = 0.92f),
                     scrolledContainerColor = ChatColors.background.copy(alpha = 0.92f),
                 ),
-                // [T-android-topbar-shrink] 76dp → 68dp. The earlier
-                // T-topbar-model-row-clip fix bumped 60dp → 76dp to give the
-                // 3-row title (14sp/lh17 + 12sp/lh14 + 11sp/lh13 ≈ 44sp text
-                // + 4dp+2dp+1dp vertical padding ≈ 51dp on mdpi, mid-60s on
-                // xxhdpi) room to breathe — but overshot, leaving visible
-                // dead-space below the model row. This trim pairs with the
-                // outer Column's vertical-padding drop (4dp→2dp above):
-                // budget is now ~44sp text + 2dp+2dp+1dp ≈ 49dp typical,
-                // ~58-62dp at xxhdpi 2.625× rounding. 68dp keeps a 6-10dp
-                // safety margin so the model name still fits at any
-                // user-configured font scale on xhdpi/xxhdpi without
-                // re-clipping (T-topbar-model-row-clip regression check).
-                // Font sizes + lineHeights stay untouched per spec.
-                expandedHeight = 68.dp,
+                expandedHeight = 64.dp,
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -3153,6 +2932,16 @@ fun ChatScreen(
         Column(
             modifier = Modifier.fillMaxSize(),
         ) {
+            if (isStreaming && (taskBudget.nearLimit || taskRetryAttempt > 0)) {
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+                    Text(
+                        text = if (taskRetryAttempt > 0) stringResource(R.string.task_budget_retry, taskRetryAttempt, taskRetryCountdown)
+                            else stringResource(R.string.task_budget_near, taskBudget.round, taskBudget.limit),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
             // Dismiss keyboard when the USER scrolls the messages. Gated on
             // `isUserDragging` (a real finger drag) rather than
             // `listState.isScrollInProgress` — the latter is also true during
@@ -4815,92 +4604,94 @@ fun ChatScreen(
                                     ChatColors.sendButton.copy(alpha = 0.7f)
                                 } else ChatColors.secondaryText
                                 val iconTint = if (isThinkingActive) ChatColors.sendButton else ChatColors.primaryText
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .let {
-                                            if (!isThinking) {
-                                                it.clickable {
-                                                    // [T-android-slash-menu-clears-input] Pass the
-                                                    // LIVE input so an action command keeps the
-                                                    // user's body text instead of wiping it.
-                                                    viewModel.setInputText(viewModel.executeSlashCommand(cmd, inputText))
-                                                    // For Skill rows, "/<name> "
-                                                    // is a typing aid — the user
-                                                    // still needs to type
-                                                    // arguments. Bring the IME
-                                                    // back up + grab focus so
-                                                    // they can keep typing
-                                                    // without an extra tap on
-                                                    // the composer.
-                                                    if (cmd.isSkill) {
-                                                        try {
-                                                            inputFocusRequester.requestFocus()
-                                                        } catch (_: IllegalStateException) {
-                                                            // FocusRequester not attached yet.
+                                Column(Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .let {
+                                                if (!isThinking) {
+                                                    it.clickable {
+                                                        // [T-android-slash-menu-clears-input] Pass the
+                                                        // LIVE input so an action command keeps the
+                                                        // user's body text instead of wiping it.
+                                                        viewModel.setInputText(viewModel.executeSlashCommand(cmd, inputText))
+                                                        // For Skill rows, "/<name> "
+                                                        // is a typing aid — the user
+                                                        // still needs to type
+                                                        // arguments. Bring the IME
+                                                        // back up + grab focus so
+                                                        // they can keep typing
+                                                        // without an extra tap on
+                                                        // the composer.
+                                                        if (cmd.isSkill) {
+                                                            try {
+                                                                inputFocusRequester.requestFocus()
+                                                            } catch (_: IllegalStateException) {
+                                                                // FocusRequester not attached yet.
+                                                            }
+                                                            keyboardController?.show()
                                                         }
-                                                        keyboardController?.show()
                                                     }
-                                                }
-                                            } else if (thinkingSupported) {
-                                                it.clickable {
-                                                    val newLevel = if (thinkingLevelState.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
-                                                    viewModel.setThinkingLevel(newLevel)
-                                                }
-                                            } else it
-                                        }
-                                        // [T-android-slash-menu-density] Tighter
-                                        // vertical padding (10→7) so slash rows
-                                        // read as compact as iOS, not sparse.
-                                        .padding(horizontal = 14.dp, vertical = 7.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(
-                                        imageVector = cmd.icon,
-                                        contentDescription = null,
-                                        tint = iconTint,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "/${cmd.title.lowercase()}",
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = titleColor,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        // Cap to one line + ellipsis (mirrors
-                                        // iOS T-slash-picker-product-rules
-                                        // 051896e2). Long Skill descriptions
-                                        // would otherwise stretch the row,
-                                        // breaking the locked 4-row band and
-                                        // crowding the menu visually.
-                                        Text(
-                                            text = cmd.subtitle,
-                                            fontSize = 11.sp,
-                                            color = subtitleColor,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                    if (cmd.id == "memory") {
+                                                } else if (thinkingSupported) {
+                                                    it.clickable {
+                                                        val newLevel = if (thinkingLevelState.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
+                                                        viewModel.setThinkingLevel(newLevel)
+                                                    }
+                                                } else it
+                                            }
+                                            // [T-android-slash-menu-density] Tighter
+                                            // vertical padding (10→7) so slash rows
+                                            // read as compact as iOS, not sparse.
+                                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
                                         Icon(
-                                            imageVector = if (memoryOnState) Icons.Default.CheckCircle else Icons.Default.Block,
+                                            imageVector = cmd.icon,
                                             contentDescription = null,
-                                            tint = if (memoryOnState) ChatColors.sendButton else ChatColors.secondaryText,
+                                            tint = iconTint,
                                             modifier = Modifier.size(18.dp),
                                         )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "/${cmd.title.lowercase()}",
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = titleColor,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            // Cap to one line + ellipsis (mirrors
+                                            // iOS T-slash-picker-product-rules
+                                            // 051896e2). Long Skill descriptions
+                                            // would otherwise stretch the row,
+                                            // breaking the locked 4-row band and
+                                            // crowding the menu visually.
+                                            Text(
+                                                text = cmd.subtitle,
+                                                fontSize = 11.sp,
+                                                color = subtitleColor,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        if (cmd.id == "memory") {
+                                            Icon(
+                                                imageVector = if (memoryOnState) Icons.Default.CheckCircle else Icons.Default.Block,
+                                                contentDescription = null,
+                                                tint = if (memoryOnState) ChatColors.sendButton else ChatColors.secondaryText,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
                                     }
                                     if (isThinking && thinkingSupported) {
-                                        ThinkingLevelPicker(
-                                            current = thinkingLevelState,
-                                            // [T-android-thinking-level-arch] Only
-                                            // offer tiers the bound model supports.
-                                            availableLevels = viewModel.availableThinkingLevels,
-                                            onSelect = { level -> viewModel.setThinkingLevel(level) },
-                                        )
+                                        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                            ThinkingLevelPicker(
+                                                current = thinkingLevelState,
+                                                availableLevels = viewModel.availableThinkingLevels,
+                                                onSelect = viewModel::setThinkingLevel,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -6026,6 +5817,29 @@ fun ChatScreen(
                         )
                     }
 
+                    ComposerModelControls(
+                        modelName = modelName,
+                        groupName = selectedGroupName,
+                        providerName = providerName,
+                        config = composerConfig,
+                        groups = availableGroups,
+                        selectedGroupId = selectedGroupId,
+                        activeEntryId = composerEntryId,
+                        currentThinking = composerThinking,
+                        availableLevels = viewModel.availableThinkingLevels,
+                        supportsThinking = viewModel.currentModelSupportsReasoning,
+                        fastMode = composerFastEligible && composerFastOn,
+                        onSelectEntry = { entryId ->
+                            val groupId = selectedGroupId?.takeIf { id ->
+                                availableGroups.any { it.id == id && entryId in it.memberEntryIds }
+                            }
+                            selectFromComposer(entryId, groupId)
+                        },
+                        onSelectGroup = { selectFromComposer(null, it) },
+                        onSelectThinking = viewModel::setThinkingLevel,
+                        onMoreModels = { showModelPicker = true },
+                    )
+
                     // Button row below text field (iOS layout: + / ... mic send)
                     Row(
                         modifier = Modifier
@@ -6835,22 +6649,6 @@ fun ChatScreen(
         )
     }
 
-    // [T-android-thinking-badge-navbar] Thinking-level sheet opened by tapping
-    // the navbar thinking badge. Mirrors iOS ThinkingLevelSheetView: an Off row
-    // plus every level the current model supports, each selectable.
-    if (showThinkingLevelSheet) {
-        val currentThinkingLevel by viewModel.thinkingLevel.collectAsState()
-        ThinkingLevelSheet(
-            currentLevel = currentThinkingLevel,
-            availableLevels = viewModel.availableThinkingLevels,
-            onSelect = { level ->
-                viewModel.setThinkingLevel(level)
-                showThinkingLevelSheet = false
-            },
-            onDismiss = { showThinkingLevelSheet = false },
-        )
-    }
-
     // Model Picker bottom sheet
     if (showModelPicker) {
         val config by providerRepository.config.collectAsState()
@@ -6861,9 +6659,6 @@ fun ChatScreen(
         // drive an Agent loop, so we steer the user toward a text-output model
         // (or, if they really want it, hint at adding it as a tool inside an
         // Agent loop instead).
-        var pendingNonTextSelection by remember {
-            mutableStateOf<PendingNonTextSelection?>(null)
-        }
         val resolveImageLabel = stringResource(R.string.model_picker_modality_image)
         val resolveAudioLabel = stringResource(R.string.model_picker_modality_audio)
         val resolveVideoLabel = stringResource(R.string.model_picker_modality_video)
@@ -6940,30 +6735,31 @@ fun ChatScreen(
             },
         )
 
-        pendingNonTextSelection?.let { pending ->
-            MinisAlertDialog(
-                onDismissRequest = { pendingNonTextSelection = null },
-                title = stringResource(R.string.model_picker_non_text_warning_title),
-                text = stringResource(
-                    R.string.model_picker_non_text_warning_body,
-                    pending.modelDisplayName,
-                    pending.modalityLabel,
-                    pending.modalityLabel,
-                ),
-                confirmText = stringResource(R.string.model_picker_non_text_warning_use_anyway),
-                dismissText = stringResource(R.string.model_picker_non_text_warning_choose_other),
-                onConfirm = {
-                    when (val sel = pending) {
-                        is PendingNonTextSelection.Group -> viewModel.selectGroup(sel.groupId)
-                        is PendingNonTextSelection.GroupEntry ->
-                            viewModel.selectGroupEntry(sel.groupId, sel.entryId)
-                        is PendingNonTextSelection.Entry -> viewModel.selectEntry(sel.entryId)
-                    }
-                    pendingNonTextSelection = null
-                    showModelPicker = false
-                },
-            )
-        }
+    }
+
+    pendingNonTextSelection?.let { pending ->
+        MinisAlertDialog(
+            onDismissRequest = { pendingNonTextSelection = null },
+            title = stringResource(R.string.model_picker_non_text_warning_title),
+            text = stringResource(
+                R.string.model_picker_non_text_warning_body,
+                pending.modelDisplayName,
+                pending.modalityLabel,
+                pending.modalityLabel,
+            ),
+            confirmText = stringResource(R.string.model_picker_non_text_warning_use_anyway),
+            dismissText = stringResource(R.string.model_picker_non_text_warning_choose_other),
+            onConfirm = {
+                when (val sel = pending) {
+                    is PendingNonTextSelection.Group -> viewModel.selectGroup(sel.groupId)
+                    is PendingNonTextSelection.GroupEntry ->
+                        viewModel.selectGroupEntry(sel.groupId, sel.entryId)
+                    is PendingNonTextSelection.Entry -> viewModel.selectEntry(sel.entryId)
+                }
+                pendingNonTextSelection = null
+                showModelPicker = false
+            },
+        )
     }
 
     // Offload permission dialog
@@ -7090,149 +6886,3 @@ fun ChatScreen(
 // CompactSummarySheet / parseInlineMarkdown / rememberBrowserLiveSnapshot /
 // ResumeBanner / SwipeToSendHint moved verbatim to ChatMiscViews.kt.
 // Sun May 24 11:01:25 CST 2026
-
-/**
- * [T-android-thinking-badge-navbar] Compact thinking-level pill shown on the
- * navbar's "provider · model" line (iOS AIChatView.thinkingLevelBadge parity).
- *
- * Deliberately smaller than the 11sp model-name text next to it — a 9dp
- * lightbulb + 9sp level label — so it reads as secondary auxiliary info and
- * never crowds out the model name. Uses [Icons.Default.Lightbulb], the same
- * glyph the `/thinking` slash command uses.
- *
- * Colors mirror iOS AIChatView.thinkingLevelBadge exactly — a NEUTRAL look, not
- * an accent one. iOS uses `foregroundStyle(secondaryText)` on a
- * `Capsule().fill(Color.secondary.opacity(0.10))` background; the Compose
- * equivalents are `onSurfaceVariant` (secondary grey) for the icon+label and
- * `onSurface.copy(alpha = 0.08f)` (a faint translucent grey) for the capsule.
- * We deliberately do NOT use `primary` / `primaryContainer` / the app's blue
- * thinking accent here: the badge is passive status ("thinking is on, at this
- * level"), not a call-to-action, so a blue highlight would over-emphasize it
- * and clash with the grey "provider · model" text it sits beside. Both colors
- * are theme tokens, so the badge adapts to light/dark automatically.
- *
- * Also mounted when thinking is Off on a reasoning-capable model (iOS parity,
- * e6bd75efc): the pill then reads icon + "Off" as a tap target for enabling
- * deep thinking. The icon is dimmed to 0.4 alpha in that state, matching the
- * Off-row convention in [ThinkingLevelSheet].
- *
- * It carries its OWN clickable (which consumes the tap) so a tap on the badge
- * opens the thinking-level sheet instead of the model picker owned by the
- * enclosing subtitle Column — see the call site for the full gesture-separation
- * rationale.
- */
-@Composable
-private fun ThinkingLevelBadge(
-    level: com.openminis.app.data.model.ThinkingLevel,
-    onClick: () -> Unit,
-) {
-    val context = LocalContext.current
-    // Secondary grey for icon + label (iOS secondaryText parity) — no accent.
-    val badgeColor = MaterialTheme.colorScheme.onSurfaceVariant
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            // Faint translucent-grey capsule (iOS Color.secondary.opacity(0.10)).
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-            // Own clickable → consumes the tap, opens the thinking sheet.
-            .clickable(onClick = onClick)
-            .padding(horizontal = 5.dp, vertical = 1.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Default.Lightbulb,
-            contentDescription = null,
-            // Dimmed in the Off state (sheet Off-row convention) so "Off" reads
-            // as "thinking disabled" at a glance.
-            tint = if (level.isEnabled) badgeColor else badgeColor.copy(alpha = 0.4f),
-            modifier = Modifier.size(9.dp),
-        )
-        Text(
-            text = level.localizedName(context),
-            fontSize = 9.sp,
-            lineHeight = 11.sp,
-            fontWeight = FontWeight.Medium,
-            color = badgeColor,
-            maxLines = 1,
-        )
-    }
-}
-
-/**
- * [T-android-thinking-badge-navbar] Bottom-sheet thinking-level selector opened
- * from [ThinkingLevelBadge]. Mirrors iOS ThinkingLevelSheetView: an Off row
- * followed by every level the current model supports; the active level shows a
- * trailing check. Selecting any row calls [onSelect] (which also dismisses).
- */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-@Composable
-private fun ThinkingLevelSheet(
-    currentLevel: com.openminis.app.data.model.ThinkingLevel,
-    availableLevels: List<com.openminis.app.data.model.ThinkingLevel>,
-    onSelect: (com.openminis.app.data.model.ThinkingLevel) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    // Off is always offered (turns thinking off); availableLevels already
-    // excludes Off, so prepend it. De-dup defensively in case a caller ever
-    // includes it.
-    val rows = remember(availableLevels) {
-        listOf(com.openminis.app.data.model.ThinkingLevel.OFF) +
-            availableLevels.filter { it != com.openminis.app.data.model.ThinkingLevel.OFF }
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-            Text(
-                text = stringResource(R.string.thinking_level_sheet_title),
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = ChatColors.primaryText,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
-            HorizontalDivider(color = ChatColors.toolBorder, thickness = 0.5.dp)
-            val context = LocalContext.current
-            rows.forEach { level ->
-                // "Off selected" = the current level is disabled; otherwise an
-                // exact match.
-                val isSelected = if (level == com.openminis.app.data.model.ThinkingLevel.OFF) {
-                    !currentLevel.isEnabled
-                } else {
-                    currentLevel == level
-                }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelect(level) }
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lightbulb,
-                        contentDescription = null,
-                        tint = ChatColors.thinking.copy(
-                            alpha = if (level == com.openminis.app.data.model.ThinkingLevel.OFF) 0.4f else 1f,
-                        ),
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = level.localizedName(context),
-                        fontSize = 15.sp,
-                        color = ChatColors.primaryText,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (isSelected) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = null,
-                            tint = ChatColors.thinking,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-

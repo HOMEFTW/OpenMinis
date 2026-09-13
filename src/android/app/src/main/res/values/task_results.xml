@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="task_artifacts_file_type">%1$s file</string>
+    <string name="task_artifacts_generic_type">File</string>
+    <string name="task_artifacts_title">Task results</string>
+    <string name="task_artifacts_description">Images, documents and other files in this conversation, newest first.</string>
+    <string name="task_artifacts_failed">Could not load files. Try refreshing.</string>
+    <string name="task_artifacts_empty">No files in this conversation yet.</string>
+    <string name="task_artifacts_share">Share</string>
+    <string name="task_artifacts_refresh">Refresh</string>
+    <string name="task_artifacts_close">Close</string>
+    <string name="task_artifacts_limited">Showing a limited selection. Use Browse files for the complete folder.</string>
+</resources>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="provider_call_check_section">Connection test</string>
+    <string name="provider_call_check_footer">Send one short text request to a selected model to verify this provider. The request is never sent automatically and may incur provider charges.</string>
+    <string name="provider_call_check_action">Test a model call</string>
+    <string name="provider_call_check_no_text_model">No available text models</string>
+    <string name="provider_call_check_select_model">Select a model</string>
+    <string name="provider_call_check_disclosure_title">Test provider connection?</string>
+    <string name="provider_call_check_disclosure_message">This sends one short text request to %1$s using %2$s. Your provider may charge for this request.</string>
+    <string name="provider_call_check_send">Send test</string>
+    <string name="provider_call_check_cancel">Cancel request</string>
+    <string name="provider_call_check_close">Close</string>
+    <string name="provider_call_check_try_again">Try again</string>
+    <string name="provider_call_check_running">Testing %1$s...</string>
+    <string name="provider_call_check_success">Response received in %1$d ms</string>
+    <string name="provider_call_check_output">Output</string>
+    <string name="provider_call_check_empty_output">(empty response)</string>
+    <string name="provider_call_check_failure">Request failed after %1$d ms</string>
+    <string name="provider_call_check_cancelled">Test cancelled</string>
+</resources>

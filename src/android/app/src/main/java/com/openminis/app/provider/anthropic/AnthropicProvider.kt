@@ -45,6 +45,11 @@ class AnthropicProvider(
      * request. Only set for custom-base Anthropic-compat instances.
      */
     private val customUserAgent: String? = null,
+    /**
+     * Synthetic OAuth prompt used by same-module tests. Production callers
+     * leave this null so the build-configured value is read only for OAuth.
+     */
+    internal val oauthIdentifierPrompt: String? = null,
 ) : LLMProvider {
     override val name = "Anthropic"
     override val defaultMaxOutputTokens: Int get() = 64_000
@@ -286,8 +291,9 @@ class AnthropicProvider(
      *   Returns null when the prompt is null/empty (iOS parity — no empty `system` field).
      */
     internal fun resolveSystemPrompt(userPrompt: String?): JSONArray? {
-        val claudeCodePrefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
         if (isOAuth) {
+            val claudeCodePrefix = oauthIdentifierPrompt
+                ?: com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
             // Strip the prefix if the caller already prepended it; the tail is the real user prompt.
             val tail = when {
                 userPrompt == null -> ""

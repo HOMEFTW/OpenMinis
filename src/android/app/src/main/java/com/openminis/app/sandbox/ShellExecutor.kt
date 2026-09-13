@@ -99,7 +99,7 @@ object ShellExecutor {
     ): ShellResult = withContext(Dispatchers.IO) {
         val prootCommand = PRootKernel.buildProotCommand(command)
 
-        Log.d(TAG, "Executing: $command")
+        Log.d(TAG, "Executing: ${com.openminis.app.logging.LogRedactor.redact(command)}")
 
         val startTime = System.currentTimeMillis()
 
@@ -176,13 +176,13 @@ object ShellExecutor {
                 }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            Log.w(TAG, "Command timed out after ${timeout}ms: $command")
+            Log.w(TAG, "Command timed out after ${timeout}ms: ${com.openminis.app.logging.LogRedactor.redact(command)}")
             currentProcess?.destroyForcibly()
             currentProcess = null
             output.appendLine("\n[Command timed out after ${timeout / 1000}s]")
             exitCode = 124 // Standard timeout exit code
         } catch (e: Exception) {
-            Log.e(TAG, "Command failed: $command", e)
+            Log.e(TAG, "Command failed: ${com.openminis.app.logging.LogRedactor.redact(command)} (${e.javaClass.simpleName})")
             currentProcess?.destroyForcibly()
             currentProcess = null
             output.appendLine("\n[Error: ${e.message}]")

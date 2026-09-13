@@ -755,6 +755,8 @@
     <string name="log_error_reading">Error reading log: %1$s</string>
     <string name="log_share_chooser">Share Log</string>
     <string name="log_share_all_chooser">Share Logs</string>
+    <string name="credential_storage_warning_title">Secure credential storage is temporarily unavailable</string>
+    <string name="credential_storage_warning_message">New credentials are kept only in this app process and will be lost if the app restarts. Existing encrypted data was left untouched; try again after the device unlocks.</string>
     <string name="memory_title">Memory</string>
     <string name="settings_memory_global_header">Default</string>
     <string name="settings_memory_global_footer">Per-session toggles (set via the /memory slash command or the Session Memory sheet) override this default. Existing sessions are not affected when you flip this switch.</string>

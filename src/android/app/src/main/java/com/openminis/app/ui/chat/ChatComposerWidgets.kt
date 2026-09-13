@@ -961,86 +961,12 @@ internal fun FloatingToolStatusBar(
     }
 }
 
-/**
- * Inline 5-segment picker rendered on the right side of the `/thinking` row.
- * Mirrors iOS `thinkingLevelPicker`: the active level shows a filled pill;
- * the OFF pill uses a muted background, the others use the accent color.
- */
+/** The slash-command panel uses the same stepped slider as the composer. */
 @Composable
 internal fun ThinkingLevelPicker(
     current: ThinkingLevel,
-    // [T-android-thinking-level-arch] Levels the CURRENT model actually supports
-    // (OFF + everything up to its effectiveMaxThinkingLevel). Passed in so the
-    // picker only ever offers reachable tiers; the row scrolls horizontally so
-    // the extra GPT-5.6 tiers (MAX/ULTRA) don't overflow a narrow composer.
     availableLevels: List<ThinkingLevel>,
     onSelect: (ThinkingLevel) -> Unit,
 ) {
-    val context = LocalContext.current
-    val scrollState = rememberScrollState()
-    // [T-android-thinking-level-arch] Clamped state: the stored level is higher
-    // than what the current model can reach (e.g. ULTRA persisted, then the user
-    // switched to DeepSeek which caps at XHIGH). `current` then isn't in
-    // availableLevels, so no capsule would match `level == current` and the row
-    // would look entirely unselected — as if thinking were off. Mirror iOS
-    // (fb349342): highlight the highest available capsule in orange with an
-    // up-arrow, signalling "your setting is higher, this model caps here".
-    val maxAvailable = availableLevels.lastOrNull { it != ThinkingLevel.OFF }
-    val isClamped = current.isEnabled && maxAvailable != null && current.rank > maxAvailable.rank
-    val clampOrange = Color(0xFFFF9500)
-    Row(
-        modifier = Modifier
-            .background(
-                ChatColors.secondaryText.copy(alpha = 0.12f),
-                RoundedCornerShape(6.dp),
-            )
-            .clip(RoundedCornerShape(6.dp))
-            .horizontalScroll(scrollState),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        availableLevels.forEach { level ->
-            val isExactMatch = level == current
-            val isClampedHighlight = isClamped && level == maxAvailable
-            val isHighlighted = isExactMatch || isClampedHighlight
-            val bg = when {
-                // [T-android-thinking-picker-ui] Clamped tier → orange; normal
-                // selection → blue (ChatColors.thinking, the theme-adaptive
-                // system blue 007AFF/0A84FF), matching iOS's Color.blue. The
-                // old ChatColors.sendButton was black in light / white in dark,
-                // so the selected capsule read as unselected. (OFF no longer
-                // appears in availableLevels, so its former branch is gone.)
-                isClampedHighlight -> clampOrange.copy(alpha = 0.75f)
-                isHighlighted -> ChatColors.thinking
-                else -> Color.Transparent
-            }
-            // White text on both the blue and orange fills (readable in both
-            // themes); grey when unselected.
-            val fg = if (isHighlighted) Color.White else ChatColors.secondaryText
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .background(bg)
-                    // [T-android-thinking-level-arch] Tapping the already-
-                    // highlighted capsule toggles thinking OFF (covers both exact
-                    // and clamped highlight); otherwise selects the tapped level.
-                    .clickable { onSelect(if (isHighlighted) ThinkingLevel.OFF else level) }
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    text = level.localizedName(context),
-                    fontSize = 11.sp,
-                    fontWeight = if (isHighlighted) FontWeight.Bold else FontWeight.Normal,
-                    color = fg,
-                )
-                if (isClampedHighlight) {
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowUp,
-                        contentDescription = null,
-                        tint = fg,
-                        modifier = Modifier.size(12.dp),
-                    )
-                }
-            }
-        }
-    }
+    ThinkingLevelSlider(current, availableLevels, onSelect)
 }

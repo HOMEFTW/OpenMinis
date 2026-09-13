@@ -144,15 +144,15 @@ class ModelUseOffloadHandler(
         // relative path onto the rootfs root (e.g. "gen_output.json" ->
         // <rootfs>/gen_output.json) and report an unreadable bare-relative path
         // that read_image later rejects. Fail fast with a clear message asking
-        // for an absolute path instead. `file://` URLs are already absolute.
-        if (outputPath != null && !outputPath.startsWith("/") && !outputPath.startsWith("file://")) {
+        // for an absolute Linux path instead. URI output is not supported.
+        if (outputPath != null && !outputPath.startsWith("/")) {
             return NativeOffloadResult(
                 2,
                 JSONObject().put("error", "invalid_output_path")
                     .put(
                         "message",
                         "--output must be an absolute path (e.g. /var/minis/workspace/out.jpg). " +
-                            "Got the relative path '$outputPath', which cannot be resolved because " +
+                            "Got the unsupported path '$outputPath'. Use a Linux path, not a file URI; " +
                             "minis-model-use does not inherit the shell's working directory.",
                     )
                     .toString() + "\n",
@@ -186,11 +186,14 @@ class ModelUseOffloadHandler(
         }
 
         // System prompt: --system takes precedence over --system-file
-        val explicitSystem = args.get("system") ?: args.get("system-file")?.let { readLinuxPath(it) }
+        val explicitSystem = args.get("system") ?: args.get("system-file")?.let {
+            readLinuxPath(it, request.sessionId)
+                ?: return NativeOffloadResult(2, "minis-model-use run: cannot read --system-file '$it'\n")
+        }
 
         // Parse input messages: --input <path> | stdin
         val inputText = when {
-            args.get("input") != null -> readLinuxPath(args.get("input")!!)
+            args.get("input") != null -> readLinuxPath(args.get("input")!!, request.sessionId)
                 ?: return NativeOffloadResult(
                     2,
                     "minis-model-use run: cannot read --input '${args.get("input")}'\n",
@@ -198,7 +201,7 @@ class ModelUseOffloadHandler(
             else -> ""
         }
         val parsed = try {
-            parseMessages(inputText)
+            parseMessages(inputText, request.sessionId)
         } catch (e: ImageInputError) {
             return NativeOffloadResult(
                 2,
@@ -398,83 +401,16 @@ class ModelUseOffloadHandler(
             )
         }
 
-        // Write output — media-first if the model returned image/audio/video and
-        // --output has a media extension, else fall back to text. Mirrors iOS
-        // ModelUseOffloadBridge.performRun (non-streaming branch).
-        val sessionId = request.sessionId
-        val mediaFiles = JSONArray()
-        val ts = System.currentTimeMillis() / 1000
-        val modelSlug = entry.model.id.replace("/", "_")
-        if (outputPath != null) {
-            // [T-android-model-use-session-scoped-write] Prefer the caller
-            // session's own host dir; fall back to the global resolver only when
-            // sessionId is null or the path isn't a session-scoped /var/minis
-            // subdir. Guaranteed absolute here (relative --output rejected above).
-            val hostFile = sessionScopedHostFile(outputPath, sessionId)
-                ?: PRootKernel.resolveHostPath(outputPath)
-                ?: return NativeOffloadResult(
-                    2,
-                    "minis-model-use run: cannot resolve --output '$outputPath'\n",
-                )
-            val firstMedia = response.mediaAttachments.firstOrNull()
-            val outputIsMedia = isImageExt(outputExt) || isAudioExt(outputExt) || isVideoExt(outputExt)
-            if (firstMedia != null && outputIsMedia) {
-                hostFile.parentFile?.mkdirs()
-                hostFile.writeBytes(firstMedia.data)
-                logModelUseWrite(outputPath, hostFile, sessionId)
-                mediaFiles.put(JSONObject().apply {
-                    put("type", firstMedia.type.value)
-                    put("mime_type", firstMedia.mimeType)
-                    put("path", outputPath)
-                    put("size", firstMedia.data.size)
-                })
-            } else {
-                Log.d(
-                    "ModelUseImage",
-                    "handler text fallback: path=$outputPath textLen=${response.text.length} " +
-                        "mediaAttachments=${response.mediaAttachments.size} outputIsMedia=$outputIsMedia",
-                )
-                hostFile.parentFile?.mkdirs()
-                hostFile.writeText(response.text)
-            }
-        } else if (response.mediaAttachments.isNotEmpty()) {
-            // [T-android-model-use-session-scoped-write] Auto-save to the caller
-            // session's attachments dir, not the global (last-writer-wins) mount.
-            val attachDir = sessionScopedHostFile("/var/minis/attachments", sessionId)
-                ?: PRootKernel.resolveHostPath("/var/minis/attachments")
-            if (attachDir != null) {
-                attachDir.mkdirs()
-                for ((idx, media) in response.mediaAttachments.withIndex()) {
-                    val ext = mimeToExt(media.mimeType)
-                    val fileName = "model-use-$modelSlug-$ts-$idx.$ext"
-                    val hostFile = File(attachDir, fileName)
-                    hostFile.writeBytes(media.data)
-                    val responsePath = "/var/minis/attachments/$fileName"
-                    logModelUseWrite(responsePath, hostFile, sessionId)
-                    mediaFiles.put(JSONObject().apply {
-                        put("type", media.type.value)
-                        put("mime_type", media.mimeType)
-                        put("path", responsePath)
-                        put("size", media.data.size)
-                    })
-                }
-            }
-        }
-
-        val body = JSONObject().apply {
-            put("model", entry.model.id)
-            put("text", response.text)
-            response.usage?.let { u ->
-                put("usage", JSONObject().apply {
-                    put("input_tokens", u.inputTokens)
-                    put("output_tokens", u.outputTokens)
-                })
-            }
-            if (outputPath != null) put("output_file", outputPath)
-            if (mediaFiles.length() > 0) put("media_files", mediaFiles)
-        }
         return attachCallFeedback(
-            NativeOffloadResult(0, body.toString(2) + "\n"),
+            saveModelUseResult(
+                modelId = entry.model.id,
+                response = response,
+                outputPath = outputPath,
+                outputExt = outputExt,
+                resolveFile = { path -> sessionScopedHostFile(path, request.sessionId) ?: PRootKernel.resolveHostPath(path) },
+                mimeToExt = ::mimeToExt,
+                logWrite = { path, file -> logModelUseWrite(path, file, request.sessionId) },
+            ),
             callWarnings, appliedExtras,
         )
     }
@@ -1192,69 +1128,16 @@ class ModelUseOffloadHandler(
         outputExt: String,
         endpointUsed: String,
         sessionId: String?,
-    ): NativeOffloadResult {
-        val mediaFiles = JSONArray()
-        val firstMedia = response.mediaAttachments.firstOrNull()
-        val ts = System.currentTimeMillis() / 1000
-        val modelSlug = entry.model.id.replace("/", "_")
-        if (outputPath != null) {
-            // [T-android-model-use-session-scoped-write] Session-scoped first,
-            // global resolver as fallback. --output is absolute here (relative
-            // rejected in cmdRun before the API call).
-            val hostFile = sessionScopedHostFile(outputPath, sessionId)
-                ?: PRootKernel.resolveHostPath(outputPath)
-                ?: return NativeOffloadResult(
-                    2,
-                    "minis-model-use run: cannot resolve --output '$outputPath'\n",
-                )
-            val outputIsMedia = isImageExt(outputExt)
-            if (firstMedia != null && outputIsMedia) {
-                hostFile.parentFile?.mkdirs()
-                hostFile.writeBytes(firstMedia.data)
-                logModelUseWrite(outputPath, hostFile, sessionId)
-                mediaFiles.put(JSONObject().apply {
-                    put("type", firstMedia.type.value)
-                    put("mime_type", firstMedia.mimeType)
-                    put("path", outputPath)
-                    put("size", firstMedia.data.size)
-                })
-            } else {
-                hostFile.parentFile?.mkdirs()
-                hostFile.writeText(response.text)
-            }
-        } else if (response.mediaAttachments.isNotEmpty()) {
-            // [T-android-model-use-session-scoped-write] Auto-save to the caller
-            // session's attachments dir, not the global (last-writer-wins) mount.
-            val attachDir = sessionScopedHostFile("/var/minis/attachments", sessionId)
-                ?: PRootKernel.resolveHostPath("/var/minis/attachments")
-            if (attachDir != null) {
-                attachDir.mkdirs()
-                for ((idx, media) in response.mediaAttachments.withIndex()) {
-                    val ext = mimeToExt(media.mimeType)
-                    val fileName = "model-use-$modelSlug-$ts-$idx.$ext"
-                    val hostFile = File(attachDir, fileName)
-                    hostFile.writeBytes(media.data)
-                    val responsePath = "/var/minis/attachments/$fileName"
-                    logModelUseWrite(responsePath, hostFile, sessionId)
-                    mediaFiles.put(JSONObject().apply {
-                        put("type", media.type.value)
-                        put("mime_type", media.mimeType)
-                        put("path", responsePath)
-                        put("size", media.data.size)
-                    })
-                }
-            }
-        }
-        val body = JSONObject().apply {
-            put("model", entry.model.id)
-            put("text", response.text)
-            put("image_endpoint", endpointUsed)
-            if (outputPath != null) put("output_file", outputPath)
-            if (mediaFiles.length() > 0) put("media_files", mediaFiles)
-            if (firstMedia == null) put("warning", "Image endpoint returned no image data.")
-        }
-        return NativeOffloadResult(0, body.toString(2) + "\n")
-    }
+    ): NativeOffloadResult = saveModelUseImageResult(
+        modelId = entry.model.id,
+        response = response,
+        outputPath = outputPath,
+        outputExt = outputExt,
+        endpointUsed = endpointUsed,
+        resolveFile = { path -> sessionScopedHostFile(path, sessionId) ?: PRootKernel.resolveHostPath(path) },
+        mimeToExt = ::mimeToExt,
+        logWrite = { path, file -> logModelUseWrite(path, file, sessionId) },
+    )
 
     /**
      * [T-android-model-use-session-scoped-write] Resolve a `/var/minis/<sub>/...`
@@ -1274,15 +1157,9 @@ class ModelUseOffloadHandler(
      * falls back to the global resolveHostPath and logs the degrade) or the path
      * isn't a session-scoped `/var/minis/<sub>` path.
      */
-    private fun sessionScopedHostFile(linuxPath: String, sessionId: String?): File? {
-        if (sessionId == null) return null
-        val m = Regex("^/var/minis/(attachments|offloads|workspace|browser)(/.*)?$").find(linuxPath)
-            ?: return null
-        val sub = m.groupValues[1]
-        val rest = m.groupValues[2].removePrefix("/")
-        val base = File(context.filesDir, "minis-sessions/$sessionId/$sub")
-        return if (rest.isEmpty()) base else File(base, rest)
-    }
+    private fun sessionScopedHostFile(linuxPath: String, sessionId: String?): File? =
+        com.openminis.app.sandbox.SessionPathResolver.resolve(context.filesDir, linuxPath, sessionId)
+
 
     /** [T-android-model-use-session-scoped-write] One-line audit of a model-use
      *  write so the response path vs on-disk host path vs session scoping is
@@ -1302,6 +1179,18 @@ class ModelUseOffloadHandler(
      */
     private fun imageParamHint(entry: ModelEntry): String {
         if ("image" !in entry.model.outputModalities.orEmpty()) return ""
+        if (entry.model.isGPTImage25) return """
+            Hint — ${entry.model.displayName} accepts these Image API parameters:
+              prompt    string
+              n         integer, number of images (default 1)
+              size      "auto" or a supported width x height
+              quality   "auto" | "low" | "medium" | "high" | "xhigh" | "max"
+            Default input JSON: {"prompt":"<user image prompt>","size":"1024x1024","quality":"high","n":1}
+            Keep the prompt specific to the current request; size, quality and n can be overridden.
+            --output result.json saves a JSON manifest; use media_files paths to display the images.
+            Do not pass response_format; Image 2.5 returns base64 images by default.
+            Codex OAuth uses the image_generation tool; Image API size/quality/n settings do not apply on that route.
+        """.trimIndent()
         val pType = providerRepository.instance(entry.providerInstanceId)?.providerType
         return when (pType) {
             ProviderType.gemini -> """
@@ -1444,8 +1333,8 @@ class ModelUseOffloadHandler(
         return true
     }
 
-    private fun readLinuxPath(linuxPath: String): String? {
-        val hostFile: File = PRootKernel.resolveHostPath(linuxPath) ?: return null
+    private fun readLinuxPath(linuxPath: String, sessionId: String?): String? {
+        val hostFile: File = sessionScopedHostFile(linuxPath, sessionId) ?: PRootKernel.resolveHostPath(linuxPath) ?: return null
         if (!hostFile.exists() || !hostFile.isFile) return null
         return try { hostFile.readText() } catch (_: Throwable) { null }
     }
@@ -1481,7 +1370,7 @@ class ModelUseOffloadHandler(
      * - `[{"role":"...","content":"..."}, ...]` — array of messages
      * - Plain text → wrapped as a single user message
      */
-    private fun parseMessages(text: String): List<ParsedMessage> {
+    private fun parseMessages(text: String, sessionId: String?): List<ParsedMessage> {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return emptyList()
         try {
@@ -1489,10 +1378,10 @@ class ModelUseOffloadHandler(
                 val obj = JSONObject(trimmed)
                 val arr = obj.optJSONArray("messages")
                     ?: return listOf(ParsedMessage("user", trimmed, emptyList()))
-                return parseMessageArray(arr)
+                return parseMessageArray(arr, sessionId)
             }
             if (trimmed.startsWith("[")) {
-                return parseMessageArray(JSONArray(trimmed))
+                return parseMessageArray(JSONArray(trimmed), sessionId)
             }
         } catch (e: ImageInputError) {
             // Deliberate hard errors from block parsing must NOT be swallowed
@@ -1502,13 +1391,15 @@ class ModelUseOffloadHandler(
             throw e
         } catch (e: AudioInputError) {
             throw e
+        } catch (e: IllegalArgumentException) {
+            throw ImageInputError(e.message ?: "Invalid session image path")
         } catch (_: Throwable) {
             // Fall through to plain-text handling
         }
         return listOf(ParsedMessage("user", trimmed, emptyList()))
     }
 
-    private fun parseMessageArray(arr: JSONArray): List<ParsedMessage> {
+    private fun parseMessageArray(arr: JSONArray, sessionId: String?): List<ParsedMessage> {
         val out = mutableListOf<ParsedMessage>()
         for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
@@ -1529,7 +1420,7 @@ class ModelUseOffloadHandler(
                             val url = imgObj.optString("url", "").takeIf { it.isNotEmpty() }
                                 ?: continue
                             try {
-                                imgs.add(resolveImageUrl(url))
+                                imgs.add(resolveImageUrl(url, sessionId))
                             } catch (e: ImageInputError) {
                                 // Don't silently drop — surface to the agent so it
                                 // can correct the URL or fall back to text.
@@ -1587,7 +1478,7 @@ class ModelUseOffloadHandler(
      * non-zero with a descriptive message instead of silently feeding
      * the model an image-less request (the prior failure mode).
      */
-    private fun resolveImageUrl(url: String): LLMMessage.ImagePart {
+    private fun resolveImageUrl(url: String, sessionId: String?): LLMMessage.ImagePart {
         // data:<mime>;base64,<base64>
         if (url.startsWith("data:")) {
             val rest = url.substring(5)
@@ -1626,7 +1517,7 @@ class ModelUseOffloadHandler(
                     "/var/minis/<scope>/<path>, or an absolute Linux path."
             )
         }
-        val hostFile: File = PRootKernel.resolveHostPath(linuxPath)
+        val hostFile: File = sessionScopedHostFile(linuxPath, sessionId) ?: PRootKernel.resolveHostPath(linuxPath)
             ?: File(linuxPath).takeIf { it.exists() && it.isFile }
             ?: throw ImageInputError("Image file not found at '$url'.")
         if (!hostFile.exists() || !hostFile.isFile) {
@@ -1787,7 +1678,7 @@ Image generation fields (only for image_output models):
   OpenAI-style (DALL-E / gpt-image-1 etc.):
     n         integer, number of images (default 1)
     size      "1024x1024" | "1792x1024" | "1024x1792" | etc.
-    quality   "standard" | "hd"
+    quality   DALL-E: "standard" | "hd"; GPT Image 2.5: "auto" | "low" | "medium" | "high" | "xhigh" | "max"
     prompt    string (overrides last user message)
 
   Gemini-style (Imagen / gemini-2.5-flash-image etc.) — under generation_config:
@@ -1798,7 +1689,7 @@ Image generation fields (only for image_output models):
   Unknown providers silently ignore unsupported fields.
 
   Example (OpenAI):
-    {"prompt":"a red panda astronaut","size":"1792x1024","quality":"hd","n":1}
+    {"prompt":"<user image prompt>","size":"1024x1024","quality":"high","n":1}
   Example (Gemini):
     {"messages":[{"role":"user","content":"a red panda astronaut"}],
      "generation_config":{"aspect_ratio":"16:9","image_size":"2K"}}

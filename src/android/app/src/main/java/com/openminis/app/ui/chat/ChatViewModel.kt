@@ -24,7 +24,10 @@ import androidx.compose.material.icons.outlined.Extension
 import com.openminis.app.data.BPETokenizer
 import com.openminis.app.data.ContextOffload
 import com.openminis.app.data.ContextPolicy
+import com.openminis.app.data.TaskBudgetPrefs
+import com.openminis.app.data.TaskBudgetProgress
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.logging.LogRedactor
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.db.CompactMarkerEntity
 import com.openminis.app.data.model.AgentContentPart
@@ -71,13 +74,17 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,6 +92,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.UUID
 
 // [T-android-split-chat] StreamingDelta / ChatMessage / QueuedPrompt /
 // ToolBlockStatus / SlashCommand / AssistantBlock moved verbatim to ChatModels.kt.
@@ -773,6 +781,144 @@ class ChatViewModel(
 
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
+
+    /** Progress for the currently executing task, captured at run start. */
+    private val _taskBudget = MutableStateFlow(
+        TaskBudgetProgress(limit = TaskBudgetPrefs.limit(context)),
+    )
+    val taskBudget: StateFlow<TaskBudgetProgress> = _taskBudget.asStateFlow()
+
+    /**
+     * Per-invocation state. A session may have an older assistant message and
+     * may have another run queued behind a live stream, so callers must observe
+     * this map by run id instead of inferring completion from isStreaming.
+     */
+    private val _runStates = MutableStateFlow<Map<String, ChatRunState>>(emptyMap())
+    internal val runStates: StateFlow<Map<String, ChatRunState>> = _runStates.asStateFlow()
+    private val runStateLock = Any()
+    private val runStateOrder = java.util.ArrayDeque<String>()
+    private val maxRememberedRuns = 64
+
+    private fun newRunId(): String = "run_${UUID.randomUUID()}"
+
+    internal fun allocateRunId(): String = newRunId().also { ensureRun(it) }
+
+    internal fun rejectRun(runId: String, error: String) {
+        ensureRun(runId)
+        setRunStatus(runId, ChatRunStatus.Error, error)
+    }
+
+    private fun ensureRun(runId: String) {
+        synchronized(runStateLock) {
+            if (_runStates.value.containsKey(runId)) return
+            val next = _runStates.value.toMutableMap()
+            next[runId] = ChatRunState(runId = runId)
+            runStateOrder.addLast(runId)
+            while (next.size > maxRememberedRuns && runStateOrder.isNotEmpty()) {
+                val candidate = runStateOrder.removeFirst()
+                val candidateState = next[candidate]
+                if (candidateState == null || candidateState.status.isTerminal) {
+                    next.remove(candidate)
+                } else {
+                    // Never evict a live waiter. Put it back and inspect the
+                    // next oldest entry for a terminal state.
+                    runStateOrder.addLast(candidate)
+                    if (runStateOrder.all { next[it]?.status?.isTerminal != true }) break
+                }
+            }
+            _runStates.value = next
+        }
+    }
+
+    private fun setRunStatus(
+        runId: String,
+        status: ChatRunStatus,
+        error: String? = null,
+    ) {
+        synchronized(runStateLock) {
+            val current = _runStates.value[runId] ?: ChatRunState(runId = runId)
+            val now = System.currentTimeMillis()
+            val nextState = ChatRunStatePolicy.transition(current, status, error, now)
+            val next = _runStates.value.toMutableMap()
+            next[runId] = nextState
+            _runStates.value = next
+        }
+    }
+
+    private fun setRunAssistantId(runId: String, assistantMessageId: String) {
+        synchronized(runStateLock) {
+            val current = _runStates.value[runId] ?: return
+            val next = _runStates.value.toMutableMap()
+            next[runId] = current.copy(assistantMessageId = assistantMessageId)
+            _runStates.value = next
+        }
+    }
+
+    private fun finishRuns(
+        runIds: Iterable<String>,
+        status: ChatRunStatus,
+        error: String? = null,
+    ) {
+        runIds.forEach { runId -> setRunStatus(runId, status, error) }
+    }
+
+    private fun canDrainRuns(runIds: Iterable<String>): Boolean =
+        runIds.none { runState(it)?.let { state -> state.status.isTerminal && !state.status.isSuccess } == true }
+
+    /**
+     * Close the run batch that just returned before starting queued work.
+     * Queued work has its own batch ids; keeping the completed batch in the
+     * same set would let a later queued failure rewrite the earlier outcome.
+     */
+    private fun completeRunBatchBeforeDrain(runIds: Iterable<String>): Boolean {
+        finishRuns(runIds, ChatRunStatus.Completed)
+        return canDrainRuns(runIds)
+    }
+
+    internal fun runState(runId: String): ChatRunState? = _runStates.value[runId]
+
+    internal fun runStateFlow(runId: String): Flow<ChatRunState> =
+        runStates.map { it[runId] }.filterNotNull().distinctUntilChanged()
+
+    /** Text from the assistant bubble created by this invocation. */
+    internal fun assistantTextForRun(runId: String): String? {
+        val assistantId = runState(runId)?.assistantMessageId ?: return null
+        return _messages.value.firstOrNull { it.id == assistantId }?.content
+    }
+
+    private fun admission(runId: String): ChatRunAdmission {
+        val state = runState(runId) ?: ChatRunState(runId = runId)
+        return ChatRunAdmission(
+            runId = runId,
+            accepted = state.status != ChatRunStatus.NotStarted && state.status != ChatRunStatus.Error,
+            state = state,
+        )
+    }
+
+    internal fun startPromptForRun(text: String, runId: String? = null): ChatRunAdmission {
+        val runId = runId ?: newRunId()
+        ensureRun(runId)
+        sendMessage(text, skipContextCheck = false, runId = runId)
+        return admission(runId)
+    }
+
+    internal fun startRetryForRun(messageId: String, runId: String? = null): ChatRunAdmission {
+        val runId = runId ?: newRunId()
+        ensureRun(runId)
+        retryFromMessageInternal(messageId, runId)
+        return admission(runId)
+    }
+
+    internal fun startRerunForRun(
+        assistantMessageId: String,
+        blockId: String,
+        runId: String? = null,
+    ): ChatRunAdmission {
+        val runId = runId ?: newRunId()
+        ensureRun(runId)
+        rerunFromToolBlockInternal(assistantMessageId, blockId, runId)
+        return admission(runId)
+    }
 
     /**
      * T261: tool detail sheet visibility, persistent across LazyColumn
@@ -1635,9 +1781,8 @@ class ChatViewModel(
      * [T-android-thinking-level-arch] Levels the chat composer picker should
      * offer: everything up to the current model's ceiling, EXCLUDING OFF —
      * mirrors iOS availableThinkingLevels (`filter { $0 != .off && $0 <= max }`).
-     * There is no standalone "Off" capsule; tapping the already-selected level
-     * toggles thinking off (see ThinkingLevelPicker). setThinkingLevel
-     * additionally clamps as a belt-and-suspenders defense.
+     * The composer slider adds OFF as its first stop. setThinkingLevel
+     * additionally clamps the selected level to the model ceiling.
      */
     val availableThinkingLevels: List<ThinkingLevel>
         get() {
@@ -3383,6 +3528,7 @@ class ChatViewModel(
      * up. Mirrors iOS `pendingSendText` / `pendingSendAttachments`.
      */
     private var pendingSendText: String? = null
+    private var pendingSendRunId: String? = null
 
     private val _showCompactBeforeSendPrompt = MutableStateFlow(false)
     val showCompactBeforeSendPrompt: StateFlow<Boolean> = _showCompactBeforeSendPrompt.asStateFlow()
@@ -3396,13 +3542,15 @@ class ChatViewModel(
         if (alsoEnableAutoCompact) setAutoCompactEnabled(true)
         _showCompactBeforeSendPrompt.value = false
         val text = pendingSendText ?: return
+        val runId = pendingSendRunId
         pendingSendText = null
+        pendingSendRunId = null
         viewModelScope.launch {
             val ok = awaitCompaction()
             if (!ok) {
                 AppLogger.warning(TAG, "[Context] pre-send compaction failed — sending anyway")
             }
-            sendMessage(text, skipContextCheck = true)
+            sendMessage(text, skipContextCheck = true, runId = runId)
         }
     }
 
@@ -3410,8 +3558,10 @@ class ChatViewModel(
     fun sendPendingWithoutCompacting() {
         _showCompactBeforeSendPrompt.value = false
         val text = pendingSendText ?: return
+        val runId = pendingSendRunId
         pendingSendText = null
-        sendMessage(text, skipContextCheck = true)
+        pendingSendRunId = null
+        sendMessage(text, skipContextCheck = true, runId = runId)
     }
 
     /** Dialog dismissed — restore the text to the composer so it isn't lost. */
@@ -3419,6 +3569,8 @@ class ChatViewModel(
         _showCompactBeforeSendPrompt.value = false
         pendingSendText?.let { _inputText.value = it }
         pendingSendText = null
+        pendingSendRunId?.let { setRunStatus(it, ChatRunStatus.NotStarted, "cancelled before dispatch") }
+        pendingSendRunId = null
     }
 
     /**
@@ -5137,18 +5289,39 @@ class ChatViewModel(
      * item with the same `!isStreaming` rule, but the guard here is the source
      * of truth.
      */
-    fun rerunFromToolBlock(assistantMessageId: String, blockId: String): Boolean {
-        if (_isStreaming.value) return false
+    fun rerunFromToolBlock(assistantMessageId: String, blockId: String): Boolean =
+        rerunFromToolBlockInternal(assistantMessageId, blockId, null)
+
+    private fun rerunFromToolBlockInternal(
+        assistantMessageId: String,
+        blockId: String,
+        runId: String?,
+    ): Boolean {
+        val effectiveRunId = runId ?: newRunId()
+        ensureRun(effectiveRunId)
+        if (_isStreaming.value) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "stream already running")
+            return false
+        }
         val messages = _messages.value
         val asstIdx = messages.indexOfFirst { it.id == assistantMessageId }
-        if (asstIdx < 0) return false
+        if (asstIdx < 0) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "assistant message not found")
+            return false
+        }
         val asstMsg = messages[asstIdx]
         val blockIdx = asstMsg.toolBlocks.indexOfFirst { it.id == blockId }
-        if (blockIdx < 0) return false
+        if (blockIdx < 0) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "tool block not found")
+            return false
+        }
         val targetBlock = asstMsg.toolBlocks[blockIdx]
         // Only a real tool_use block anchors a block cut — its id is the
         // tool_use id we match against in agentHistory / parts_json.
-        if (targetBlock.kind != "tool_use" || targetBlock.id.isBlank()) return false
+        if (targetBlock.kind != "tool_use" || targetBlock.id.isBlank()) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "not a tool-use block")
+            return false
+        }
         // [T-android-tool-autoscroll] Start-of-turn snap — see resume().
         _forceScrollToBottom.tryEmit(Unit)
         val targetToolUseId = targetBlock.id
@@ -5177,15 +5350,18 @@ class ChatViewModel(
             val userMsg = (asstIdx - 1 downTo 0).asSequence()
                 .map { messages[it] }
                 .firstOrNull { it.role == "user" && it.content.isNotBlank() }
-                ?: return false
+                ?: run {
+                    setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "preceding user message not found")
+                    return false
+                }
             Log.i(TAG, "rerunFromToolBlock degenerate → retryFromMessage(precedingUser) tuId=${targetToolUseId.take(12)}")
-            retryFromMessage(userMsg.id)
-            return true
+            return retryFromMessageInternal(userMsg.id, effectiveRunId)
         }
 
         val initialProvider = currentProvider
         if (initialProvider == null) {
             _error.value = "No provider configured"
+            setRunStatus(effectiveRunId, ChatRunStatus.Error, "No provider configured")
             return false
         }
         _canResume.value = false
@@ -5207,6 +5383,7 @@ class ChatViewModel(
         // rejected by the entry guard (same rationale as retryFromMessage T145).
         AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
+        setRunStatus(effectiveRunId, ChatRunStatus.Running)
 
         viewModelScope.launch {
             var streamLaunched = false
@@ -5320,11 +5497,12 @@ class ChatViewModel(
                     agentHistory.add(entity.toLLMMessage())
                 }
 
-                streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock")
+                streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock", effectiveRunId)
             } finally {
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false (setup aborted)")
                     _isStreaming.value = false
+                    finishRuns(listOf(effectiveRunId), ChatRunStatus.Error, "stream setup aborted")
                 }
             }
         }
@@ -5337,20 +5515,36 @@ class ChatViewModel(
      * Mirrors iOS's edit/retry behavior — no duplicate user messages.
      */
     fun retryFromMessage(messageId: String) {
-        if (_isStreaming.value) return
+        retryFromMessageInternal(messageId, null)
+    }
+
+    private fun retryFromMessageInternal(messageId: String, runId: String?): Boolean {
+        val effectiveRunId = runId ?: newRunId()
+        ensureRun(effectiveRunId)
+        if (_isStreaming.value) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "stream already running")
+            return false
+        }
         _canResume.value = false
         val messages = _messages.value
         val index = messages.indexOfFirst { it.id == messageId }
-        if (index < 0) return
+        if (index < 0) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "message not found")
+            return false
+        }
         val message = messages[index]
         // [T-android-tool-autoscroll] Start-of-turn snap — see resume().
         _forceScrollToBottom.tryEmit(Unit)
-        if (message.role != "user" || message.content.isBlank()) return
+        if (message.role != "user" || message.content.isBlank()) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "target is not a user message")
+            return false
+        }
 
         val initialProvider = currentProvider
         if (initialProvider == null) {
             _error.value = "No provider configured"
-            return
+            setRunStatus(effectiveRunId, ChatRunStatus.Error, "No provider configured")
+            return false
         }
         val provider: LLMProvider = initialProvider
         _error.value = null
@@ -5394,6 +5588,7 @@ class ChatViewModel(
         // then flip the UI to "stopped" while the second job was still running.
         AppLogger.info(TAG_STREAM, "retry _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
+        setRunStatus(effectiveRunId, ChatRunStatus.Running)
 
         viewModelScope.launch {
             // If setup throws before the inner streamJob is launched, the
@@ -5450,14 +5645,16 @@ class ChatViewModel(
                 agentHistory.add(entity.toLLMMessage())
             }
 
-            streamLaunched = runRerunStreamTail(provider, "retryFromMessage")
+            streamLaunched = runRerunStreamTail(provider, "retryFromMessage", effectiveRunId)
             } finally {
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "retry _isStreaming=false (setup aborted)")
                     _isStreaming.value = false
+                    finishRuns(listOf(effectiveRunId), ChatRunStatus.Error, "stream setup aborted")
                 }
             }
         }
+        return true
     }
 
     /**
@@ -5614,6 +5811,7 @@ class ChatViewModel(
     private suspend fun runRerunStreamTail(
         initialProvider: LLMProvider,
         label: String,
+        runId: String,
     ): Boolean {
         var provider = initialProvider
         // Refresh OAuth token if needed
@@ -5650,6 +5848,7 @@ class ChatViewModel(
 
         // _isStreaming was already set synchronously by the caller.
         val launchedProvider = provider
+        val runIds = mutableSetOf(runId)
         streamJob = viewModelScope.launch(Dispatchers.IO) {
             AppLogger.info(TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
             try {
@@ -5669,15 +5868,28 @@ class ChatViewModel(
                         systemPrompt = systemPrompt,
                         fallbackProviders = fallbackProviders,
                         fallbackStrategy = activeFallbackStrategy,
+                        runIds = runIds,
                     )
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop RETURN normal")
+                    if (completeRunBatchBeforeDrain(runIds)) {
+                        // Retry/rerun also accepts prompts queued during the
+                        // live stream; they belong to this stream's outcome.
+                        drainQueuedPrompts(
+                            launchedProvider,
+                            systemPrompt,
+                            fallbackProviders,
+                            activeFallbackStrategy,
+                        )
+                    }
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CANCELLED")
                     Log.d(TAG, "Agent loop cancelled")
+                    finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                 } catch (e: Exception) {
                     AppLogger.error(TAG_STREAM, "$label runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(TAG, "Agent loop error ($label)", e)
                     setInlineError(e.message ?: "Unknown error")
+                    finishRuns(runIds, ChatRunStatus.Error, e.message)
                     // T298: flag the upcoming setInactive() so the
                     // background completion notifier renders the ❌
                     // variant instead of a clean success.
@@ -5694,11 +5906,13 @@ class ChatViewModel(
                     publishOverlayReplyExcerpt(activeSessionId)
                     SessionActivityTracker.setInactive(activeSessionId)
                     SessionConcurrencyManager.releaseSlot(activeSessionId)
+                    finishRuns(runIds, ChatRunStatus.Completed)
                     AppLogger.info(TAG_STREAM, "$label streamJob FINALLY exit")
                 }
             } catch (e: CancellationException) {
                 AppLogger.info(TAG_STREAM, "$label streamJob CANCELLED waiting for slot")
                 Log.d(TAG, "Cancelled while waiting for concurrency slot")
+                finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
             }
             // [T-android-stale-streamjob-clears-isstreaming] Only the current
             // streamJob is allowed to flip _isStreaming false. An orphaned
@@ -5942,15 +6156,26 @@ class ChatViewModel(
      * Mirrors iOS AIChatViewModel.enqueuePrompt().
      */
     fun enqueuePrompt(text: String) {
+        val runId = newRunId()
+        ensureRun(runId)
+        enqueuePrompt(text, runId)
+    }
+
+    private fun enqueuePrompt(text: String, runId: String) {
         val trimmed = text.trim()
         val pendingAttachments = _attachments.value
-        if ((trimmed.isBlank() && pendingAttachments.isEmpty()) || !_isStreaming.value) return
+        if ((trimmed.isBlank() && pendingAttachments.isEmpty()) || !_isStreaming.value) {
+            setRunStatus(runId, ChatRunStatus.NotStarted, "queue admission rejected")
+            return
+        }
 
         val prompt = QueuedPrompt(
             id = "queued_${System.currentTimeMillis()}_${(Math.random() * 1_000_000).toInt()}",
             text = trimmed,
             attachments = pendingAttachments,
+            runId = runId,
         )
+        setRunStatus(runId, ChatRunStatus.Queued)
         _promptQueue.value = _promptQueue.value + prompt
 
         val attachmentNames = pendingAttachments.map { it.fileName }
@@ -5973,6 +6198,9 @@ class ChatViewModel(
 
     /** Remove a queued prompt and its chat message by prompt id. */
     fun removeQueuedPrompt(promptId: String) {
+        _promptQueue.value.firstOrNull { it.id == promptId }?.runId?.let {
+            setRunStatus(it, ChatRunStatus.Cancelled, "queued prompt removed")
+        }
         _promptQueue.value = _promptQueue.value.filterNot { it.id == promptId }
         _messages.value = _messages.value.filterNot { it.queuedPromptId == promptId }
     }
@@ -5982,6 +6210,9 @@ class ChatViewModel(
         val msg = _messages.value.firstOrNull { it.id == messageId } ?: return
         if (!msg.isQueued) return
         val pid = msg.queuedPromptId ?: return
+        _promptQueue.value.firstOrNull { it.id == pid }?.runId?.let {
+            setRunStatus(it, ChatRunStatus.Cancelled, "queued prompt withdrawn")
+        }
         _promptQueue.value = _promptQueue.value.filterNot { it.id == pid }
         _messages.value = _messages.value.filterNot { it.id == messageId }
         Log.i(TAG, "Withdrew queued message, queue=${_promptQueue.value.size}")
@@ -6008,16 +6239,26 @@ class ChatViewModel(
      * entry — its sole purpose is to break up the consecutive-user run for
      * the next API call; chat history reconstruction would just hide it.
      */
-    private data class InjectedTurn(val newAssistantId: String)
+    private data class InjectedTurn(
+        val newAssistantId: String,
+        val runIds: Set<String> = emptySet(),
+    )
 
     private suspend fun injectQueuedPromptsAsNewTurn(
         finishedAssistantId: String,
         finishedAccumulatedText: String,
         finishedAllToolBlocks: List<AssistantBlock>,
+        runIds: MutableSet<String>? = null,
     ): InjectedTurn? {
         if (_promptQueue.value.isEmpty()) return null
         val queued = _promptQueue.value
         _promptQueue.value = emptyList()
+        queued.forEach { prompt ->
+            prompt.runId?.let { runId ->
+                runIds?.add(runId)
+                setRunStatus(runId, ChatRunStatus.Running)
+            }
+        }
 
         // [T-android-queued-message-duplicated-on-inject] REMOVE the queued
         // placeholder bubbles (the ones enqueuePrompt added with
@@ -6063,6 +6304,9 @@ class ChatViewModel(
                 TAG_STREAM,
                 "injectQueuedPromptsAsNewTurn: ${queued.size} queued prompt(s) produced no content, skipping",
             )
+            queued.forEach { prompt ->
+                prompt.runId?.let { setRunStatus(it, ChatRunStatus.Error, "queued prompt had no content") }
+            }
             return null
         }
 
@@ -6175,7 +6419,10 @@ class ChatViewModel(
             "injectQueuedPromptsAsNewTurn: injected ${queued.size} queued prompt(s) as new turn, " +
                 "finishedId=$finishedAssistantId newId=$newAssistantId",
         )
-        return InjectedTurn(newAssistantId)
+        return InjectedTurn(
+            newAssistantId = newAssistantId,
+            runIds = queued.mapNotNull { it.runId }.toSet(),
+        )
     }
 
     /**
@@ -6192,82 +6439,105 @@ class ChatViewModel(
         while (_promptQueue.value.isNotEmpty()) {
             val queued = _promptQueue.value
             _promptQueue.value = emptyList()
-            Log.i(TAG, "📨[DRAIN] Draining ${queued.size} queued prompt(s): " +
-                queued.joinToString(", ") { "${it.id}=\"${it.text.take(20)}...\"" })
-
-            // Flip isQueued=false on corresponding chat messages so they render as sent.
-            // T189: also clear queuedPromptId so a later retry of this bubble
-            // doesn't try to drop a phantom queue entry (and so the field state
-            // matches what retryFromMessage's truncate path now produces).
-            val queuedIds = queued.map { it.id }.toSet()
-            _messages.value = _messages.value.map { m ->
-                if (m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)) {
-                    m.copy(isQueued = false, queuedPromptId = null)
-                } else m
-            }
-
-            // Build a combined user message (text + images from all queued prompts).
-            // Persist as a single row.
-            val sid = ensureSession()
-            val combinedAttachments = queued.flatMap { it.attachments }
-            val prepared = prepareUserAttachments(combinedAttachments, sid)
-
-            // T132: same shape as sendMessage — caption(s) first, then for each
-            // image emit "[attached image: <path>]" + ImageData, finally the
-            // <user-attached-files> XML. Keeps caption adjacent to image and
-            // lets the agent re-read the file via read_image.
-            val combinedParts = mutableListOf<AgentContentPart>()
-            val combinedText = StringBuilder()
-            for (prompt in queued) {
-                if (prompt.text.isNotEmpty()) {
-                    if (combinedText.isNotEmpty()) combinedText.append("\n\n")
-                    combinedText.append(prompt.text)
-                    combinedParts.add(AgentContentPart.Text(prompt.text))
-                }
-            }
-            prepared.imageParts.forEachIndexed { idx, part ->
-                val path = prepared.imageUploadPaths.getOrNull(idx)
-                if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
-                combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
-            }
-            prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
-
-            val userText = combinedText.toString()
-            // [T-android-paste-mediaref] Same marker handling as the mid-loop
-            // inject path above — see the note there for why queued prompts
-            // need it at all.
-            val drainPaste = buildPastedParts(userText, sid)
-            if (drainPaste != null) {
-                _pastedTexts.value =
-                    _pastedTexts.value.filterNot { it.id in drainPaste.consumedIds }
-            }
-            val userPartsJson = buildUserPartsJson(
-                userText,
-                prepared.mediaRefPartsJson,
-                prepared.attachedFilesXml,
-                bodyPartsJson = drainPaste?.partsJson,
-            )
-            chatRepository.appendMessage(sid, "user", userPartsJson)
-
-            agentHistory.add(LLMMessage(
-                role = LLMMessage.Role.USER,
-                content = drainPaste?.modelText ?: userText,
-                imageParts = prepared.imageParts,
-                contentParts = drainPaste?.let { p ->
-                    val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
-                    listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
-                } ?: combinedParts,
-            ))
-
+            // One tracked batch per consumed queue slice. The caller's
+            // already-completed run ids must never be mixed with this set.
+            val batchRunIds = queued.mapNotNull { it.runId }.toMutableSet()
             try {
+                queued.forEach { prompt ->
+                    prompt.runId?.let { runId ->
+                        setRunStatus(runId, ChatRunStatus.Running)
+                    }
+                }
+                Log.i(TAG, "📨[DRAIN] Draining ${queued.size} queued prompt(s): " +
+                    queued.joinToString(", ") { "${it.id}=\"${it.text.take(20)}...\"" })
+
+                // Flip isQueued=false on corresponding chat messages so they render as sent.
+                // T189: also clear queuedPromptId so a later retry of this bubble
+                // doesn't try to drop a phantom queue entry (and so the field state
+                // matches what retryFromMessage's truncate path now produces).
+                val queuedIds = queued.map { it.id }.toSet()
+                _messages.value = _messages.value.map { m ->
+                    if (m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)) {
+                        m.copy(isQueued = false, queuedPromptId = null)
+                    } else m
+                }
+
+                // Build a combined user message (text + images from all queued prompts).
+                // Persist as a single row.
+                val sid = ensureSession()
+                val combinedAttachments = queued.flatMap { it.attachments }
+                val prepared = prepareUserAttachments(combinedAttachments, sid)
+
+                // T132: same shape as sendMessage — caption(s) first, then for each
+                // image emit "[attached image: <path>]" + ImageData, finally the
+                // <user-attached-files> XML. Keeps caption adjacent to image and
+                // lets the agent re-read the file via read_image.
+                val combinedParts = mutableListOf<AgentContentPart>()
+                val combinedText = StringBuilder()
+                for (prompt in queued) {
+                    if (prompt.text.isNotEmpty()) {
+                        if (combinedText.isNotEmpty()) combinedText.append("\n\n")
+                        combinedText.append(prompt.text)
+                        combinedParts.add(AgentContentPart.Text(prompt.text))
+                    }
+                }
+                prepared.imageParts.forEachIndexed { idx, part ->
+                    val path = prepared.imageUploadPaths.getOrNull(idx)
+                    if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
+                    combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
+                }
+                prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
+
+                val userText = combinedText.toString()
+                // [T-android-paste-mediaref] Same marker handling as the mid-loop
+                // inject path above — see the note there for why queued prompts
+                // need it at all.
+                val drainPaste = buildPastedParts(userText, sid)
+                if (drainPaste != null) {
+                    _pastedTexts.value =
+                        _pastedTexts.value.filterNot { it.id in drainPaste.consumedIds }
+                }
+                val userPartsJson = buildUserPartsJson(
+                    userText,
+                    prepared.mediaRefPartsJson,
+                    prepared.attachedFilesXml,
+                    bodyPartsJson = drainPaste?.partsJson,
+                )
+                chatRepository.appendMessage(sid, "user", userPartsJson)
+
+                agentHistory.add(LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = drainPaste?.modelText ?: userText,
+                    imageParts = prepared.imageParts,
+                    contentParts = drainPaste?.let { p ->
+                        val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
+                        listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
+                    } ?: combinedParts,
+                ))
+
                 runAgentLoop(
                     provider = provider,
                     systemPrompt = systemPrompt,
                     fallbackProviders = fallbackProviders,
                     fallbackStrategy = fallbackStrategy,
+                    runIds = batchRunIds,
                 )
+                // A normal return completes this batch. If runAgentLoop
+                // stopped with Error/BudgetExceeded, its terminal state wins
+                // and the failed batch prevents later queue slices from
+                // starting.
+                finishRuns(batchRunIds, ChatRunStatus.Completed)
+                if (!canDrainRuns(batchRunIds)) {
+                    AppLogger.warning(TAG_STREAM, "queued drain stopped after terminal batch failure")
+                    break
+                }
             } catch (e: CancellationException) {
                 Log.d(TAG, "Agent loop (queued-drain) cancelled")
+                finishRuns(
+                    batchRunIds,
+                    ChatRunStatus.Cancelled,
+                    e.message,
+                )
                 // Cancel mid-drain: cancelStream() will check _promptQueue
                 // and call resumeQueueAfterCancel() if anything's still pending,
                 // so just propagate.
@@ -6275,12 +6545,21 @@ class ChatViewModel(
             } catch (e: Exception) {
                 Log.e(TAG, "Agent loop (queued-drain) error", e)
                 setInlineError(e.message ?: "Unknown error")
+                finishRuns(
+                    batchRunIds,
+                    ChatRunStatus.Error,
+                    e.message,
+                )
                 break
             }
         }
     }
 
-    fun sendMessage(text: String) = sendMessage(text, skipContextCheck = false)
+    fun sendMessage(text: String) = sendMessage(
+        text,
+        skipContextCheck = false,
+        runId = newRunId(),
+    )
 
     /**
      * @param skipContextCheck set by the pre-send context dialog's own actions,
@@ -6289,7 +6568,13 @@ class ChatViewModel(
      *   chunk) token count and pop the dialog again — iOS guards the identical
      *   re-entry with `skipCompactCheck`.
      */
-    private fun sendMessage(text: String, skipContextCheck: Boolean) {
+    private fun sendMessage(
+        text: String,
+        skipContextCheck: Boolean,
+        runId: String? = null,
+    ) {
+        val effectiveRunId = runId ?: newRunId()
+        ensureRun(effectiveRunId)
         // [T-android-paste-mediaref] `[Pasted#N]` markers are NOT expanded here
         // any more.
         //
@@ -6309,18 +6594,22 @@ class ChatViewModel(
         val trimmed = text.trim()
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
         if (_isStreaming.value) {
-            enqueuePrompt(text)
+            enqueuePrompt(text, effectiveRunId)
             return
         }
         // T180: allow attachments-only sends (no caption). Mirrors iOS, where
         // an empty text + non-empty attachments still produces a valid user
         // message. Without this an image-only "look at this" send dropped.
-        if (trimmed.isBlank() && _attachments.value.isEmpty()) return
+        if (trimmed.isBlank() && _attachments.value.isEmpty()) {
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "empty prompt")
+            return
+        }
         if (_isCompacting.value) {
             appendSystemInfo(
                 text = "Wait for the current compact to finish before sending.",
                 iconKind = "compact",
             )
+            setRunStatus(effectiveRunId, ChatRunStatus.NotStarted, "compact in progress")
             return
         }
         // Context pressure check. Unlike before, needsCompact now HOLDS the
@@ -6332,6 +6621,8 @@ class ChatViewModel(
                 PreSendContextAction.PROCEED -> {}
                 PreSendContextAction.COMPACT_THEN_SEND -> {
                     pendingSendText = text
+                    pendingSendRunId = effectiveRunId
+                    setRunStatus(effectiveRunId, ChatRunStatus.Queued)
                     _inputText.value = ""
                     compactAndSendPending()
                     return
@@ -6340,6 +6631,8 @@ class ChatViewModel(
                     // Park the text on the VM (not the composer) so the dialog
                     // owns it; cancelCompactBeforeSend puts it back.
                     pendingSendText = text
+                    pendingSendRunId = effectiveRunId
+                    setRunStatus(effectiveRunId, ChatRunStatus.Queued)
                     _inputText.value = ""
                     _showCompactBeforeSendPrompt.value = true
                     return
@@ -6362,6 +6655,7 @@ class ChatViewModel(
         val initialProvider = currentProvider
         if (initialProvider == null) {
             _error.value = "No provider configured"
+            setRunStatus(effectiveRunId, ChatRunStatus.Error, "No provider configured")
             return
         }
         var provider: LLMProvider = initialProvider
@@ -6375,6 +6669,7 @@ class ChatViewModel(
         // slip past the entry guard during DB/OAuth setup. See retryFromMessage.
         AppLogger.info(TAG_STREAM, "send _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
+        setRunStatus(effectiveRunId, ChatRunStatus.Running)
 
         // [T-android-thinking-indicator-linger] Invariant sweep: a fresh send
         // only reaches here when no turn is streaming (the _isStreaming guard
@@ -6530,6 +6825,7 @@ class ChatViewModel(
 
             // Start agent loop with fallback. _isStreaming was set synchronously at top.
             streamLaunched = true
+            val runIds = mutableSetOf(effectiveRunId)
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
                 try {
@@ -6564,19 +6860,29 @@ class ChatViewModel(
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            runIds = runIds,
                         )
                         AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
                         // Drain any prompts the user queued while this loop was running.
                         // Skipped on cancel: cancelled job won't reach here.
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        if (completeRunBatchBeforeDrain(runIds)) {
+                            drainQueuedPrompts(
+                                provider,
+                                systemPrompt,
+                                fallbackProviders,
+                                activeFallbackStrategy,
+                            )
+                        }
                         AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
                         Log.d(TAG, "Agent loop cancelled")
+                        finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "send runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Agent loop error (all fallbacks exhausted)", e)
                         setInlineError(e.message ?: "Unknown error")
+                        finishRuns(runIds, ChatRunStatus.Error, e.message)
                         // T298: completion notifier should show the ❌ variant.
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
@@ -6591,11 +6897,13 @@ class ChatViewModel(
                         publishOverlayReplyExcerpt(activeSessionId)
                         SessionActivityTracker.setInactive(activeSessionId)
                         SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "send streamJob FINALLY exit")
                     }
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "send streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot")
+                    finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard — see
                 // `var streamJob` KDoc; identical pattern as runRerunStreamTail.
@@ -6611,6 +6919,7 @@ class ChatViewModel(
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
                     _isStreaming.value = false
+                    finishRuns(listOf(effectiveRunId), ChatRunStatus.Error, "stream setup aborted")
                 }
             }
         }
@@ -6748,14 +7057,22 @@ class ChatViewModel(
      *     persisted row so a re-load doesn't resurrect the failed turn.
      */
     fun retryLast() {
-        if (_isStreaming.value) return
+        val runId = newRunId()
+        ensureRun(runId)
+        if (_isStreaming.value) {
+            setRunStatus(runId, ChatRunStatus.NotStarted, "stream already running")
+            return
+        }
         // T-streaming-side-channel: belt-and-suspenders flush in case any
         // delta survived an earlier abnormal exit; retryLast is gated on
         // !isStreaming so this is normally a no-op.
         flushAllStreamingDeltas()
         val msgs = _messages.value.toMutableList()
         val lastAssistantIdx = msgs.indexOfLast { it.role == "assistant" }
-        if (lastAssistantIdx < 0) return
+        if (lastAssistantIdx < 0) {
+            setRunStatus(runId, ChatRunStatus.NotStarted, "assistant message not found")
+            return
+        }
         // [T-android-tool-autoscroll] Start-of-turn snap — see resume().
         _forceScrollToBottom.tryEmit(Unit)
 
@@ -6810,13 +7127,17 @@ class ChatViewModel(
             }
         }
 
-        val initialProvider = currentProvider ?: return
+        val initialProvider = currentProvider ?: run {
+            setRunStatus(runId, ChatRunStatus.Error, "No provider configured")
+            return
+        }
         var provider: LLMProvider = initialProvider
         _error.value = null
 
         // T145: claim _isStreaming synchronously — see retryFromMessage for rationale.
         AppLogger.info(TAG_STREAM, "retryLast _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
+        setRunStatus(runId, ChatRunStatus.Running)
 
         viewModelScope.launch {
             var streamLaunched = false
@@ -6881,6 +7202,7 @@ class ChatViewModel(
 
             // _isStreaming was already set synchronously at the top.
             streamLaunched = true
+            val runIds = mutableSetOf(runId)
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "retryLast streamJob ENTER sid=$activeSessionId")
                 try {
@@ -6900,17 +7222,27 @@ class ChatViewModel(
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            runIds = runIds,
                         )
                         AppLogger.info(TAG_STREAM, "retryLast runAgentLoop RETURN normal")
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        if (completeRunBatchBeforeDrain(runIds)) {
+                            drainQueuedPrompts(
+                                provider,
+                                systemPrompt,
+                                fallbackProviders,
+                                activeFallbackStrategy,
+                            )
+                        }
                         AppLogger.info(TAG_STREAM, "retryLast drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "retryLast runAgentLoop CANCELLED")
                         Log.d(TAG, "Agent loop cancelled")
+                        finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "retryLast runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Agent loop error (retryLast)", e)
                         setInlineError(e.message ?: "Unknown error")
+                        finishRuns(runIds, ChatRunStatus.Error, e.message)
                         // T298: completion notifier should show the ❌ variant.
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
@@ -6925,11 +7257,13 @@ class ChatViewModel(
                         publishOverlayReplyExcerpt(activeSessionId)
                         SessionActivityTracker.setInactive(activeSessionId)
                         SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "retryLast streamJob FINALLY exit")
                     }
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "retryLast streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot")
+                    finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard.
                 if (streamJob === coroutineContext[Job]) {
@@ -6944,6 +7278,7 @@ class ChatViewModel(
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (setup aborted)")
                     _isStreaming.value = false
+                    finishRuns(listOf(runId), ChatRunStatus.Error, "stream setup aborted")
                 }
             }
         }
@@ -7362,8 +7697,11 @@ class ChatViewModel(
         systemPrompt: String?,
         fallbackProviders: List<FallbackCandidate> = emptyList(),
         fallbackStrategy: com.openminis.app.data.model.FallbackStrategy = com.openminis.app.data.model.FallbackStrategy.default,
+        runIds: MutableSet<String> = mutableSetOf(),
     ) {
         AppLogger.info(TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
+        val capturedBudgetLimit = TaskBudgetPrefs.limit(context)
+        _taskBudget.value = TaskBudgetProgress(round = 0, limit = capturedBudgetLimit)
         // [T-android-mem-probe-trust] Send-path context shape. The existing
         // `messages-shape` probe only runs on session LOAD, so the 2026-08-15
         // log described the session as it was opened, never as it was sent —
@@ -7500,6 +7838,8 @@ class ChatViewModel(
                 thinkingLevel = turnThinkingLevel,
             )
         }
+        ChatRunStatePolicy.runsNeedingAssistantBinding(runIds, runStates.value)
+            .forEach { setRunAssistantId(it, assistantId) }
 
         // Tracks whether the loop was exited via a `break` (any reason — no
         // tool calls, msgIdx safety, etc.) or fell off the end of the range.
@@ -7527,7 +7867,8 @@ class ChatViewModel(
         // that emits text across several turns doesn't re-fire it and cut off
         // its own speech mid-sentence.
         var didStopStaleReadAloud = false
-        for (turn in 0 until MAX_AGENT_TURNS) {
+        for (turn in 0 until capturedBudgetLimit) {
+            _taskBudget.value = TaskBudgetProgress(round = turn + 1, limit = capturedBudgetLimit)
             // Sanitize history before each API call (mirrors iOS pre-API validation)
             sanitizeAgentHistory()
 
@@ -7713,6 +8054,7 @@ class ChatViewModel(
                     // suppress the re-stamp here.
                     markLiveInterruption()
                     _canResume.value = true
+                    finishRuns(runIds, ChatRunStatus.BudgetExceeded, "context budget exhausted")
                     // Android's equivalent of iOS's `hitTurnLimit = false`: this
                     // is a deliberate stop, NOT the runaway-ceiling path, so the
                     // post-loop tail must not slap a fake "hit 200 turns" error
@@ -8571,6 +8913,7 @@ class ChatViewModel(
                     // suppress the re-stamp here.
                     markLiveInterruption()
                     _canResume.value = true
+                    finishRuns(runIds, ChatRunStatus.Error, "stream closed before a finish event")
                     // Deliberate stop, not the runaway ceiling — keep the
                     // post-loop tail from adding a fake turn-limit error.
                     loopExitedNormally = true
@@ -8634,6 +8977,7 @@ class ChatViewModel(
                             context.getString(R.string.error_empty_response_generic)
                     }
                     withContext(Dispatchers.Main) { setInlineError(hint) }
+                    finishRuns(runIds, ChatRunStatus.Error, hint)
                 }
                 // Auto-title after first exchange
                 if (turn == 0) generateSessionTitleIfNeeded()
@@ -9025,6 +9369,7 @@ class ChatViewModel(
                         finishedAssistantId = assistantId,
                         finishedAccumulatedText = accumulatedText,
                         finishedAllToolBlocks = allToolBlocks,
+                        runIds = runIds,
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "injectQueuedPromptsAsNewTurn failed", e)
@@ -9038,6 +9383,7 @@ class ChatViewModel(
                     // iteration top, so clearing means new turn's blocks
                     // span [0..size).
                     assistantId = handled.newAssistantId
+                    handled.runIds.forEach { setRunAssistantId(it, assistantId) }
                     accumulatedText = ""
                     allToolBlocks.clear()
                     allToolInputs.clear()
@@ -9053,7 +9399,7 @@ class ChatViewModel(
         // Two ways to leave the for-loop above:
         //   (a) `break` from the "no tool calls" happy-path → loopExitedNormally=true,
         //       updateAssistantMessage(...false...) already cleared streaming state.
-        //   (b) `for (turn in 0 until MAX_AGENT_TURNS)` exhausted → flag stays false,
+        //   (b) `for (turn in 0 until capturedBudgetLimit)` exhausted → flag stays false,
         //       which means the model kept asking for tool calls past the ceiling.
         //
         // (b) is the only case that needs the inline-error/Resume hand-holding;
@@ -9062,10 +9408,16 @@ class ChatViewModel(
         if (!loopExitedNormally) {
             AppLogger.warning(
                 TAG_STREAM,
-                "runAgentLoop EXIT — hit MAX_AGENT_TURNS=$MAX_AGENT_TURNS, finalizing as resumable",
+                "runAgentLoop EXIT — hit task budget=$capturedBudgetLimit, finalizing as resumable",
             )
             withContext(Dispatchers.Main) {
-                finalizeAtTurnLimit(assistantId, accumulatedText, allToolBlocks)
+                finalizeAtTurnLimit(
+                    assistantId,
+                    accumulatedText,
+                    allToolBlocks,
+                    capturedBudgetLimit,
+                    runIds,
+                )
             }
         } else {
             AppLogger.info(TAG_STREAM, "runAgentLoop EXIT (loop body ended naturally)")
@@ -9083,6 +9435,8 @@ class ChatViewModel(
         assistantId: String,
         text: String,
         blocks: List<AssistantBlock>,
+        budgetLimit: Int = MAX_AGENT_TURNS,
+        runIds: Iterable<String> = emptyList(),
     ) {
         updateAssistantMessage(
             assistantId, text, false, blocks,
@@ -9104,9 +9458,9 @@ class ChatViewModel(
             _streamingById.value = _streamingById.value - assistantId
         }
         setInlineError(
-            "Stopped after $MAX_AGENT_TURNS agent turns to prevent runaway " +
-            "tool use. The model kept calling tools without finishing — tap " +
-            "Resume to continue from here, or send a new message to start over.",
+            "Stopped after $budgetLimit agent turns to prevent runaway " +
+                "tool use. The model kept calling tools without finishing — tap " +
+                "Resume to continue from here, or send a new message to start over.",
         )
         // [T-android-group-pause-badge-restamp] A LIVE interruption just
         // happened: this is a real entry into the paused state, so the
@@ -9115,6 +9469,7 @@ class ChatViewModel(
         // suppress the re-stamp here.
         markLiveInterruption()
         _canResume.value = true
+        finishRuns(runIds, ChatRunStatus.BudgetExceeded, "agent turn budget exhausted")
     }
 
     /**
@@ -9371,7 +9726,7 @@ class ChatViewModel(
             // every shell runs in a directory that survives VM recreation.
             val dispatchSessionId = activeSessionId
             android.util.Log.w("ShellExecDiag",
-                "executeShell dispatch=$dispatchSessionId rawSessionId=$sessionId realSessionId=$realSessionId isDraft=$isDraft cmd=${command.take(120).replace('\n', ' ')}")
+                "executeShell dispatch=$dispatchSessionId rawSessionId=$sessionId realSessionId=$realSessionId isDraft=$isDraft cmd=${LogRedactor.redact(command).take(120)}")
 
             // [T-bash-on-demand] Detect busybox-ash-incompatible bash syntax and,
             // if found, transparently install + switch to bash. Install time is
@@ -11307,6 +11662,11 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
     fun cancelStream() {
         AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
+        // Mark only live invocations. Queued prompts stay Queued so the
+        // post-cancel drain can resume them as independent runs.
+        runStates.value.values
+            .filter { it.status == ChatRunStatus.Running }
+            .forEach { setRunStatus(it.runId, ChatRunStatus.Cancelled, "cancelled by user") }
         streamJob?.cancel()
         _isStreaming.value = false
         // T-streaming-side-channel: flush any in-flight delta back into the
@@ -11381,11 +11741,15 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             val initialProvider = currentProvider
             if (initialProvider == null) {
                 AppLogger.warning(TAG, "resumeQueueAfterCancel: no provider, dropping queue")
+                _promptQueue.value.forEach { prompt ->
+                    prompt.runId?.let { setRunStatus(it, ChatRunStatus.Error, "No provider configured") }
+                }
                 _promptQueue.value = emptyList()
                 _messages.value = _messages.value.filterNot { it.isQueued }
                 return@launch
             }
             var provider: LLMProvider = initialProvider
+            val runIds = _promptQueue.value.mapNotNull { it.runId }.toMutableSet()
 
             // Refresh OAuth token if needed (mirrors sendMessage L2477-2501).
             if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
@@ -11452,10 +11816,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drain CANCELLED")
+                        finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Queued drain error (resumeQueueAfterCancel)", e)
                         setInlineError(e.message ?: "Unknown error")
+                        finishRuns(runIds, ChatRunStatus.Error, e.message)
                     } finally {
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
                         // [T-android-overlay-reply-status-34599] Surface
@@ -11468,10 +11834,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         publishOverlayReplyExcerpt(activeSessionId)
                         SessionActivityTracker.setInactive(activeSessionId)
                         SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
                     }
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
+                    finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard.
                 if (streamJob === coroutineContext[Job]) {
@@ -11654,9 +12022,15 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      * Clears [_canResume] on entry so repeated taps don't stack.
      */
     fun resume() {
-        if (_isStreaming.value || !_canResume.value) return
+        val runId = newRunId()
+        ensureRun(runId)
+        if (_isStreaming.value || !_canResume.value) {
+            setRunStatus(runId, ChatRunStatus.NotStarted, "resume is not available")
+            return
+        }
         val provider = currentProvider ?: run {
             _error.value = "No provider configured"
+            setRunStatus(runId, ChatRunStatus.Error, "No provider configured")
             return
         }
         _canResume.value = false
@@ -11708,6 +12082,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
             AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
             _isStreaming.value = true
+            setRunStatus(runId, ChatRunStatus.Running)
+            val runIds = mutableSetOf(runId)
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
                 try {
@@ -11728,17 +12104,27 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            runIds = runIds,
                         )
                         AppLogger.info(TAG_STREAM, "resume runAgentLoop RETURN normal")
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        if (completeRunBatchBeforeDrain(runIds)) {
+                            drainQueuedPrompts(
+                                provider,
+                                systemPrompt,
+                                fallbackProviders,
+                                activeFallbackStrategy,
+                            )
+                        }
                         AppLogger.info(TAG_STREAM, "resume drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "resume runAgentLoop CANCELLED")
                         Log.d(TAG, "Agent loop cancelled (resume)")
+                        finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "resume runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Agent loop error (resume)", e)
                         setInlineError(e.message ?: "Unknown error")
+                        finishRuns(runIds, ChatRunStatus.Error, e.message)
                     } finally {
                         AppLogger.info(TAG_STREAM, "resume streamJob FINALLY enter")
                         // [T-android-overlay-reply-status-34599] Surface
@@ -11751,11 +12137,13 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         publishOverlayReplyExcerpt(activeSessionId)
                         SessionActivityTracker.setInactive(activeSessionId)
                         SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "resume streamJob FINALLY exit")
                     }
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "resume streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot (resume)")
+                    finishRuns(runIds, ChatRunStatus.Cancelled, e.message)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard.
                 if (streamJob === coroutineContext[Job]) {

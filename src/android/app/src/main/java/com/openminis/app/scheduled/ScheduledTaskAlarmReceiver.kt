@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.util.UUID
 
 /**
  * [T-android-scheduled-tasks-design] Receives an AlarmManager fire and
@@ -35,11 +36,13 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
         val taskId = intent.getStringExtra(ScheduledTaskManager.EXTRA_TASK_ID) ?: return
 
         AppLogger.info(TAG, "fire received: task=$taskId")
+        val executionId = "alarm_${UUID.randomUUID()}"
 
         val pending = goAsync()
         val appContext = context.applicationContext
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val startedAt = SystemClock.elapsedRealtime()
+        var taskForFailure: ScheduledTask? = null
         scope.launch {
             try {
                 // [GH#197] Hard ceiling on how long this broadcast can stay
@@ -53,6 +56,7 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
                         AppLogger.warning(TAG, "task $taskId not found in store — skipping")
                         return@withTimeout
                     }
+                    taskForFailure = task
                     if (!task.enabled) {
                         AppLogger.info(TAG, "task $taskId disabled — skipping fire")
                         return@withTimeout
@@ -79,13 +83,31 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
                     // completion notification are finished off ScheduledAgent-
                     // Runner's app-scoped bgScope, which outlives this
                     // receiver.
-                    ScheduledAgentRunner.run(appContext, task, waitForCompletion = false)
+                    ScheduledAgentRunner.run(
+                        appContext,
+                        task,
+                        waitForCompletion = false,
+                        executionId = executionId,
+                    )
                 }
             } catch (t: Throwable) {
                 // Includes TimeoutCancellationException. The task stays
                 // scheduled (rescheduleNext already armed the next occurrence)
                 // so a wedged fire self-heals instead of killing the process.
                 AppLogger.error(TAG, "task $taskId fire failed: ${t.message}")
+                taskForFailure?.let { task ->
+                    runCatching {
+                        ScheduledTaskManager(appContext).markFired(
+                            taskId = task.id,
+                            sessionId = null,
+                            resultPreview = "handoff_failed: ${t.message}".take(200),
+                            ok = false,
+                            executionId = executionId,
+                        )
+                    }.onFailure { historyError ->
+                        AppLogger.error(TAG, "task $taskId failure history write failed: ${historyError.message}")
+                    }
+                }
             } finally {
                 pending.finish()
                 // [GH#197] The number to watch: this is the goAsync hold time,

@@ -375,10 +375,10 @@ class OpenAIProvider private constructor(
 
     /**
      * Whether this provider uses Chat Completions API (vs Responses API).
-     * Responses API is used when OAuth (Codex) OR when the user explicitly
-     * flipped the per-instance `useResponsesAPI` switch.
+     * Responses API is used for Codex OAuth, explicit opt-in, and Astra
+     * (whose tool calling is only supported through Responses).
      */
-    private val usesChatCompletionsAPI: Boolean get() = forceChatCompletions || (!isOAuth && !useResponsesAPI)
+    private val usesChatCompletionsAPI: Boolean get() = forceChatCompletions || (!isOAuth && !useResponsesAPI && !model.isGPT6Astra)
 
     /**
      * [T-android-tool-splits-reply-fix] Chat Completions streams ONE
@@ -398,7 +398,7 @@ class OpenAIProvider private constructor(
      * Only meaningful on the Codex OAuth path; everything else (the GPT-5.x
      * Codex models and their existing OAuth flow) is untouched by this gate.
      */
-    private val isCodexImageModel: Boolean get() = isOAuth && model.id == "gpt-image-2"
+    private val isCodexImageModel: Boolean get() = isOAuth && (model.id == "gpt-image-2" || model.isGPTImage25)
 
     private suspend fun getToken(): String {
         oauthTokenProvider?.let { return it() }
@@ -666,11 +666,11 @@ class OpenAIProvider private constructor(
             // normal Responses tool shape.
             com.openminis.app.logging.AppLogger.info(
                 "OpenAIProvider",
-                "[ModelUseRoute] gpt-image-2 → route=codex-backend " +
+                "[ModelUseRoute] ${model.id} → route=codex-backend " +
                     "url=chatgpt.com/backend-api/codex/responses isOAuth=$isOAuth " +
                     "hasAccountId=${codexAccountId != null}",
             )
-            buildCodexImageBody(messages)
+            buildCodexImageBody(messages, imageParts)
         } else if (usesChatCompletionsAPI) {
             buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         } else {
@@ -1608,6 +1608,8 @@ class OpenAIProvider private constructor(
         size: String? = null,
         quality: String? = null,
     ): LLMResponse = withContext(Dispatchers.IO) {
+        val effectiveSize = size ?: if (model.isGPTImage25) "1024x1024" else null
+        val effectiveQuality = quality ?: if (model.isGPTImage25) "high" else null
         val token = getToken()
         // [T-android-model-use-image-passthrough GH#62] Honor an explicit
         // endpoint-path override (non-standard providers); default otherwise.
@@ -1627,14 +1629,15 @@ class OpenAIProvider private constructor(
         // [T-android-model-use-image-passthrough GH#62] When the user explicitly
         // supplies response_format, respect it and skip the b64_json auto-probe.
         val userSetResponseFormat = imageExtraBody.containsKey("response_format")
-        var triedWithoutFormat = userSetResponseFormat
+        // Image 2.5 returns base64 by default; response_format is unsupported.
+        var triedWithoutFormat = userSetResponseFormat || model.isGPTImage25
         while (true) {
             val body = JSONObject()
                 .put("model", model.id)
                 .put("prompt", prompt)
                 .put("n", n)
-            if (size != null) body.put("size", size)
-            if (quality != null) body.put("quality", quality)
+            if (effectiveSize != null) body.put("size", effectiveSize)
+            if (effectiveQuality != null) body.put("quality", effectiveQuality)
             if (!triedWithoutFormat) body.put("response_format", "b64_json")
             // [T-android-model-use-image-passthrough GH#62] Merge user-supplied
             // passthrough fields. User keys WIN over our defaults (they can
@@ -1738,6 +1741,8 @@ class OpenAIProvider private constructor(
         if (images.isEmpty()) {
             throw LLMError.ProviderError("images/edits requires at least one input image")
         }
+        val effectiveSize = size ?: if (model.isGPTImage25) "1024x1024" else null
+        val effectiveQuality = quality ?: if (model.isGPTImage25) "high" else null
         val token = getToken()
         // Same override precedence as generateImage: explicit path override →
         // Azure deployments path → basePath. Only the default differs.
@@ -1752,14 +1757,14 @@ class OpenAIProvider private constructor(
         // b64_json auto-probe, mirroring generateImage: some providers reject
         // response_format on the edits route, so retry once without it.
         val userSetResponseFormat = imageExtraBody.containsKey("response_format")
-        var triedWithoutFormat = userSetResponseFormat
+        var triedWithoutFormat = userSetResponseFormat || model.isGPTImage25
         while (true) {
             val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             multipart.addFormDataPart("model", model.id)
             multipart.addFormDataPart("prompt", prompt)
             multipart.addFormDataPart("n", n.toString())
-            if (size != null) multipart.addFormDataPart("size", size)
-            if (quality != null) multipart.addFormDataPart("quality", quality)
+            if (effectiveSize != null) multipart.addFormDataPart("size", effectiveSize)
+            if (effectiveQuality != null) multipart.addFormDataPart("quality", effectiveQuality)
             if (!triedWithoutFormat) multipart.addFormDataPart("response_format", "b64_json")
             // Passthrough body fields arrive as JSON scalars; multipart carries
             // text only, so stringify. `model` is re-pinned below so a stray
@@ -1868,7 +1873,7 @@ class OpenAIProvider private constructor(
                         "OpenAIProvider",
                         "[ModelUseRoute] images/generations b64 decode failed: ${e.message}",
                     )
-                    continue
+                    throw LLMError.ProviderError("Image $i could not be decoded.")
                 }
                 val mime = hintMime ?: detectImageMime(bytes)
                 attachments.add(LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, mime, bytes))
@@ -1877,20 +1882,22 @@ class OpenAIProvider private constructor(
                 if (urlStr.isNotEmpty()) {
                     try {
                         val dlReq = Request.Builder().url(urlStr).get().build()
-                        val dlResp = client.newCall(dlReq).execute()
-                        val dlBytes = dlResp.body?.bytes()
-                        val ctMime = dlResp.header("Content-Type")
-                        dlResp.close()
-                        if (dlBytes != null && dlBytes.isNotEmpty()) {
+                        client.newCall(dlReq).execute().use { dlResp ->
+                            if (!dlResp.isSuccessful) throw java.io.IOException("HTTP ${dlResp.code}")
+                            val ctMime = dlResp.header("Content-Type")?.substringBefore(';')
+                            if (ctMime == "text/html" || ctMime == "application/json") {
+                                throw java.io.IOException("Server returned $ctMime instead of an image")
+                            }
+                            val dlBytes = dlResp.body?.bytes()
+                            if (dlBytes == null || dlBytes.isEmpty()) throw java.io.IOException("Empty image download")
                             val mime = hintMime ?: ctMime ?: detectImageMime(dlBytes)
                             attachments.add(LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, mime, dlBytes))
                         }
                     } catch (e: Exception) {
-                        com.openminis.app.logging.AppLogger.warning(
-                            "OpenAIProvider",
-                            "[ModelUseRoute] failed to download image from $urlStr: ${e.message}",
-                        )
+                        // Never turn an expired URL/error page into a successful image attachment.
+                        throw LLMError.ProviderError("Image $i download failed: ${e.message}")
                     }
+
                 }
             }
             val revised = item.safeOptString("revised_prompt", "")
@@ -1946,7 +1953,7 @@ class OpenAIProvider private constructor(
         // OpenAI-compatible relay would 400 on the unknown key.
         resolvedServiceTier()?.let { body.put("service_tier", it) }
 
-        if (temperature != null) {
+        if (temperature != null && !model.isGPT6Astra) {
             body.put("temperature", temperature)
         }
 
@@ -2423,7 +2430,7 @@ class OpenAIProvider private constructor(
             return builder.build()
         }
 
-        val endpointPath = if (useResponsesAPI) "/responses" else "/chat/completions"
+        val endpointPath = if (!usesChatCompletionsAPI) "/responses" else "/chat/completions"
         // [T-android-azure-openai] Azure routes via the deployments path and
         // auths with the api-key header. azureUrl() returns null when not in
         // Azure mode / no base, so the standard basePath join stays the default.
@@ -2554,7 +2561,8 @@ class OpenAIProvider private constructor(
             // [OpenMinis#163] null (catalog silent) must read as false here —
             // only an affirmative declaration may suppress the field.
             declaresNoEffortTiers = model.declaresNoEffortTiers == true,
-            level = level,
+            // Astra always reasons; the legacy OFF setting uses its lowest valid tier.
+            level = if (model.isGPT6Astra && !level.isEnabled) ThinkingLevel.LOW else level,
             maxTokens = maxTokens,
             isOpenRouter = isOpenRouter,
             usesUnifiedReasoningEffort = usesUnifiedReasoningEffort,
@@ -2612,22 +2620,41 @@ class OpenAIProvider private constructor(
      * instruction. The <prompt> is the latest user text — plain string content
      * or the concatenated text parts of the last user message.
      */
-    private fun buildCodexImageBody(messages: List<LLMMessage>): JSONObject {
+    internal fun buildCodexImageBody(
+        messages: List<LLMMessage>,
+        imageParts: List<LLMMessage.ImagePart> = emptyList(),
+    ): JSONObject {
         val lastUser = messages.lastOrNull { it.role == LLMMessage.Role.USER }
         val prompt = lastUser?.let { m ->
             m.content.takeIf { it.isNotBlank() }
                 ?: m.contentParts.filterIsInstance<AgentContentPart.Text>()
                     .joinToString(" ") { it.text }.trim()
         }.orEmpty()
+        val userContent = "Use the image generation tool to create: $prompt"
+        val references = if (model.isGPTImage25) {
+            lastUser?.imageParts.orEmpty() + imageParts +
+                lastUser?.contentParts.orEmpty().filterIsInstance<AgentContentPart.ImageData>()
+                    .map { LLMMessage.ImagePart(it.data, it.mimeType) }
+        } else emptyList()
+        val content: Any = if (references.isEmpty()) userContent else JSONArray().apply {
+            put(JSONObject().put("type", "input_text").put("text", userContent))
+            references.forEach { image ->
+                put(JSONObject().put("type", "input_image")
+                    .put("image_url", "data:${image.mimeType};base64,${Base64.encodeToString(image.data, Base64.NO_WRAP)}"))
+            }
+        }
         return JSONObject().apply {
-            put("model", "gpt-5.5")
+            put("model", if (model.isGPTImage25) "gpt-6-astra" else "gpt-5.5")
             put("instructions", "You are a helpful assistant. Use tools when available.")
             put("input", JSONArray().put(JSONObject().apply {
                 put("role", "user")
-                put("content", "Use the image generation tool to create: $prompt")
+                put("content", content)
             }))
             put("store", false)
-            put("tools", JSONArray().put(JSONObject().put("type", "image_generation")))
+            put("tools", JSONArray().put(JSONObject().put("type", "image_generation").apply {
+                // Never silently generate with the older default image model.
+                if (model.isGPTImage25) put("model", model.id)
+            }))
             put("reasoning", JSONObject().put("effort", "low"))
             put("include", JSONArray())
             put("tool_choice", "auto")
@@ -2936,7 +2963,7 @@ class OpenAIProvider private constructor(
         // LLMProvider.streamMessage/sendMessage before reaching here.
         val effort = if (thinkingLevel.isEnabled) {
             mapThinkingLevelToResponsesEffort(thinkingLevel)?.let { clampEffortForModel(it) }
-        } else null
+        } else if (model.isGPT6Astra) "low" else null
         when {
             // [T-android-mistral-reasoning-422] Mistral rejects the reasoning
             // request parameter outright (`422 extra_forbidden body.reasoning`,

@@ -40,6 +40,25 @@ class AnthropicProviderTest {
         server.shutdown()
     }
 
+    @Test
+    fun `API key request does not require the OAuth identifier`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setBody("""{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}""")
+                .setHeader("Content-Type", "application/json"),
+        )
+
+        val response = provider.sendMessage(
+            listOf(LLMMessage(LLMMessage.Role.USER, "Hi")),
+            systemPrompt = "You are helpful",
+            maxTokens = 128,
+        )
+
+        assertEquals("ok", response.text)
+        val body = JSONObject(server.takeRequest().body.readUtf8())
+        assertEquals("You are helpful", body.getJSONArray("system").getJSONObject(0).getString("text"))
+    }
+
     // -- sendMessage response parsing --
 
     @Test
@@ -607,6 +626,7 @@ class AnthropicProviderTest {
             model = LLMModel.claudeSonnet5,
             basePath = server.url("/").toString().trimEnd('/'),
             isOAuth = true,
+            oauthIdentifierPrompt = "synthetic-oauth-identifier",
         )
         server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
 
