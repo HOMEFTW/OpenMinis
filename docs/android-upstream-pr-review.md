@@ -62,4 +62,4 @@
 - 交付包 `OpenMinis-upstream-reviewed-debug.apk`，69,071,266 字节；SHA-256 `31255beed723fdcbe0a951fa6405999008f4f59558cf69e5dacda040cd4d816f`。
 - 构建日志位于本任务 `work/upstream-port-final-validation.log`；测试统计 `work/upstream-port-test-results.json`。
 - 本轮没有连接 Android 设备，也未运行 instrumentation 测试。既有 androidTest 中 `ExecutionCoordinatorInstrumentedTest` 的 `mountedSessionId` 引用问题不在本次修改范围，未宣称该测试集通过。
-- 源码保留在本地 fork 工作区，尚未提交、推送或发布本轮版本。
+- 以上为本地验证记录；这些功能现作为 Android 增强 PR 的一部分提交供上游参考。
