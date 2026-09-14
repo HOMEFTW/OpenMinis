@@ -191,7 +191,9 @@ fun WebPreviewFullscreenScreen(
                 .fillMaxSize()
                 .background(Color.Black),
         ) {
-            AndroidView(
+            if (holder.rendererFailed) {
+                androidx.compose.material3.Text(stringResource(com.openminis.app.R.string.pr_webview_failed), color = Color.White, modifier = Modifier.padding(24.dp))
+            } else AndroidView(
                 factory = {
                     val wv = holder.webView
                     // Tap-to-show — return false so WebView still handles input.

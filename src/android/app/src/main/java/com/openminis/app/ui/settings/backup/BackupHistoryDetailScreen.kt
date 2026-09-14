@@ -68,6 +68,15 @@ fun BackupHistoryDetailScreen(
     onOpenSkipped: () -> Unit = {},
     onOpenDestination: ((String) -> Unit)? = null,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val localPackage by androidx.compose.runtime.produceState<java.io.File?>(null, record.packageName) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            record.packageName?.takeIf { it.isNotBlank() && '/' !in it && '\\' !in it }?.let { name ->
+                val root = com.openminis.app.backup.BackupExporter.backupsDirectory(context).canonicalFile
+                java.io.File(root, name).canonicalFile.takeIf { it.parentFile == root && it.isFile }
+            }
+        }
+    }
     var confirmRemove by remember { mutableStateOf(false) }
     // [T-backup-delete-files-too] Offering to delete the packages too only
     // makes sense when we can name the file AND some destination actually
@@ -89,6 +98,7 @@ fun BackupHistoryDetailScreen(
             }
         },
     ) {
+        localPackage?.let { LocalBackupActions(it) }
         // -- Summary --
         SettingsSection(
             header = stringResource(R.string.backup_history_summary),

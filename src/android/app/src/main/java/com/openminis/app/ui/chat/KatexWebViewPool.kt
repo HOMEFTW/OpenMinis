@@ -1,5 +1,8 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
@@ -121,11 +124,15 @@ internal object KatexWebViewPool {
     fun releaseWebView() {
         runOnMain {
             webView?.let {
-                runCatching { it.destroy() }
+                it.disposeSafely()
                 android.util.Log.i(TAG, "releaseWebView: offscreen KaTeX WebView destroyed")
             }
             webView = null
             isReady = false
+            pending?.complete(Triple(0, 0, "released"))
+            pending = null
+            readyDeferred?.complete(false)
+            readyDeferred = null
         }
     }
 
@@ -165,7 +172,7 @@ internal object KatexWebViewPool {
         fontSizePx: Int,
     ): KatexRenderResult? {
         val wv = ensureWebView(appContext) ?: return null
-        if (!awaitReady()) return null
+        if (!awaitReady() || webView !== wv) return null
 
         val deferred = CompletableDeferred<Triple<Int, Int, String>>()
         pending = deferred
@@ -176,7 +183,7 @@ internal object KatexWebViewPool {
             "$fontSizePx, " +
             "$isDark" +
             ")"
-        runOnMain { wv.evaluateJavascript(js, null) }
+        runOnMain { if (!wv.isDisposed()) wv.evaluateJavascript(js, null) else deferred.complete(Triple(0, 0, "renderer gone")) }
 
         val (w, h, err) = withTimeoutOrNull(RENDER_TIMEOUT_MS) { deferred.await() }
             ?: Triple(0, 0, "timeout")
@@ -185,7 +192,7 @@ internal object KatexWebViewPool {
             android.util.Log.w(TAG, "render failed latex='${latex.take(40)}' err=$err w=$w h=$h")
             return null
         }
-        return runOnMainSync { snapshot(wv, w, h) }
+        return runOnMainSync { if (wv.isDisposed()) null else snapshot(wv, w, h) }
     }
 
     private suspend fun ensureWebView(appContext: Context): WebView? {
@@ -218,14 +225,29 @@ internal object KatexWebViewPool {
             settings.javaScriptEnabled = true
             settings.allowFileAccess = true
             settings.cacheMode = WebSettings.LOAD_NO_CACHE
+            val sourceView = this
             addJavascriptInterface(JsBridge { w, h, err ->
-                pending?.complete(Triple(w, h, err))
+                if (webView === sourceView) pending?.complete(Triple(w, h, err))
             }, "AndroidBridge")
             webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                    if (webView === view) {
+                        webView = null
+                        isReady = false
+                        pending?.complete(Triple(0, 0, "renderer gone"))
+                        pending = null
+                        readyDeferred?.complete(false)
+                        readyDeferred = null
+                    }
+                    view.disposeSafely()
+                    return true
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    if (webView !== view) return
                     isReady = true
-                    readyDeferred?.complete(Unit)
+                    readyDeferred?.complete(true)
                 }
             }
             loadUrl(ASSET_HTML)
@@ -295,12 +317,12 @@ internal object KatexWebViewPool {
     }
 
     @Volatile
-    private var readyDeferred: CompletableDeferred<Unit>? = null
+    private var readyDeferred: CompletableDeferred<Boolean>? = null
 
     private suspend fun awaitReady(): Boolean {
         if (isReady) return true
-        val d = readyDeferred ?: CompletableDeferred<Unit>().also { readyDeferred = it }
-        val ok = withTimeoutOrNull(RENDER_TIMEOUT_MS) { d.await() } != null
+        val d = readyDeferred ?: CompletableDeferred<Boolean>().also { readyDeferred = it }
+        val ok = withTimeoutOrNull(RENDER_TIMEOUT_MS) { d.await() } == true
         if (!ok) android.util.Log.w(TAG, "WebView never reached ready state")
         return ok
     }

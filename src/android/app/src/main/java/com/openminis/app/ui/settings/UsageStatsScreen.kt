@@ -153,9 +153,13 @@ fun UsageStatsScreen(
     var grandTotal by remember { mutableStateOf(GrandTotal()) }
     var providerGroups by remember { mutableStateOf<List<ProviderGroup>>(emptyList()) }
     var isLoaded by remember { mutableStateOf(false) }
+    var days by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
+    var search by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
+
+    LaunchedEffect(days, providerConfig) {
         val records = chatDao.allUsageRecords()
+        val now = System.currentTimeMillis()
 
         val modelLookup = mutableMapOf<String, Pair<String, String>>()
         for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
@@ -173,6 +177,7 @@ fun UsageStatsScreen(
         val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
         for (record in records) {
+            if (!usageInDateRange(record.createdAt, now, days)) continue
             val usage = try { JSONObject(record.tokenUsage) } catch (_: Exception) { continue }
             val input = usage.optLong("inputTokens", 0)
             val output = usage.optLong("outputTokens", 0)
@@ -207,7 +212,7 @@ fun UsageStatsScreen(
                 ?: resolved?.second
                 ?: UNKNOWN_PROVIDER
 
-            val stats = statsMap.getOrPut("$modelKey#${attribution.name}") {
+            val stats = statsMap.getOrPut("$provider#$modelKey#${attribution.name}") {
                 ModelStats(modelKey, displayName, provider, attribution)
             }
             stats.inputTokens += input
@@ -240,6 +245,16 @@ fun UsageStatsScreen(
     }
 
     SettingsScaffold(title = stringResource(R.string.usage_title), onBack = onBack) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 16.dp)) {
+            for ((value, label) in listOf(0 to R.string.pr_usage_all, 7 to R.string.pr_usage_week, 30 to R.string.pr_usage_month)) {
+                androidx.compose.material3.FilterChip(selected = days == value, onClick = { days = value }, label = { Text(stringResource(label)) })
+            }
+        }
+        androidx.compose.material3.OutlinedTextField(
+            value = search, onValueChange = { search = it }, singleLine = true,
+            label = { Text(stringResource(R.string.pr_usage_search)) },
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+        )
         if (!isLoaded) return@SettingsScaffold
 
         SettingsSection(header = stringResource(R.string.usage_section_total)) {
@@ -260,7 +275,11 @@ fun UsageStatsScreen(
             }
         }
 
-        for (group in providerGroups) {
+        for (original in providerGroups) {
+            val group = original.copy(models = original.models.filter {
+                usageMatchesSearch(it.modelId, it.displayName, it.provider, search)
+            })
+            if (group.models.isEmpty()) continue
             SettingsSection(header = group.name) {
                 group.models.forEachIndexed { idx, model ->
                     ExpandableModelRow(
@@ -390,3 +409,10 @@ private fun formatCount(n: Long): String = when {
     }
     else -> n.toString()
 }
+
+/** Rolling window in milliseconds; future timestamps never leak into a bounded range. */
+internal fun usageInDateRange(createdAt: Long, now: Long, days: Int): Boolean =
+    days <= 0 || createdAt in (now - days.toLong() * 86_400_000L)..now
+
+internal fun usageMatchesSearch(id: String, name: String, provider: String, search: String): Boolean =
+    search.trim().let { query -> listOf(id, name, provider).any { it.contains(query, ignoreCase = true) } }

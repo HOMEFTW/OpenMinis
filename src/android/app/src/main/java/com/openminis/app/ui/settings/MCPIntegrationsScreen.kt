@@ -72,6 +72,11 @@ fun MCPIntegrationsScreen(
     envVarRepository: com.openminis.app.data.repository.EnvVarRepository? = null,
 ) {
     val servers by mcpRepository.servers.collectAsState()
+    val context = LocalContext.current
+    val testScope = androidx.compose.runtime.rememberCoroutineScope()
+    var testingId by remember { mutableStateOf<String?>(null) }
+    val testResults = remember { androidx.compose.runtime.mutableStateMapOf<String, String>() }
+
 
     // [T-android-mcp-list-reload-on-appear] MCPRepository reads servers.json
     // only in init() (app launch). A server the agent writes via minis-mcp-cli
@@ -81,6 +86,7 @@ fun MCPIntegrationsScreen(
     LaunchedEffect(Unit) {
         mcpRepository.reloadFromDisk()
     }
+    LaunchedEffect(servers) { testResults.clear() }
 
     var showAddSheet by remember { mutableStateOf(false) }
     // [T-mcp-review-fixes-android] FIX 1: tapping a row opens the form in EDIT
@@ -131,7 +137,7 @@ fun MCPIntegrationsScreen(
                     val transportIcon = if (server.isStdio) Icons.Outlined.Terminal else Icons.Outlined.Language
                     SettingsRow(
                         title = server.id,
-                        subtitle = server.transportSummary.takeIf { it.isNotBlank() },
+                        subtitle = listOfNotNull(server.transportSummary.takeIf { it.isNotBlank() }, testResults[server.id]).joinToString("\n"),
                         showChevron = true,
                         showDivider = index < servers.size - 1,
                         // FIX 1: plain tap opens the edit form (was delete-confirm).
@@ -145,7 +151,21 @@ fun MCPIntegrationsScreen(
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(14.dp),
                                 )
-                                Spacer(Modifier.width(8.dp))
+                                MinisTextButton(enabled = testingId == null, onClick = {
+                                    testingId = server.id
+                                    testResults.remove(server.id)
+                                    testScope.launch {
+                                        try {
+                                            val count = runMcpConnectionCheck(server.id)
+                                            if (mcpRepository.servers.value.any { it == server }) {
+                                                testResults[server.id] = context.getString(R.string.pr_mcp_success, count)
+                                            }
+                                        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                                        catch (e: Exception) {
+                                            testResults[server.id] = com.openminis.app.logging.LogRedactor.redact(e.message ?: "MCP test failed").take(500)
+                                        } finally { testingId = null }
+                                    }
+                                }) { Text(stringResource(if (testingId == server.id) R.string.pr_mcp_testing else R.string.pr_mcp_test)) }
                                 SettingsSwitch(
                                     checked = server.enabled,
                                     onCheckedChange = { mcpRepository.setEnabled(server.id, it) },

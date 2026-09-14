@@ -172,7 +172,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     fun clearSettledSuccess() {
         if (_isRunning.value) return
         val r = _lastResult.value ?: return
-        if (r.allDelivered) _lastResult.value = null
+        if (r.allDelivered && r.localCopyRemoved) _lastResult.value = null
     }
 
     data class ExportResult(
@@ -209,6 +209,38 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearError() { _errorText.value = null }
+    private val _savingLocal = MutableStateFlow(false)
+    val savingLocal: StateFlow<Boolean> = _savingLocal.asStateFlow()
+    private val _localSaveMessage = MutableStateFlow<String?>(null)
+    val localSaveMessage: StateFlow<String?> = _localSaveMessage.asStateFlow()
+
+    /** Snapshot the source before the document picker opens; never switch to a newer run. */
+    fun saveLocalPackage(sourcePath: String, uri: Uri) {
+        if (_savingLocal.value) return
+        _savingLocal.value = true
+        _localSaveMessage.value = null
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val app = getApplication<Application>()
+                    com.openminis.app.backup.copyLocalBackup(
+                        File(sourcePath),
+                        File(app.filesDir, com.openminis.app.backup.BackupFileTreeExporter.BACKUPS_DIR_NAME),
+                    ) { app.contentResolver.openOutputStream(uri, "wt") }
+                }
+                _localSaveMessage.value = getApplication<Application>().getString(com.openminis.app.R.string.pr_backup_saved)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _localSaveMessage.value = getApplication<Application>().getString(
+                    com.openminis.app.R.string.pr_backup_save_failed, e.message.orEmpty(),
+                )
+            } finally {
+                _savingLocal.value = false
+            }
+        }
+    }
+
     fun clearExportReady() { _exportReady.value = null }
 
     /**
@@ -227,19 +259,11 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
      * packages stop being interchangeable.
      */
     fun startExport(passphrase: String?) {
-        if (_isRunning.value) return
+        if (_isRunning.value || _savingLocal.value) return
         val cats = _selected.value
         if (cats.isEmpty()) { _errorText.value = "Choose at least one thing to include."; return }
-        // [T-android-backup-destination-gate] Refuse to produce a package that
-        // can only land in our own sandbox. Re-read here rather than trusting
-        // the cached list: the user may have removed the last destination in
-        // another screen since this one was composed.
+        // Local packages can be saved through SAF without a remote destination.
         refreshDestinations()
-        if (!hasDestination) {
-            _errorText.value = getApplication<Application>()
-                .getString(com.openminis.app.R.string.backup_needs_destination)
-            return
-        }
         val encrypting = _encrypt.value
         if (encrypting && passphrase.isNullOrEmpty()) {
             _errorText.value = "Set a passphrase to encrypt this backup."
@@ -338,7 +362,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
 
-                _exportReady.value = ExportResult(
+                _exportReady.value = if (localRemoved) null else ExportResult(
                     packageFile = summary.packageFile,
                     totalBytes = summary.totalBytes,
                     skippedFiles = summary.skippedFiles,

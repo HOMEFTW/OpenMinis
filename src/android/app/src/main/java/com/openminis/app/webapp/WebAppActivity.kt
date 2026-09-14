@@ -1,5 +1,8 @@
 package com.openminis.app.webapp
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -344,7 +347,7 @@ class WebAppActivity : ComponentActivity() {
                     onReload = {
                         toolbarVisible = true
                         interactionTick += 1
-                        webViewState?.reload()
+                        webViewState?.takeUnless { it.isDisposed() }?.reload()
                     },
                 )
             }
@@ -505,6 +508,14 @@ class WebAppActivity : ComponentActivity() {
             .build()
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                webViewRef = null
+                view.disposeSafely()
+                view.rendererGoneNotice()
+                finish()
+                return true
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest,

@@ -7650,7 +7650,7 @@ class ChatViewModel(
             for ((partIdx, part) in msg.contentParts.withIndex()) {
                 when (part) {
                     is AgentContentPart.ToolResult -> {
-                        if (part.content.startsWith(ContextOffload.OFFLOADED_PREFIX)) {
+                        if (ContextOffload.isOffloadReadback(part.content)) {
                             skippedAlreadyOffloaded++
                             continue
                         }
@@ -7712,6 +7712,7 @@ class ChatViewModel(
                             toolId = part.id, toolName = part.name,
                         )
                     }
+                    if (part.content.length > 500 && linuxPath.isEmpty()) continue
                     val imgPath = part.imageData?.let { data ->
                         if (data.size > 1024) {
                             ContextOffload.offloadImage(
@@ -7721,6 +7722,7 @@ class ChatViewModel(
                             )
                         } else ""
                     } ?: ""
+                    if ((part.imageData?.size ?: 0) > 1024 && imgPath.isEmpty()) continue
                     if (linuxPath.isEmpty()) linuxPath = imgPath
                     val stub = ContextOffload.stub(candidate.tokens, candidate.bytes, linuxPath)
                     part.copy(content = stub, imageData = null, imageMimeType = null)
@@ -7753,7 +7755,7 @@ class ChatViewModel(
                 is AgentContentPart.Text -> null
             }
 
-            if (newPart == null) continue
+            if (newPart == null || linuxPath.isEmpty()) continue
             parts[candidate.partIdx] = newPart
             agentHistory[candidate.msgIdx] = msg.copy(contentParts = parts)
 

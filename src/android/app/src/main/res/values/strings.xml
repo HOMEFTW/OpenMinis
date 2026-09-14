@@ -1940,4 +1940,18 @@
     <!-- [T-android-compact-progress] Live status while a compaction runs. -->
     <string name="compact_progress">Compacting… %1$d s elapsed</string>
     <string name="compact_progress_split">Compacting… %1$d s · summarizing in segments (%2$d/%3$d)</string>
+    <string name="pr_backup_saved">Backup saved to the selected destination.</string>
+    <string name="pr_backup_save_failed">Could not save backup: %1$s</string>
+    <string name="pr_backup_local_hint">The local package is inside this app. Save it outside the app to keep it after uninstalling.</string>
+    <string name="pr_backup_save">Save to files</string>
+    <string name="pr_backup_share">Share</string>
+    <string name="pr_backup_saving">Saving…</string>
+    <string name="pr_mcp_test">Test connection</string>
+    <string name="pr_mcp_testing">Testing…</string>
+    <string name="pr_mcp_success">Connected · %1$d tools</string>
+    <string name="pr_usage_all">All time</string>
+    <string name="pr_usage_week">Last 7 days</string>
+    <string name="pr_usage_month">Last 30 days</string>
+    <string name="pr_usage_search">Search model or provider</string>
+    <string name="pr_webview_failed">Page renderer stopped. Close this page and open it again to retry.</string>
 </resources>

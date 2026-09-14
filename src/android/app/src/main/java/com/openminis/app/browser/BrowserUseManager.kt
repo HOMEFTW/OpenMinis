@@ -1,5 +1,8 @@
 package com.openminis.app.browser
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -170,6 +173,9 @@ class BrowserUseManager(
     var onBlobDownloadData: ((data: ByteArray, filename: String, mimeType: String?) -> Unit)? = null
 
     /** Deferred for awaiting navigation completion. */
+    private val scriptWaiters = mutableSetOf<CompletableDeferred<String>>()
+    @Volatile private var rendererFailed = false
+
     private var navigationDeferred: CompletableDeferred<Unit>? = null
 
     /** Screenshots directory. */
@@ -292,7 +298,7 @@ class BrowserUseManager(
                     .catch(function(e) { __minis__.blobDownloadError(String(e)); });
             })();
         """.trimIndent()
-        webView.post { webView.evaluateJavascript(js, null) }
+        webView.post { if (!rendererFailed) webView.evaluateJavascript(js, null) }
     }
 
     /**
@@ -317,6 +323,7 @@ class BrowserUseManager(
      * a 412-wide viewport on a 1080-wide container.
      */
     private fun applyShrinkToFit(cssWidth: Int) {
+        if (rendererFailed) return
         val containerPx = lastKnownContainerWidthPx
         if (containerPx <= 0 || cssWidth <= 0) return
         val density = webView.resources.displayMetrics.density
@@ -342,6 +349,21 @@ class BrowserUseManager(
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebViewClient() {
         webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                rendererFailed = true
+                scriptWaiters.toList().forEach { it.completeExceptionally(IllegalStateException("Browser renderer stopped")) }
+                scriptWaiters.clear()
+                _isLoading.value = false
+                navigationDeferred?.complete(Unit)
+                navigationDeferred = null
+                asyncJsDeferred?.complete("{\"error\":\"Browser renderer stopped; open a new tab.\"}")
+                asyncJsDeferred = null
+                view.disposeSafely()
+                onCloseWindow?.invoke()
+                view.rendererGoneNotice()
+                return true
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest,
@@ -651,7 +673,24 @@ class BrowserUseManager(
     // -- Execute Action --
 
     suspend fun execute(input: BrowserActionInput): BrowserActionResult {
-        val prevUrl = withContext(Dispatchers.Main) { webView.url }
+        val failure = "Browser renderer stopped; open a new tab."
+        if (rendererFailed) return BrowserActionResult.error(failure)
+        return try {
+            val result = executeWhileAlive(input)
+            if (rendererFailed) BrowserActionResult.error(failure) else result
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (rendererFailed) BrowserActionResult.error(failure) else throw e
+        }
+    }
+
+    private suspend fun executeWhileAlive(input: BrowserActionInput): BrowserActionResult {
+        if (rendererFailed) return BrowserActionResult.error("Browser renderer stopped; open a new tab.")
+        val prevUrl = withContext(Dispatchers.Main) {
+            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+            webView.url
+        }
         var result: BrowserActionResult = when (input.action) {
             BrowserAction.NAVIGATE -> navigate(input.url)
             BrowserAction.SCREENSHOT -> return screenshot(fullPage = input.fullPage)
@@ -686,7 +725,10 @@ class BrowserUseManager(
 
         // Detect URL change after visual-change actions (ignore hash-only changes)
         if (result.success && BrowserAction.visualChangeActions.contains(input.action)) {
-            val newUrl = withContext(Dispatchers.Main) { webView.url }
+            val newUrl = withContext(Dispatchers.Main) {
+                check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                webView.url
+            }
             if (prevUrl != null && newUrl != null) {
                 val prevNoHash = prevUrl.substringBefore("#")
                 val curNoHash = newUrl.substringBefore("#")
@@ -727,6 +769,8 @@ class BrowserUseManager(
         _isLoading.value = true
 
         withContext(Dispatchers.Main) {
+            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
             // Re-assert the last applied viewport before loadUrl. Intercepted
             // navigations (minis://) served via shouldInterceptRequest skip
             // the layout pass that a real network load triggers, so without
@@ -818,7 +862,10 @@ class BrowserUseManager(
             val scrollHeightPx = if (cssScrollHeight > 0) {
                 (cssScrollHeight * density).toInt()
             } else {
-                withContext(Dispatchers.Main) { webView.height }
+                withContext(Dispatchers.Main) {
+                    check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                    webView.height
+                }
             }
             originalHeightPx = scrollHeightPx
             val cappedPx = scrollHeightPx.coerceAtMost(MAX_FULL_PAGE_HEIGHT_PX)
@@ -844,6 +891,8 @@ class BrowserUseManager(
             savedH = applied.second
             val cssCappedHeight = (cappedPx / density).toInt().coerceAtLeast(savedH)
             withContext(Dispatchers.Main) {
+                check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
                 applyViewport(savedW, cssCappedHeight)
             }
             didStretch = true
@@ -855,6 +904,8 @@ class BrowserUseManager(
         } finally {
             if (didStretch) {
                 withContext(Dispatchers.Main) {
+                    check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
                     applyViewport(savedW, savedH)
                 }
             }
@@ -945,6 +996,8 @@ class BrowserUseManager(
     suspend fun captureLiveSnapshot(): Bitmap? = captureWebViewBitmap()
 
     private suspend fun captureWebViewBitmap(): Bitmap? = withContext(Dispatchers.Main) {
+        if (rendererFailed) return@withContext null
+
         try {
             // WebView may be detached (pool-owned, never added to a window), so
             // width/height can be 0. Ensure it has a layout box matching the
@@ -1060,6 +1113,8 @@ class BrowserUseManager(
                 })();
             """.trimIndent()
             withContext(Dispatchers.Main) {
+                check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
                 webView.evaluateJavascript(wrapped, null)
             }
             val raw = withTimeoutOrNull(30_000L) { deferred.await() }
@@ -1195,6 +1250,8 @@ class BrowserUseManager(
             })();
         """.trimIndent()
         withContext(Dispatchers.Main) {
+            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
             webView.evaluateJavascript(wrapped, null)
         }
         val raw = withTimeoutOrNull(60_000L) { deferred.await() }
@@ -1206,6 +1263,7 @@ class BrowserUseManager(
 
     /** Set user agent from UI settings (public, non-result). */
     fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {
+        if (rendererFailed) return
         currentProfile = profile
         val ua = if (profile == UserAgentProfile.CUSTOM && !customUA.isNullOrEmpty()) customUA
             else profile.userAgentString
@@ -1251,6 +1309,7 @@ class BrowserUseManager(
      * — mirrors iOS `BrowserUseManager.setViewport(width:height:...)`.
      */
     fun applyViewport(cssWidth: Int, cssHeight: Int) {
+        if (rendererFailed) return
         val density = webView.resources.displayMetrics.density
         val w = ((cssWidth * density).toInt()).coerceAtLeast(1)
         val h = ((cssHeight * density).toInt()).coerceAtLeast(1)
@@ -1278,6 +1337,8 @@ class BrowserUseManager(
         // WebView; settings / reload likewise. Hop to main so we don't
         // crash with "A WebView method was called on thread 'worker-N'".
         withContext(Dispatchers.Main) {
+            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
             if (ua != null) {
                 webView.settings.userAgentString = ua
             }
@@ -1293,10 +1354,10 @@ class BrowserUseManager(
 
     // -- User Navigation --
 
-    fun goBack() { if (webView.canGoBack()) webView.goBack() }
-    fun goForward() { if (webView.canGoForward()) webView.goForward() }
-    fun reload() { webView.reload() }
-    fun stopLoading() { webView.stopLoading(); _isLoading.value = false }
+    fun goBack() { if (!rendererFailed && webView.canGoBack()) webView.goBack() }
+    fun goForward() { if (!rendererFailed && webView.canGoForward()) webView.goForward() }
+    fun reload() { if (!rendererFailed) webView.reload() }
+    fun stopLoading() { if (!rendererFailed) webView.stopLoading(); _isLoading.value = false }
 
     /**
      * Reload the current page and suspend until `onPageFinished` fires (or
@@ -1312,6 +1373,7 @@ class BrowserUseManager(
      * viewport-change callers still get a deterministic page refresh.
      */
     suspend fun reloadAndWait() {
+        if (rendererFailed) return
         val deferred = CompletableDeferred<Unit>()
         navigationDeferred = deferred
         _isLoading.value = true
@@ -1352,6 +1414,7 @@ class BrowserUseManager(
      * `document.body` populated. Must be called on the main thread.
      */
     suspend fun loadBlankPage() {
+        if (rendererFailed) return
         val deferred = CompletableDeferred<Unit>()
         navigationDeferred = deferred
         _isLoading.value = true
@@ -1370,6 +1433,7 @@ class BrowserUseManager(
     }
 
     fun loadURL(urlString: String) {
+        if (rendererFailed) return
         var normalized = urlString
         if (!normalized.contains("://")) normalized = "https://$normalized"
         _isLoading.value = true
@@ -1379,21 +1443,26 @@ class BrowserUseManager(
     // -- JS Evaluation Helpers --
 
     private suspend fun evaluateJavascript(js: String): String = withContext(Dispatchers.Main) {
+        check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+
         val deferred = CompletableDeferred<String>()
-        webView.evaluateJavascript(js) { result ->
-            // Android WebView returns JSON-encoded strings, so unquote
-            val unquoted = if (result != null && result.startsWith("\"") && result.endsWith("\"")) {
-                try {
-                    JSONObject("{\"v\":$result}").getString("v")
-                } catch (_: Exception) {
-                    result
+        scriptWaiters.add(deferred)
+        try {
+            webView.evaluateJavascript(js) { result ->
+                // Android WebView returns JSON-encoded strings, so unquote
+                val unquoted = if (result != null && result.startsWith("\"") && result.endsWith("\"")) {
+                    try {
+                        JSONObject("{\"v\":$result}").getString("v")
+                    } catch (_: Exception) {
+                        result
+                    }
+                } else {
+                    result ?: "null"
                 }
-            } else {
-                result ?: "null"
+                deferred.complete(unquoted)
             }
-            deferred.complete(unquoted)
-        }
-        deferred.await()
+            deferred.await()
+        } finally { scriptWaiters.remove(deferred) }
     }
 
     private suspend fun evaluateAndReturn(js: String): BrowserActionResult {

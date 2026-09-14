@@ -1,5 +1,8 @@
 package com.openminis.app.ui.markdown
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.util.LruCache
@@ -245,9 +248,11 @@ fun KaTeXRenderView(
 
                             // Resize WebView to content size, then capture
                             post {
+                                if (isDisposed()) return@post
                                 layoutParams = ViewGroup.LayoutParams(bitmapW, bitmapH)
                                 requestLayout()
                                 postDelayed({
+                                    if (isDisposed()) return@postDelayed
                                     // [GH#206] Clamp the captured bitmap. bitmapW/H
                                     // were previously unbounded, so a wide display
                                     // formula allocated multi-MB of NATIVE heap.
@@ -308,8 +313,15 @@ fun KaTeXRenderView(
                     }, "AndroidBridge")
 
                     webViewClient = object : WebViewClient() {
+                        override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                            renderError = "renderer gone"
+                            view.disposeSafely()
+                            return true
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
+                            if (isDisposed()) return
                             val escapedLatex = latex
                                 .replace("\\", "\\\\")
                                 .replace("'", "\\'")
@@ -325,6 +337,7 @@ fun KaTeXRenderView(
                     loadUrl("file:///android_asset/katex/katex-render.html")
                 }
             },
+            onRelease = { it.disposeSafely() },
             modifier = Modifier.height(0.dp), // Hidden
         )
     }

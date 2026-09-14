@@ -32,4 +32,5 @@
          text body instead of a real file attachment — broke email / Drive
          / any chat target that wanted the .log file itself. -->
     <files-path name="logs" path="logs/" />
+    <files-path name="local-backups" path="Backups/" />
 </paths>

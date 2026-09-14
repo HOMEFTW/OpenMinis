@@ -1765,4 +1765,18 @@
     <string name="chat_input_placeholder_hint_5">Minis 可以把 ↩︎ 键设为发送或换行</string>
     <string name="compact_progress">正在压缩… 已进行 %1$d 秒</string>
     <string name="compact_progress_split">正在压缩… %1$d 秒 · 分段摘要中（%2$d/%3$d）</string>
+    <string name="pr_backup_saved">备份已保存到所选位置。</string>
+    <string name="pr_backup_save_failed">备份保存失败：%1$s</string>
+    <string name="pr_backup_local_hint">备份包目前保存在应用内。请保存到应用外的位置，以免卸载时丢失。</string>
+    <string name="pr_backup_save">保存到文件</string>
+    <string name="pr_backup_share">分享</string>
+    <string name="pr_backup_saving">正在保存…</string>
+    <string name="pr_mcp_test">测试连接</string>
+    <string name="pr_mcp_testing">测试中…</string>
+    <string name="pr_mcp_success">已连接 · %1$d 个工具</string>
+    <string name="pr_usage_all">全部时间</string>
+    <string name="pr_usage_week">近 7 天</string>
+    <string name="pr_usage_month">近 30 天</string>
+    <string name="pr_usage_search">搜索模型或服务商</string>
+    <string name="pr_webview_failed">页面渲染进程已停止。请关闭页面后重新打开以重试。</string>
 </resources>

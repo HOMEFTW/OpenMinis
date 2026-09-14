@@ -249,7 +249,9 @@ fun WebPreviewBottomSheet(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
             }
             Box(modifier = Modifier.fillMaxSize()) {
-                AndroidView(
+                if (holder.rendererFailed) {
+                Text(stringResource(com.openminis.app.R.string.pr_webview_failed), modifier = Modifier.padding(24.dp))
+            } else AndroidView(
                     factory = {
                         // Issue #24: ModalBottomSheet's nested-scroll grabbed
                         // every vertical drag on the hosted WebView, so the

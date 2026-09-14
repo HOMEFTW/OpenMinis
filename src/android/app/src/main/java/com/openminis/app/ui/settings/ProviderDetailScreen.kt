@@ -196,6 +196,7 @@ fun ProviderDetailScreen(
                     )
                 } else {
                     ApiKeyCredentialBlock(
+                        allowsEmptyKey = instance.allowsEmptyAPIKey,
                         storedKey = storedKey,
                         keyVisible = keyVisible,
                         onToggleVisibility = { keyVisible = !keyVisible },
@@ -981,6 +982,7 @@ private fun OAuthCredentialBlock(
 
 @Composable
 private fun ApiKeyCredentialBlock(
+    allowsEmptyKey: Boolean,
     storedKey: String,
     keyVisible: Boolean,
     onToggleVisibility: () -> Unit,
@@ -1026,7 +1028,7 @@ private fun ApiKeyCredentialBlock(
                 Text(stringResource(R.string.common_cancel))
             }
             Spacer(modifier = Modifier.width(8.dp))
-            MinisSmallButton(onClick = onSave, enabled = editValue.isNotBlank()) {
+            MinisSmallButton(onClick = onSave, enabled = editValue.isNotBlank() || (allowsEmptyKey && editValue.isEmpty())) {
                 Text(stringResource(R.string.provider_detail_save_key))
             }
         }

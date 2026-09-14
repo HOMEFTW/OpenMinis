@@ -1,5 +1,8 @@
 package com.openminis.app.ui.settings
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisTextButton
 
@@ -76,6 +79,7 @@ fun MinisSkillsBrowserScreen(
     var currentUrl by remember { mutableStateOf("https://github.com/OpenMinis/MinisSkills") }
     var hudState by remember { mutableStateOf(HudState.HIDDEN) }
     var hudMessage by remember { mutableStateOf("") }
+    var rendererFailed by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -139,7 +143,8 @@ fun MinisSkillsBrowserScreen(
                 .padding(padding),
         ) {
             // WebView
-            AndroidView(
+            if (rendererFailed) Text(stringResource(com.openminis.app.R.string.pr_webview_failed), modifier = Modifier.padding(24.dp))
+            else AndroidView(
                 factory = { context ->
                     WebView(context).apply {
                         settings.javaScriptEnabled = true
@@ -147,6 +152,13 @@ fun MinisSkillsBrowserScreen(
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
                         webViewClient = object : WebViewClient() {
+                            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                                webViewRef = null
+                                rendererFailed = true
+                                view.disposeSafely()
+                                return true
+                            }
+
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 url?.let { currentUrl = it }
                             }
@@ -190,6 +202,7 @@ fun MinisSkillsBrowserScreen(
                         loadUrl("https://github.com/OpenMinis/MinisSkills")
                     }.also { webViewRef = it }
                 },
+                onRelease = { if (webViewRef === it) webViewRef = null; it.disposeSafely() },
                 modifier = Modifier.fillMaxSize(),
             )
 

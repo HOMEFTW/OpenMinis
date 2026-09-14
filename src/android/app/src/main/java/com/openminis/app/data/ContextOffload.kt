@@ -59,8 +59,7 @@ object ContextOffload {
     /**
      * Write tool text content to disk and return the Linux-visible path
      * the model can later pass to `file_read`. Returns the empty string
-     * on any I/O failure — caller should still update the in-history part
-     * with a stub so the model isn't left holding the original bytes.
+     * on any I/O failure — callers must preserve the original in-history part.
      */
     fun offloadContent(
         context: Context,
@@ -123,6 +122,22 @@ object ContextOffload {
     fun stub(approxTokens: Int, byteCount: Int, linuxPath: String): String =
         "$OFFLOADED_PREFIX Content (~$approxTokens tokens, $byteCount bytes) saved to: $linuxPath\n" +
             "Use file_read tool to retrieve if needed."
+
+    /** A raw stub, or an exact file_read header for our offload tree followed by a stub. */
+    fun isOffloadReadback(content: String): Boolean {
+        if (content.startsWith(OFFLOADED_PREFIX)) return true
+        val newline = content.indexOf('\n')
+        if (newline !in 1..512) return false
+        val header = content.substring(0, newline).removeSuffix("\r")
+        if (!readbackHeader.matches(header)) return false
+        val path = header.substringAfter('[').substringBefore(" | ")
+        if (path.removePrefix("$LINUX_OFFLOADS_DIR/tools/").split('/').any { it == ".." || it == "." || it.isEmpty() }) return false
+        return content.startsWith(OFFLOADED_PREFIX, newline + 1)
+    }
+
+    private val readbackHeader = Regex(
+        """\[/var/minis/offloads/tools/[^|\r\n]+ \| \d+ bytes \| \d+ lines \| showing \d+-\d+ of \d+(?: \| truncated at \d+ chars, (?:next_offset=\d+|retry with a smaller lines value))?\]""",
+    )
 
     private const val TAG = "ContextOffload"
 }

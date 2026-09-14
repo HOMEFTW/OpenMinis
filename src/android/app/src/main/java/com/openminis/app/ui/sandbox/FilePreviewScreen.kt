@@ -1,5 +1,8 @@
 package com.openminis.app.ui.sandbox
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import com.openminis.app.R
 import androidx.compose.ui.res.stringResource
 import android.content.ContentValues
@@ -463,7 +466,13 @@ private fun MarkdownPreview(item: FileItem) {
 
 @Composable
 private fun HtmlPreview(item: FileItem) {
+    var rendererFailed by remember(item.file.absolutePath) { mutableStateOf(false) }
+    if (rendererFailed) {
+        Text(stringResource(R.string.pr_webview_failed), modifier = Modifier.padding(24.dp))
+        return
+    }
     AndroidView(
+        onRelease = { it.disposeSafely() },
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             WebView(ctx).apply {
@@ -480,9 +489,15 @@ private fun HtmlPreview(item: FileItem) {
                 // viewport units.
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
-                webViewClient = WebViewClient()
+                webViewClient = object : WebViewClient() {
+                    override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                        rendererFailed = true
+                        view.disposeSafely()
+                        return true
+                    }
+                }
                 val targetUrl = "file://${item.file.absolutePath}"
-                post { loadUrl(targetUrl) }
+                post { if (!isDisposed()) loadUrl(targetUrl) }
             }
         },
     )
@@ -1237,6 +1252,12 @@ private fun printFile(context: Context, item: FileItem) {
         // Keep a reference alive until the print job is dispatched.
         var holder: WebView? = webView
         webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                holder = null
+                view.disposeSafely()
+                view.rendererGoneNotice()
+                return true
+            }
             override fun onPageFinished(view: WebView, url: String) {
                 val printManager =
                     context.getSystemService(Context.PRINT_SERVICE) as PrintManager

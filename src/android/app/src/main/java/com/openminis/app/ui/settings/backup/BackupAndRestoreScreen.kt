@@ -227,6 +227,8 @@ private fun BackupTab(
     val destinations by vm.destinations.collectAsState()
     val historyRecords by vm.historyRecords.collectAsState()
     val lastResult by vm.lastResult.collectAsState()
+    val exportReady by vm.exportReady.collectAsState()
+    val savingLocal by vm.savingLocal.collectAsState()
     var showPreview by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<com.openminis.app.backup.BackupPreview?>(null) }
     var previewFailed by remember { mutableStateOf(false) }
@@ -430,11 +432,9 @@ private fun BackupTab(
             // while running would disable the button mid-run and leave no way
             // to stop the backup from this screen.
             //
-            // A package with no destination reaches only our own sandbox and
-            // dies with the app it protects — that is not a backup, so the
-            // button refuses rather than producing one (iOS parity).
+            // Local packages are explicitly saved through the document picker below.
             enabled = running || (
-                selected.isNotEmpty() && passphraseValid && destinations.isNotEmpty()
+                selected.isNotEmpty() && passphraseValid && !savingLocal
                 ),
             colors = if (running) {
                 androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -474,7 +474,6 @@ private fun BackupTab(
         // already selected (same ordering and rationale as iOS).
         if (!running) {
             val hint = when {
-                destinations.isEmpty() -> stringResource(R.string.backup_needs_destination)
                 selected.isEmpty() -> stringResource(R.string.backup_needs_category)
                 encrypt && passphrase.isEmpty() -> stringResource(R.string.backup_needs_passphrase)
                 else -> null
@@ -530,6 +529,8 @@ private fun BackupTab(
             }
         }
     }
+
+    if (!running) exportReady?.let { LocalBackupActions(it.packageFile, vm) }
 
     // -- History --
     BackupHistorySection(

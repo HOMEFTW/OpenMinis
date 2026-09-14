@@ -453,6 +453,13 @@ class MinisApp : Application(), ImageLoaderFactory {
             return
         }
 
+        // Force-stop removes alarms; re-arm persisted tasks when the app starts again.
+        try {
+            com.openminis.app.scheduled.ScheduledTaskManager(this).rescheduleAll()
+        } catch (e: Exception) {
+            Log.w("MinisApp", "Could not restore scheduled alarms", e)
+        }
+
         // [T-soul-md] Seed SOUL.md with the default content on first launch
         // so the Soul settings page and chat bubble identity have a real
         // file to read. Safe no-op on subsequent launches — never

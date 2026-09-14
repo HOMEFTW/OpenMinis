@@ -1,5 +1,8 @@
 package com.openminis.app.ui.preview
 
+import com.openminis.app.ui.webview.disposeSafely
+import com.openminis.app.ui.webview.isDisposed
+import com.openminis.app.ui.webview.rendererGoneNotice
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
@@ -32,6 +35,9 @@ class WebViewHolder(
     appContext: Context,
     initialUrl: String,
 ) {
+
+    var rendererFailed by mutableStateOf(false)
+        private set
 
     var pageTitle by mutableStateOf("")
         private set
@@ -96,6 +102,14 @@ class WebViewHolder(
             setAcceptThirdPartyCookies(wv, true)
         }
         webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                rendererFailed = true
+                isLoading = false
+                pageFavicon = null
+                view.disposeSafely()
+                return true
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: android.webkit.WebResourceRequest,
@@ -264,7 +278,7 @@ class WebViewHolder(
             val oldH = oldBottom - oldTop
             val newH = bottom - top
             if (newH > 0 && newH != oldH) {
-                (v as WebView).evaluateJavascript(
+                if (!(v as WebView).isDisposed()) v.evaluateJavascript(
                     "window.dispatchEvent(new Event('resize'));",
                     null,
                 )
@@ -282,6 +296,7 @@ class WebViewHolder(
      * whole "shared holder" trick.
      */
     fun startIfNeeded() {
+        if (rendererFailed || webView.isDisposed()) return
         if (hasLoaded) return
         // T-htmlpreview-2d5c4f3d: defer the actual loadUrl until the
         // WebView is attached to a window AND has been laid out with a
@@ -296,7 +311,7 @@ class WebViewHolder(
         hasLoaded = true
         if (webView.isAttachedToWindow && webView.width > 0 && webView.height > 0) {
             AppLogger.info(TAG, "loadUrl (attached) ${currentUrl.take(160)}")
-            webView.loadUrl(currentUrl)
+            if (!webView.isDisposed()) webView.loadUrl(currentUrl)
             return
         }
         webView.addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
@@ -307,7 +322,7 @@ class WebViewHolder(
                 v.post {
                     if (v.width > 0 && v.height > 0) {
                         AppLogger.info(TAG, "loadUrl (post-attach) ${currentUrl.take(160)}")
-                        webView.loadUrl(currentUrl)
+                        if (!webView.isDisposed()) webView.loadUrl(currentUrl)
                     } else {
                         v.viewTreeObserver.addOnGlobalLayoutListener(object :
                             android.view.ViewTreeObserver.OnGlobalLayoutListener {
@@ -315,7 +330,7 @@ class WebViewHolder(
                                 if (v.width > 0 && v.height > 0) {
                                     v.viewTreeObserver.removeOnGlobalLayoutListener(this)
                                     AppLogger.info(TAG, "loadUrl (post-layout) ${currentUrl.take(160)}")
-                                    webView.loadUrl(currentUrl)
+                                    if (!webView.isDisposed()) webView.loadUrl(currentUrl)
                                 }
                             }
                         })
@@ -327,6 +342,7 @@ class WebViewHolder(
     }
 
     fun reload() {
+        if (rendererFailed || webView.isDisposed()) return
         AppLogger.info(TAG, "reload")
         webView.reload()
     }
@@ -339,6 +355,7 @@ class WebViewHolder(
      * `BrowserUseManager.applyShrinkToFit`.
      */
     fun toggleDesktopMode() {
+        if (rendererFailed || webView.isDisposed()) return
         desktopMode = !desktopMode
         if (desktopMode) {
             webView.settings.userAgentString = DESKTOP_UA
@@ -381,6 +398,7 @@ class WebViewHolder(
     }
 
     fun stopLoading() {
+        if (rendererFailed || webView.isDisposed()) return
         AppLogger.info(TAG, "stopLoading")
         webView.stopLoading()
         isLoading = false
@@ -402,15 +420,7 @@ class WebViewHolder(
      * doesn't linger. Safe to call multiple times.
      */
     fun destroy() {
-        try {
-            detach()
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.destroy()
-            AppLogger.info(TAG, "destroyed")
-        } catch (e: Throwable) {
-            AppLogger.warning(TAG, "destroy failed: ${e.message}")
-        }
+        webView.disposeSafely()
     }
 
     companion object {
