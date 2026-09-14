@@ -705,6 +705,21 @@ fun ChatScreen(
     // already used elsewhere in this file via `context`, but DisposableEffect
     // is a non-composable scope so we lift the read up here.
     val tHangDiagAppContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val viewedSessionId = ChatViewModelStore.rememberPersistedId(sessionId)
+    val viewedLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    androidx.compose.runtime.DisposableEffect(viewedSessionId, viewedLifecycle) {
+        fun recordViewed() = com.openminis.app.ui.navigation.LaunchSessionHistory.record(tHangDiagAppContext, viewedSessionId)
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME || event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) recordViewed()
+        }
+        viewedLifecycle.addObserver(observer)
+        if (viewedLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) recordViewed()
+        onDispose {
+            viewedLifecycle.removeObserver(observer)
+            // Outgoing transition disposal must not overwrite a newer selection.
+            if (com.openminis.app.ui.navigation.LaunchSessionHistory.read(tHangDiagAppContext).first == viewedSessionId) recordViewed()
+        }
+    }
     androidx.compose.runtime.DisposableEffect(sessionId) {
         ChatViewModelStore.setActiveSession(sessionId)
         // [T-HANG-DIAG] enter / dispose markers around the ChatScreen lifetime
@@ -3841,13 +3856,8 @@ fun ChatScreen(
                                 // the edited content. Gated on isStreaming the
                                 // same way Retry is.
                                 onEdit = if (isStreaming || item.message.isQueued) null else ({
-                                    val prefill = viewModel.editMessage(item.message.id)
-                                    if (prefill != null) {
-                                        viewModel.setInputText(prefill)
-                                        coroutineScope.launch {
-                                            tracedScrollToItem("EDIT-MSG", 0, 0)
-                                        }
-                                        inputFocusRequester.requestFocus()
+                                    coroutineScope.launch {
+                                        viewModel.createEditBranch(item.message.id)?.let { onMoveToSession(it) }
                                     }
                                 }),
                                 onWithdraw = if (item.message.isQueued) {

@@ -91,7 +91,7 @@ object ChatExporter {
         format: String,
     ): Pair<Uri, Summary> = withContext(Dispatchers.IO) {
         val isJson = format == "json"
-        val ext = if (isJson) "json" else "txt"
+        val ext = when (format) { "json" -> "json"; "markdown" -> "md"; else -> "txt" }
         val stagingRoot = File(context.cacheDir, "export-staging")
         val workDir = File(stagingRoot, UUID.randomUUID().toString())
         if (!workDir.mkdirs() && !workDir.isDirectory) {
@@ -100,7 +100,7 @@ object ChatExporter {
 
         try {
             val transcriptFile = File(workDir, "messages.$ext")
-            val summary = streamTranscript(repository, session, isJson, transcriptFile)
+            val summary = streamTranscript(repository, session, isJson, transcriptFile, format == "markdown")
 
             val metaFile = File(workDir, "session.json")
             writeSessionMeta(metaFile, session, summary)
@@ -139,6 +139,7 @@ object ChatExporter {
         session: ChatSessionEntity,
         isJson: Boolean,
         out: File,
+        markdown: Boolean = false,
     ): Summary {
         val total = repository.messageCount(session.id)
         var done = 0
@@ -181,14 +182,14 @@ object ChatExporter {
                 }
                 writer.write("]")
             } else {
-                writer.write(session.title ?: "Conversation")
+                writer.write(if (markdown) "# " + markdownHeading(session.title ?: "Conversation") else session.title ?: "Conversation")
                 writer.write("\n\n")
                 forEachBatch(repository, session.id, total) { batch ->
                     for (msg in batch) {
-                        val role = if (msg.role == "user") "You" else "Assistant"
+                        val role = if (msg.role.equals("user", true)) "You" else "Assistant"
                         val text = extractPlainText(msg.partsJson)
-                        writer.write(role)
-                        writer.write(": ")
+                        writer.write(if (markdown) "## $role" else role)
+                        writer.write(if (markdown) "\n\n" else ": ")
                         writer.write(text)
                         writer.write("\n\n")
                         bytes += text.length.toLong() + role.length + 4
@@ -206,7 +207,7 @@ object ChatExporter {
         }
 
         return Summary(
-            format = if (isJson) "json" else "text",
+            format = if (isJson) "json" else if (markdown) "markdown" else "text",
             messageCount = done,
             firstCreatedAt = first,
             lastCreatedAt = last,

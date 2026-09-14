@@ -268,6 +268,7 @@ private fun chatPaneScaffoldDirective(twoPane: Boolean, listPaneWidth: Dp): Pane
 @Composable
 fun ChatSplitScaffold(
     initialSessionId: String?,
+    onReturnToSessionList: (() -> Unit)? = null,
     listPane: @Composable (
         selectedSessionId: String?,
         /**
@@ -330,6 +331,45 @@ fun ChatSplitScaffold(
     // See the long note at its former position further down for why the
     // selection is hoisted here at all.
     var selectedSessionId by rememberSaveable { mutableStateOf(initialSessionId) }
+
+    // Phones have one list/detail history. A chat opened by the outer NavHost
+    // must return to that host's list rather than expose a second inner list.
+    if (!twoPane) {
+        val showList: () -> Unit = {
+            if (onReturnToSessionList != null) onReturnToSessionList()
+            else selectedSessionId = null
+        }
+        androidx.activity.compose.BackHandler(enabled = selectedSessionId != null) { showList() }
+        Box(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown || (!event.isCtrlPressed && !event.isMetaPressed)) {
+                false
+            } else when (event.key) {
+                Key.N -> { selectedSessionId = newDraftSessionId(); true }
+                Key.F -> { SessionSearchRequest.focusSearch(); true }
+                else -> false
+            }
+        }) {
+            val savedPaneState = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
+            val sessionId = selectedSessionId
+            if (sessionId == null) {
+                savedPaneState.SaveableStateProvider("list") {
+                    listPane(null, null) { selectedSessionId = it }
+                }
+            } else {
+                savedPaneState.SaveableStateProvider("detail") {
+                    detailPane(
+                        sessionId,
+                        showList,
+                        { selectedSessionId = newDraftSessionId() },
+                        { selectedSessionId = it },
+                        null,
+                        false,
+                    )
+                }
+            }
+        }
+        return
+    }
 
     // [T-android-tablet-sidebar-collapse] Whether the list pane is hidden.
     //
@@ -847,6 +887,9 @@ fun ChatSplitScaffoldRoute(
 ) {
     ChatSplitScaffold(
         initialSessionId = initialSessionId,
+        onReturnToSessionList = if (initialSessionId != null) {
+            { navController.returnToSessionList() }
+        } else null,
         listPane = { selectedSessionId, draftPlaceholderId, onSessionSelected ->
             com.openminis.app.ui.sessions.SessionListScreen(
                 chatRepository = chatRepository,
@@ -864,6 +907,9 @@ fun ChatSplitScaffoldRoute(
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onRootfsClick = { navController.safeNavigate(Routes.ROOTFS_MANAGEMENT) },
                 onScheduledTasksClick = { navController.safeNavigate(Routes.SCHEDULED_TASKS) },
+                onTaskCenterClick = { navController.safeNavigate(Routes.TASK_CENTER) },
+                onLibraryClick = { navController.safeNavigate(Routes.LIBRARY) },
+                onDraftsClick = { navController.safeNavigate(Routes.DRAFTS) },
                 selectedSessionId = selectedSessionId,
                 // [T-android-draft-placeholder-row] Synthetic "New Chat" row,
                 // never persisted — see the listPane param docs.

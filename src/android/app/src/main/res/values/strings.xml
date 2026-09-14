@@ -670,9 +670,9 @@
     <string name="appearance_theme_light">Light</string>
     <string name="appearance_theme_dark">Dark</string>
     <string name="appearance_section_launch">Launch Session</string>
-    <string name="appearance_launch_footer">Choose what to show when the app starts. \"Auto\" opens a new chat if the last session is older than 15 minutes.</string>
+    <string name="appearance_launch_footer">Launch preferences apply to a new launch. Auto resumes the last viewed conversation within 15 minutes. Returning from the background preserves the current page.</string>
     <string name="appearance_launch_auto">Auto</string>
-    <string name="appearance_launch_last">Last Session</string>
+    <string name="appearance_launch_last">Last viewed conversation</string>
     <string name="appearance_launch_new">New Chat</string>
     <string name="appearance_launch_home">Home</string>
     <string name="appearance_section_return_key">Return Key</string>

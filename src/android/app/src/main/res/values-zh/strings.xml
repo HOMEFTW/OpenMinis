@@ -600,9 +600,9 @@
     <string name="appearance_theme_light">浅色</string>
     <string name="appearance_theme_dark">深色</string>
     <string name="appearance_section_launch">启动会话</string>
-    <string name="appearance_launch_footer">选择应用启动时显示的内容。\"自动\"会在上次会话超过 15 分钟时打开新对话。</string>
+    <string name="appearance_launch_footer">启动选项用于重新启动应用。自动模式在 15 分钟内恢复最后查看的对话；从后台返回时保留当前页面。</string>
     <string name="appearance_launch_auto">自动</string>
-    <string name="appearance_launch_last">上次会话</string>
+    <string name="appearance_launch_last">最后查看的对话</string>
     <string name="appearance_launch_new">新对话</string>
     <string name="appearance_launch_home">主页</string>
     <string name="appearance_section_return_key">回车键</string>

@@ -61,3 +61,14 @@ fun NavController.safePopBackStack(): Boolean {
     if (!state.isAtLeast(Lifecycle.State.STARTED)) return false
     return popBackStack()
 }
+
+/** Collapse the chat/list stacks to one list, including shortcut-only launches. */
+fun NavController.returnToSessionList() {
+    if (currentBackStackEntry?.lifecycle?.currentState != Lifecycle.State.RESUMED) return
+    navigate(Routes.SESSION_LIST) {
+        // A previous sessions entry may itself contain an in-pane chat.
+        // Reusing it would reveal that old conversation on the next back press.
+        popUpTo(graph.id) { inclusive = false }
+        launchSingleTop = true
+    }
+}

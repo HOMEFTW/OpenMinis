@@ -479,7 +479,7 @@ internal fun InlineErrorBanner(error: String, onRetry: (() -> Unit)? = null) {
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = error,
+            text = stringResource(FailureAdvice.classify(error).messageRes) + "\n" + error,
             color = Color(0xFFFF3B30),
             fontSize = 12.sp,
             lineHeight = 16.sp,

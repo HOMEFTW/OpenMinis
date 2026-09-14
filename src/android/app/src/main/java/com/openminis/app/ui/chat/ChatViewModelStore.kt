@@ -107,6 +107,8 @@ object ChatViewModelStore {
     @Synchronized
     fun release(sessionId: String) {
         val key = resolveKey(sessionId)
+        TaskCenter.remove(key)
+        if (key != sessionId) TaskCenter.remove(sessionId)
         aliases.entries.removeAll { it.value == key }
         aliasGeneration.intValue++
         stores.remove(key)?.let {

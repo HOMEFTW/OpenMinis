@@ -504,7 +504,7 @@ internal fun UserMessageBubble(
                 // gating as retry — caller passes null while streaming.
                 if (onEdit != null) {
                     DropdownMenuItem(
-                        text = { Text(stringResource(R.string.chat_longpress_edit)) },
+                        text = { Text(stringResource(R.string.daily_edit_branch)) },
                         onClick = { showMenu = false; onEdit() },
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) },
                     )

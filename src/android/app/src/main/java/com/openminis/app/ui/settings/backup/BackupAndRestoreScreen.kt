@@ -227,6 +227,41 @@ private fun BackupTab(
     val destinations by vm.destinations.collectAsState()
     val historyRecords by vm.historyRecords.collectAsState()
     val lastResult by vm.lastResult.collectAsState()
+    var showPreview by remember { mutableStateOf(false) }
+    var preview by remember { mutableStateOf<com.openminis.app.backup.BackupPreview?>(null) }
+    var previewFailed by remember { mutableStateOf(false) }
+    LaunchedEffect(showPreview, selected, maxFileSizeMB) {
+        if (!showPreview) return@LaunchedEffect
+        preview = null; previewFailed = false
+        try {
+            preview = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.openminis.app.backup.estimateBackup(context, selected, maxFileSizeMB)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { previewFailed = true }
+    }
+    if (showPreview) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showPreview = false },
+            title = { Text(stringResource(R.string.daily_backup_preview)) },
+            text = {
+                Column {
+                    for (category in selected) Text("• " + stringResource(categoryNameRes(category)))
+                    Text(stringResource(if (com.openminis.app.backup.backupIncludesCredentials(selected)) R.string.daily_backup_secrets else R.string.daily_backup_no_secrets))
+                    Text(stringResource(if (encrypt) R.string.daily_backup_encrypted else R.string.daily_backup_unencrypted))
+                    preview?.let {
+                        Text(stringResource(R.string.daily_backup_size, android.text.format.Formatter.formatShortFileSize(context, it.bytes)))
+                        if (it.limited) Text(stringResource(R.string.daily_backup_partial))
+                    } ?: Text(stringResource(if (previewFailed) R.string.daily_backup_estimate_failed else R.string.daily_backup_estimating))
+                }
+            },
+            confirmButton = { androidx.compose.material3.TextButton(enabled = preview != null || previewFailed, onClick = {
+                showPreview = false; vm.startExport(passphrase.takeIf { encrypt })
+            }) { Text(stringResource(R.string.daily_backup_start)) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { showPreview = false }) { Text(stringResource(R.string.common_cancel)) } },
+        )
+    }
+
 
     // Re-read destinations every time this tab appears: the user may have just
     // added one via "Manage Destinations…" and navigated back, and a stale
@@ -389,7 +424,7 @@ private fun BackupTab(
         MinisButton(
             onClick = {
                 if (running) vm.stopExport()
-                else vm.startExport(passphrase.takeIf { encrypt })
+                else showPreview = true
             },
             // The start-time requirements gate STARTING only. Applying them
             // while running would disable the button mid-run and leave no way

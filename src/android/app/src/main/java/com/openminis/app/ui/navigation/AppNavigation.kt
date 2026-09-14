@@ -86,6 +86,9 @@ private val EmphasizedDecelerate = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f)
 private val EmphasizedAccelerate = CubicBezierEasing(0.3f, 0.0f, 0.8f, 0.15f)
 
 object Routes {
+    const val TASK_CENTER = "task_center"
+    const val LIBRARY = "library"
+    const val DRAFTS = "drafts"
     const val SESSION_LIST = "sessions"
     const val CHAT = "chat/{sessionId}"
     const val SETTINGS = "settings"
@@ -228,6 +231,7 @@ fun AppNavigation(
     memoryRepository: MemoryRepository? = null,
     navController: NavHostController = rememberNavController(),
     initialDeepLink: DeepLinkAction? = null,
+    restoringState: Boolean = false,
 ) {
     val context = LocalContext.current
 
@@ -243,6 +247,7 @@ fun AppNavigation(
 
     // Handle initial deep link after composition
     LaunchedEffect(initialDeepLink) {
+        if (restoringState) return@LaunchedEffect
         when (initialDeepLink) {
             is DeepLinkAction.OpenTerminal -> {
                 navController.safeNavigate(Routes.terminal(initialDeepLink.initCommand))
@@ -313,6 +318,7 @@ fun AppNavigation(
     // settle into RESUMED before navigating; for mode 3 (Home) we don't
     // need to navigate at all so we can skip the wait entirely.
     LaunchedEffect(Unit) {
+        if (restoringState) return@LaunchedEffect
         val hasDeepLink = initialDeepLink != null && initialDeepLink !is DeepLinkAction.Unknown
         if (hasDeepLink) return@LaunchedEffect
         val hasPendingShare =
@@ -345,7 +351,13 @@ fun AppNavigation(
             com.openminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(context) ||
             com.openminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch()
         ) 3 else rawMode
-        val autoThresholdMs = 15L * 60 * 1000
+        val history = LaunchSessionHistory.read(context)
+        val sessions = chatRepository.dao.listSessions()
+        val selected = LaunchSessionHistory.candidate(history.first, history.second, sessions.map { it.id to it.updatedAt }) {
+            com.openminis.app.ui.chat.ComposerDraftStore(context).has(it)
+        }
+        val candidate = selected?.first
+        val viewedAt = selected?.second ?: 0L
         // [T-android-first-launch-lands-home] Read once, before the mode
         // branches: "is this device set up at all?" is the question that
         // outranks the launch preference.
@@ -376,37 +388,14 @@ fun AppNavigation(
             // steps that explain why. Once the user has either a session or a
             // provider, their preference is honoured again.
             !hasAnySession && !hasAnyProvider -> null
-            mode == 1 -> chatRepository.dao.listSessions().firstOrNull()?.let { Routes.chat(it.id) }
+            mode == 1 -> candidate?.let { Routes.chat(it) }
             mode == 2 -> Routes.chat("__new__${java.util.UUID.randomUUID()}")
             mode == 3 -> null
             else -> {
-                // [T-android-first-launch-lands-home] No history → Home, not a
-                // fresh draft. Auto mode is the DEFAULT, and it used to fall
-                // through to a new chat here: a device with providers but no
-                // sessions yet opened straight into an empty composer instead
-                // of the list. "Resume what I was doing" has nothing to resume
-                // when nothing was ever done.
-                val latest = chatRepository.dao.listSessions().firstOrNull()
-                    ?: return@LaunchedEffect
-                val fresh = System.currentTimeMillis() - latest.updatedAt < autoThresholdMs
-                // [XSessionDiag] Hypothesis 1: auto mode silently RESUMES the most
-                // recently updated session, so a restored backup whose updatedAt is
-                // the iPhone's own timestamp can look "fresh" and be presented as
-                // the landing chat — the user believes they are in a new chat.
-                // Logs the exact inputs to the freshness test and where it navigated.
-                // Runs once per cold start; no measurable cost.
-                run {
-                    val now = System.currentTimeMillis()
-                    com.openminis.app.logging.AppLogger.info(
-                        "XSessionDiag",
-                        "[XSessionDiag] launch/auto: candidate=${latest.id.take(8)} " +
-                            "title=${latest.title?.take(24)} " +
-                            "updatedAt=${latest.updatedAt} now=$now " +
-                            "ageMs=${now - latest.updatedAt} thresholdMs=$autoThresholdMs " +
-                            "fresh=$fresh -> ${if (fresh) "RESUME_EXISTING" else "NEW_DRAFT"}",
-                    )
-                }
-                if (fresh) Routes.chat(latest.id) else Routes.chat("__new__${java.util.UUID.randomUUID()}")
+                candidate ?: return@LaunchedEffect
+                if (LaunchSessionHistory.isRecent(viewedAt, System.currentTimeMillis())) {
+                    Routes.chat(candidate)
+                } else Routes.chat(newDraftSessionId())
             }
         }
         if (target != null) {
@@ -457,21 +446,21 @@ fun AppNavigation(
     // draft chat, seeding the pending action so ChatScreen consumes it on
     // its first LaunchedEffect tick. Mirrors the htmlShortcut path —
     // avoids a sessions-list flash and a duplicate back-stack entry.
-    val quickActionStart: String? = when (initialDeepLink) {
-        is DeepLinkAction.NewVoiceChat -> {
-            DeepLinkCoordinator.setPendingChatAction(
-                DeepLinkCoordinator.ChatAction.START_VOICE,
-            )
-            Routes.chat("__new__${java.util.UUID.randomUUID()}")
-        }
-        is DeepLinkAction.NewCameraChat -> {
-            DeepLinkCoordinator.setPendingChatAction(
-                DeepLinkCoordinator.ChatAction.OPEN_CAMERA,
-            )
-            Routes.chat("__new__${java.util.UUID.randomUUID()}")
-        }
-        is DeepLinkAction.NewChat -> Routes.chat("__new__${java.util.UUID.randomUUID()}")
-        else -> null
+    val quickActionStart by androidx.compose.runtime.saveable.rememberSaveable {
+        androidx.compose.runtime.mutableStateOf(
+            when (initialDeepLink) {
+                is DeepLinkAction.NewVoiceChat -> {
+                    DeepLinkCoordinator.setPendingChatAction(DeepLinkCoordinator.ChatAction.START_VOICE)
+                    Routes.chat(newDraftSessionId())
+                }
+                is DeepLinkAction.NewCameraChat -> {
+                    DeepLinkCoordinator.setPendingChatAction(DeepLinkCoordinator.ChatAction.OPEN_CAMERA)
+                    Routes.chat(newDraftSessionId())
+                }
+                is DeepLinkAction.NewChat -> Routes.chat(newDraftSessionId())
+                else -> null
+            },
+        )
     }
     val startDestination = when {
         htmlShortcut != null -> {
@@ -484,7 +473,7 @@ fun AppNavigation(
             )
             Routes.chat(htmlShortcut.sessionId)
         }
-        quickActionStart != null -> quickActionStart
+        quickActionStart != null -> requireNotNull(quickActionStart)
         else -> Routes.SESSION_LIST
     }
     NavHost(
@@ -578,6 +567,20 @@ fun AppNavigation(
                 skillRepository = skillRepository,
                 mcpRepository = mcpRepository,
             )
+        }
+
+        composable(Routes.DRAFTS) {
+            com.openminis.app.ui.chat.DraftsScreen(chatRepository,
+                onBack = { navController.safePopBackStack() },
+                onOpen = { navController.safeNavigate(Routes.chat(it)) })
+        }
+        for (route in listOf(Routes.TASK_CENTER, Routes.LIBRARY)) {
+            composable(route) {
+                com.openminis.app.ui.chat.LibraryScreen(chatRepository, route == Routes.TASK_CENTER,
+                    onBack = { navController.safePopBackStack() },
+                    onSession = { navController.safeNavigate(Routes.chat(it)) },
+                    onPreview = { FilePreviewHolder.currentItem = it; navController.safeNavigate(Routes.FILE_PREVIEW) })
+            }
         }
 
         composable(Routes.SETTINGS) {

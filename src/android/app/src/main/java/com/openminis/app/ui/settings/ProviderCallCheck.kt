@@ -325,6 +325,12 @@ internal fun ProviderCallCheckDialog(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
+                Text(stringResource(R.string.daily_capabilities,
+                    entry.model.inputModalities?.joinToString() ?: "text",
+                    entry.model.outputModalities?.joinToString() ?: "text",
+                    entry.model.reasoningEffortValues?.joinToString() ?: if (entry.model.supportsReasoning == true) "supported" else "—"),
+                    style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.daily_capabilities_note), style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(10.dp))
                 Text(
                     text = when (val state = uiState) {

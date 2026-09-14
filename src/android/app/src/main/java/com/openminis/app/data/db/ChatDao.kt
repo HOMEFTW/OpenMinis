@@ -55,6 +55,35 @@ data class SessionTailRow(
 
 @Dao
 interface ChatDao {
+    @Query("SELECT COALESCE(SUM(LENGTH(CAST(parts_json AS BLOB))), 0) FROM messages")
+    suspend fun estimateMessageBytes(): Long
+
+    /** Copy a stable prefix atomically; never truncate the source conversation. */
+    @androidx.room.Transaction
+    suspend fun createEditBranch(sourceId: String, messageId: String, branchId: String, title: String, rewriteMedia: (String) -> String = { it }): String {
+        val source = requireNotNull(getSession(sourceId)) { "Source conversation no longer exists" }
+        val target = requireNotNull(branchMessage(messageId, sourceId)) { "Message no longer exists" }
+        require(target.role.equals("user", true))
+        val now = System.currentTimeMillis()
+        insertSession(source.copy(id = branchId, title = title, createdAt = now, updatedAt = now,
+            source = "branch:$sourceId", pinnedAt = null, lastMessage = null, editCount = 0))
+        var offset = 0
+        while (true) {
+            val page = loadMessagesPage(sourceId, offset, 50)
+            if (page.isEmpty()) break
+            for (message in page) {
+                if (message.sortOrder >= target.sortOrder) return branchId
+                insertMessage(message.copy(id = java.util.UUID.randomUUID().toString(), sessionId = branchId,
+                    tokenUsage = null, partsJson = rewriteMedia(message.partsJson)))
+            }
+            offset += page.size
+        }
+        return branchId
+    }
+
+    @Query("SELECT * FROM messages WHERE id = :id AND session_id = :sessionId LIMIT 1")
+    suspend fun branchMessage(id: String, sessionId: String): MessageEntity?
+
     // Sessions
     @Query("SELECT * FROM sessions ORDER BY updated_at DESC")
     fun observeSessions(): Flow<List<ChatSessionEntity>>

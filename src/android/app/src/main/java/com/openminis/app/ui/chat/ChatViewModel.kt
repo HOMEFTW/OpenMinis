@@ -3748,7 +3748,51 @@ class ChatViewModel(
     /** The real session ID (same as sessionId for existing sessions, generated on first message for drafts). */
     internal var realSessionId: String = if (isDraft) "" else sessionId
 
+    private val composerDraftStore = ComposerDraftStore(context)
+
+    private fun currentComposerDraft(): ComposerDraft {
+        var text = _inputText.value
+        _pastedTexts.value.forEach { text = text.replace(it.placeholder, it.text) }
+        return ComposerDraft(text, _attachments.value.map {
+            DraftAttachment(it.id, it.fileName, it.uri.toString(), it.mimeType, it.kind.name)
+        }, _editingMessageId.value)
+    }
+
+
     init {
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(runStates, sessionTitle) { runs, title -> runs to title }.collect { (runs, title) ->
+                TaskCenter.update(realSessionId.ifEmpty { sessionId }, title, runs.values, this@ChatViewModel)
+            }
+        }
+        val restoredDraft = composerDraftStore.load(sessionId)
+        if (restoredDraft != null) {
+            _inputText.value = restoredDraft.text
+            _editingMessageId.value = restoredDraft.editingMessageId
+        }
+        val restoredAttachments = restoredDraft?.attachments.orEmpty().mapNotNull { a ->
+            runCatching { InputAttachment(a.id, a.name, android.net.Uri.parse(a.uri), a.mime, InputAttachment.Kind.valueOf(a.kind)) }.getOrNull()
+        }
+        _attachments.value = restoredAttachments
+        viewModelScope.launch {
+            val invalidIds = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                restoredAttachments.filter { attachment ->
+                    !runCatching { context.contentResolver.openInputStream(attachment.uri)?.use { } != null }.getOrDefault(false)
+                }.map { it.id }.toSet()
+            }
+            // Validation may finish after a send/removal. Never re-add old attachments.
+            if (_attachments.value.any { it.id in invalidIds }) {
+                _attachments.value = _attachments.value.filterNot { it.id in invalidIds }
+                _error.value = context.getString(com.openminis.app.R.string.daily_draft_missing)
+            }
+        }
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(inputText, attachments, pastedTexts, editingMessageId) { _, _, _, _ ->
+                currentComposerDraft()
+            }.collect { draft ->
+                composerDraftStore.save(realSessionId.ifEmpty { sessionId }, draft)
+            }
+        }
         loadSession()
         // [T-session-paused-badge-active-false-positive] Drive the session-list
         // PAUSED badge directly off canResume — the authoritative "this session
@@ -3978,6 +4022,7 @@ class ChatViewModel(
         // Move our cached VM from the draft key ("__new__...") to the real
         // sessionId so re-entering the session reuses the same instance.
         if (isDraft) {
+            composerDraftStore.move(sessionId, session.id, currentComposerDraft())
             ChatViewModelStore.rename(sessionId, session.id)
             // Bring every disk/shell resource that was opened with the draft
             // id over to the real id *before* agent tools start running against
@@ -5942,6 +5987,47 @@ class ChatViewModel(
      * non-null id and truncates the conversation from that point.
      * Mirrors iOS AIChatViewModel.editMessage(_:) (L2468).
      */
+    private var creatingEditBranch = false
+
+    suspend fun createEditBranch(messageId: String): String? {
+        if (_isStreaming.value || creatingEditBranch) return null
+        val message = _messages.value.firstOrNull { it.id == messageId && it.role == "user" } ?: return null
+        val branchId = UUID.randomUUID().toString()
+        creatingEditBranch = true
+        val branchMedia = EditBranchMedia(java.io.File(context.filesDir, "media"), branchId)
+        return try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val attached = (message.imageUris + message.attachmentUris).mapIndexed { index, uri ->
+                    val name = message.attachmentNames.getOrNull(index) ?: uri.lastPathSegment ?: "attachment"
+                    branchMedia.directory.mkdirs()
+                    val stored = java.io.File(branchMedia.directory, UUID.randomUUID().toString() + "." + name.substringAfterLast('.', "bin").takeIf { it.all(Char::isLetterOrDigit) }.orEmpty())
+                    context.contentResolver.openInputStream(uri)?.use { input -> stored.outputStream().use { input.copyTo(it) } }
+                        ?: throw java.io.IOException("Attachment is no longer readable")
+                    DraftAttachment(UUID.randomUUID().toString(), name, android.net.Uri.fromFile(stored).toString(),
+                        guessMimeType(name, "application/octet-stream"),
+                        if (index < message.imageUris.size) "IMAGE" else "DOCUMENT")
+                }
+                val text = message.content.replace(Regex("<user-attached-files>[\\s\\S]*?</user-attached-files>"), "").trim()
+                composerDraftStore.save(branchId, ComposerDraft(text, attached))
+                chatRepository.dao.createEditBranch(realSessionId.ifEmpty { sessionId }, messageId, branchId,
+                    context.getString(com.openminis.app.R.string.daily_branch_title, _sessionTitle.value), branchMedia::rewrite)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
+                if (chatRepository.dao.getSession(branchId) == null) {
+                    composerDraftStore.save(branchId, ComposerDraft("", emptyList()))
+                    branchMedia.directory.deleteRecursively()
+                }
+            }
+            throw e
+        } catch (e: Exception) {
+            composerDraftStore.save(branchId, ComposerDraft("", emptyList()))
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { branchMedia.directory.deleteRecursively() }
+            _error.value = context.getString(com.openminis.app.R.string.daily_branch_failed)
+            null
+        } finally { creatingEditBranch = false }
+    }
+
     fun editMessage(messageId: String): String? {
         if (_isStreaming.value) return null
         val msg = _messages.value.firstOrNull { it.id == messageId } ?: return null
@@ -12187,6 +12273,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      * doesn't linger in `ChatViewModelStore`.
      */
     fun cleanupIfEmptyOnExit() {
+        if (_inputText.value.isNotEmpty()) return
         val sid = realSessionId
         if (sid.isEmpty()) return
         if (_isStreaming.value) return

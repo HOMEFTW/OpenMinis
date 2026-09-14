@@ -466,6 +466,9 @@ fun SessionListScreen(
     onRootfsClick: () -> Unit = {},
     // [T-android-scheduled-tasks-design] Entry to the scheduled-tasks list.
     onScheduledTasksClick: () -> Unit = {},
+    onTaskCenterClick: () -> Unit = {},
+    onLibraryClick: () -> Unit = {},
+    onDraftsClick: () -> Unit = {},
     /**
      * [T-android-tablet-split] The session currently shown in the detail pane,
      * highlighted in the list. Non-null only in two-pane (tablet) mode — in
@@ -833,6 +836,9 @@ fun SessionListScreen(
                                 onDismissRequest = { showOverflowMenu = false },
                                 offset = DpOffset(0.dp, 0.dp),
                             ) {
+                                DropdownMenuItem(text = { Text(stringResource(R.string.daily_tasks)) }, onClick = { showOverflowMenu = false; onTaskCenterClick() })
+                                DropdownMenuItem(text = { Text(stringResource(R.string.daily_library)) }, onClick = { showOverflowMenu = false; onLibraryClick() })
+                                DropdownMenuItem(text = { Text(stringResource(R.string.daily_drafts)) }, onClick = { showOverflowMenu = false; onDraftsClick() })
                                 if (sessions.isNotEmpty()) {
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.sessionlist_select_action)) },
@@ -2000,6 +2006,10 @@ private fun SessionItemContent(
                             showContextMenu = false
                             onExportRequest(session, "text")
                         },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Markdown (.md)", modifier = Modifier.padding(start = 24.dp)) },
+                        onClick = { showContextMenu = false; onExportRequest(session, "markdown") },
                     )
                 }
                 // Edit Title & Category
