@@ -118,15 +118,28 @@ object ImageBudget {
 
     /**
      * Try increasingly aggressive (maxEdge, quality) candidates until the
-     * re-encoded JPEG fits under [targetMaxBytes]. Returns the smallest
-     * encoding produced when no candidate fits — never returns null because
-     * "send something" beats "fail the request".
+     * re-encoded JPEG fits under [targetMaxBytes] bytes. Returns the smallest
+     * encoding produced when no candidate fits. Callers that must enforce a
+     * hard byte limit should use [compressUnderBudgetOrNull].
      *
      * Re-encodes from the original bytes on each candidate so the JPEG never
      * compounds artifacts.
      */
     fun compressUnderBudget(input: ByteArray, targetMaxBytes: Long = MAX_PER_IMAGE_BYTES): ByteArray {
-        if (input.size <= targetMaxBytes) return input
+        return compressUnderBudgetOrNull(input, targetMaxBytes) ?: input
+    }
+
+    /**
+     * Same ladder as [compressUnderBudget], but returns null when the source
+     * cannot be made safe for inline transport. A failed decode/encode must
+     * never silently fall back to an over-limit original payload.
+     */
+    fun compressUnderBudgetOrNull(
+        input: ByteArray,
+        targetMaxBytes: Long = MAX_PER_IMAGE_BYTES,
+    ): ByteArray? {
+        val normalizedTarget = targetMaxBytes.coerceAtLeast(0L)
+        if (input.size.toLong() <= normalizedTarget) return input
         var best: ByteArray = input
         var bestSize = input.size
         for ((edge, q) in LADDER) {
@@ -135,18 +148,18 @@ object ImageBudget {
                 best = candidate
                 bestSize = candidate.size
             }
-            if (candidate.size.toLong() <= targetMaxBytes) {
+            if (candidate.size.toLong() <= normalizedTarget) {
                 AppLogger.info(TAG, "compressUnderBudget hit: ${input.size}B → ${candidate.size}B (edge=$edge q=$q)")
                 return candidate
             }
         }
-        AppLogger.warning(TAG, "compressUnderBudget exhausted ladder: ${input.size}B → ${best.size}B (target=${targetMaxBytes}B)")
-        return best
+        AppLogger.warning(TAG, "compressUnderBudget exhausted ladder: ${input.size}B → ${best.size}B (target=${normalizedTarget}B)")
+        return if (best.size.toLong() <= normalizedTarget) best else null
     }
 
     /** Result of [applyMessageBudget]. */
     data class BudgetResult(
-        /** Image bytes ready to send, in original order, dropped tail removed. */
+        /** Image bytes ready to send, in original order, dropped occurrences removed. */
         val keptBytes: List<ByteArray>,
         /** Number of parts whose bytes were re-encoded by the ladder. */
         val compressedCount: Int,
@@ -154,33 +167,44 @@ object ImageBudget {
         val droppedCount: Int,
         /** Final total payload bytes after compression + drop. */
         val totalBytes: Long,
+        /** Original occurrence indexes corresponding to [keptBytes]. */
+        val keptIndices: List<Int> = emptyList(),
     ) {
         val mutated: Boolean get() = compressedCount > 0 || droppedCount > 0
     }
 
     /**
      * Walk [bytesIn] and produce a budgeted output:
-     *  - Each oversize part is run through [compressUnderBudget] first.
+     *  - Each oversize part is run through [compressUnderBudgetOrNull] first.
      *  - Then cumulative bytes are summed; once the running total would
      *    exceed [MAX_TOTAL_BYTES] the remaining tail is dropped.
      */
-    fun applyMessageBudget(bytesIn: List<ByteArray>): BudgetResult {
+    fun applyMessageBudget(
+        bytesIn: List<ByteArray>,
+        maxTotalBytes: Long = MAX_TOTAL_BYTES,
+    ): BudgetResult {
         if (bytesIn.isEmpty()) return BudgetResult(emptyList(), 0, 0, 0L)
         val kept = ArrayList<ByteArray>(bytesIn.size)
+        val keptIndices = ArrayList<Int>(bytesIn.size)
         var compressed = 0
         var dropped = 0
         var running = 0L
-        for (part in bytesIn) {
+        for ((index, part) in bytesIn.withIndex()) {
             val sized = if (part.size.toLong() > MAX_PER_IMAGE_BYTES) {
-                val c = compressUnderBudget(part)
+                val c = compressUnderBudgetOrNull(part)
+                if (c == null) {
+                    dropped += 1
+                    continue
+                }
                 if (c.size != part.size) compressed += 1
                 c
             } else part
-            if (running + sized.size.toLong() > MAX_TOTAL_BYTES) {
+            if (running + sized.size.toLong() > maxTotalBytes.coerceAtLeast(0L)) {
                 dropped += 1
                 continue
             }
             kept.add(sized)
+            keptIndices.add(index)
             running += sized.size.toLong()
         }
         if (dropped > 0 || compressed > 0) {
@@ -189,7 +213,7 @@ object ImageBudget {
                 "applyMessageBudget: in=${bytesIn.size} kept=${kept.size} compressed=$compressed dropped=$dropped total=${running}B",
             )
         }
-        return BudgetResult(kept, compressed, dropped, running)
+        return BudgetResult(kept, compressed, dropped, running, keptIndices)
     }
 
     // ─── Request-level budget ──────────────────────────────────────────────
@@ -197,15 +221,14 @@ object ImageBudget {
     /**
      * Identifies a single image part inside an outgoing request payload.
      * Used by providers to look up whether a part has been marked for
-     * elision by [planRequestBudget]. The identity hash of the ByteArray
-     * is sufficient — same bytes only ever appear once per request, and
-     * different bytes hash uniquely enough that the worst-case collision
-     * is "we keep one extra image past the budget" (safe).
+     * elision by [planRequestBudget]. The occurrence is the stable structural
+     * position assigned by the planner; it deliberately does not depend on
+     * ByteArray identity, so repeated references to one array remain distinct.
      */
     @JvmInline
-    value class ImagePartId(val identityHash: Int) {
+    value class ImagePartId(val occurrence: Int) {
         companion object {
-            fun of(data: ByteArray): ImagePartId = ImagePartId(System.identityHashCode(data))
+            fun of(occurrence: Int): ImagePartId = ImagePartId(occurrence)
         }
     }
 
@@ -250,6 +273,8 @@ object ImageBudget {
      * @param images Ordered eldest → latest. The planner reverses
      *   internally so the latest user input + most recent tool results
      *   are protected from elision.
+     * @param maxBytes Maximum cumulative inline image payload in bytes;
+     *   independent of any context token budget.
      */
     fun planRequestBudget(
         images: List<BudgetImage>,
@@ -262,13 +287,15 @@ object ImageBudget {
         val droppedPaths = HashMap<ImagePartId, String?>()
         var kept = 0L
         var elided = 0L
+        val normalizedMaxBytes = maxBytes.coerceAtLeast(0L)
         // Walk latest → eldest so most-recent images win the budget.
-        for (img in images.asReversed()) {
-            val id = ImagePartId.of(img.data)
+        for (occurrence in images.indices.reversed()) {
+            val img = images[occurrence]
+            val id = ImagePartId.of(occurrence)
             // Per-image cap-clamped size — same ceiling
             // `compressUnderBudget` would have produced if invoked.
             val effectiveSize = minOf(img.data.size.toLong(), MAX_PER_IMAGE_BYTES)
-            if (kept + effectiveSize <= maxBytes) {
+            if (kept + effectiveSize <= normalizedMaxBytes) {
                 kept += effectiveSize
             } else {
                 dropped.add(id)
@@ -279,7 +306,7 @@ object ImageBudget {
         if (dropped.isNotEmpty()) {
             AppLogger.info(
                 TAG,
-                "planRequestBudget: in=${images.size} kept=${images.size - dropped.size} dropped=${dropped.size} keptBytes=${kept}B elidedBytes=${elided}B cap=${maxBytes}B",
+                "planRequestBudget: in=${images.size} kept=${images.size - dropped.size} dropped=${dropped.size} keptBytes=${kept}B elidedBytes=${elided}B cap=${normalizedMaxBytes}B",
             )
         }
         return RequestBudgetPlan(
@@ -298,12 +325,17 @@ object ImageBudget {
      * dropped to fit the budget, and (if known) the linux path where the
      * bytes are still readable via [read_image]. Without a path the model
      * just sees that an image was elided and can ask the user to re-attach.
+     * [maxBytes] is a byte count and is independent of context token limits.
      */
-    fun elidedImagePlaceholder(linuxPath: String?): String {
+    fun elidedImagePlaceholder(
+        linuxPath: String?,
+        maxBytes: Long = MAX_REQUEST_BYTES,
+    ): String {
+        val budgetLabel = if (maxBytes == MAX_REQUEST_BYTES) "25MB" else "${maxBytes.coerceAtLeast(0L)}B"
         return if (linuxPath != null) {
-            "[image elided to fit 25MB request budget. Original at $linuxPath — re-fetch with `read_image $linuxPath` if you need to see it.]"
+            "[image elided to fit $budgetLabel request budget. Original at $linuxPath — re-fetch with `read_image $linuxPath` if you need to see it.]"
         } else {
-            "[image elided to fit 25MB request budget. Original bytes no longer addressable; ask the user to re-attach if needed.]"
+            "[image elided to fit $budgetLabel request budget. Original bytes no longer addressable; ask the user to re-attach if needed.]"
         }
     }
 

@@ -19,6 +19,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
+import com.openminis.app.ui.settings.ContextWindowSettings
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -51,8 +53,9 @@ fun TokenUsageSheet(
     onDismiss: () -> Unit,
 ) {
     var stats by remember { mutableStateOf<ChatViewModel.SessionTokenStats?>(null) }
-    val contextWindow = remember { viewModel.currentModelContextWindow }
-    val maxOutput = remember { viewModel.currentModelMaxOutputTokens }
+    val contextLimit by ContextWindowSettings.changes.collectAsState()
+    val contextWindow = viewModel.currentModelContextWindow
+    val maxOutput = viewModel.currentModelMaxOutputTokens
     val thinking = remember { viewModel.thinkingInfo() }
 
     LaunchedEffect(Unit) {

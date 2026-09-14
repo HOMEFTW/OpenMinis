@@ -1,5 +1,6 @@
 package com.openminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -48,20 +50,32 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
@@ -69,6 +83,8 @@ import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.ui.components.openExternalUrl
 import com.openminis.app.i18n.uppercaseForDisplay
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,13 +125,39 @@ fun SettingsScreen(
     onAboutClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val initialContextWindow = remember(context) { ContextWindowSettings.initialize(context) }
+    var savedContextWindow by remember(context) { mutableStateOf(initialContextWindow) }
+    var contextDraft by remember(context) { mutableStateOf(initialContextWindow.toString()) }
+    var contextWindowError by remember(context) { mutableStateOf(false) }
     var showFeedbackSheet by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val discardContextDraft = {
+        contextDraft = savedContextWindow.toString()
+        contextWindowError = false
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, savedContextWindow) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) discardContextDraft()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    BackHandler {
+        discardContextDraft()
+        onBack()
+    }
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        discardContextDraft()
+                        onBack()
+                    }) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = stringResource(R.string.settings_back),
@@ -131,6 +173,101 @@ fun SettingsScreen(
                 .padding(padding)
                 .verticalScroll(rememberScrollState()),
         ) {
+            SettingsSection(title = stringResource(R.string.settings_context_size)) {
+                Text(
+                    text = stringResource(R.string.settings_context_current, savedContextWindow),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .horizontalScroll(rememberScrollState()),
+                ) {
+                    ContextWindowSettings.presets.forEach { preset ->
+                        Button(
+                            onClick = {
+                                contextDraft = preset.toString()
+                                contextWindowError = false
+                            },
+                            modifier = Modifier.width(76.dp),
+                        ) {
+                            Text(ContextWindowSettings.formatPreset(preset))
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = contextDraft,
+                    onValueChange = {
+                        contextDraft = it
+                        contextWindowError = false
+                    },
+                    label = { Text(stringResource(R.string.settings_context_custom)) },
+                    isError = contextWindowError,
+                    supportingText = {
+                        if (contextWindowError) {
+                            Text(stringResource(R.string.settings_context_invalid))
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    singleLine = true,
+                )
+                Row(
+                    horizontalArrangement = Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                ) {
+                    TextButton(
+                        onClick = {
+                            contextDraft = ContextWindowSettings.DEFAULT.toString()
+                            contextWindowError = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.settings_context_restore_default))
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = discardContextDraft,
+                        enabled = contextDraft != savedContextWindow.toString(),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.common_cancel))
+                    }
+                    Button(
+                        onClick = {
+                            val parsed = ContextWindowSettings.parse(contextDraft)
+                            if (parsed == null) {
+                                contextWindowError = true
+                            } else {
+                                ContextWindowSettings.set(context, parsed)
+                                savedContextWindow = ContextWindowSettings.get(context)
+                                contextDraft = savedContextWindow.toString()
+                                contextWindowError = false
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        context.getString(R.string.settings_context_saved),
+                                    )
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.common_save))
+                    }
+                }
+            }
+
             // -- LLM Providers --
             SettingsSection(
                 title = stringResource(R.string.settings_section_llm_providers),

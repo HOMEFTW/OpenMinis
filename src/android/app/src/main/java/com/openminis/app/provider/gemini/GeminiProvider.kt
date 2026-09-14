@@ -14,6 +14,7 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -58,7 +59,8 @@ class GeminiProvider(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
-        val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
+        val budgeted = budgetProviderRequest(messages, imageParts)
+        val body = buildRequestBody(budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools, thinkingLevel)
         val url = "$basePath/models/${model.id}:generateContent?key=$apiKey"
         val request = Request.Builder()
             .url(url)
@@ -92,9 +94,18 @@ class GeminiProvider(
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
-    ): Flow<LLMStreamChunk> = rawStreamMessage(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
-    ).failOnSilentEmptyCompletion(name)
+    ): Flow<LLMStreamChunk> {
+        val budgeted = budgetProviderRequest(messages, imageParts)
+        return rawStreamMessage(
+            budgeted.messages,
+            systemPrompt,
+            maxTokens,
+            temperature,
+            budgeted.imageParts,
+            tools,
+            thinkingLevel,
+        ).failOnSilentEmptyCompletion(name)
+    }
 
     private fun rawStreamMessage(
         messages: List<LLMMessage>,

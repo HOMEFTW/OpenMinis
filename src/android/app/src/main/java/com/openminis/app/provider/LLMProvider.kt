@@ -1,6 +1,7 @@
 package com.openminis.app.provider
 
 import com.openminis.app.data.model.AgentToolDefinition
+import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -9,6 +10,221 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.ThinkingLevel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+
+internal data class BudgetedProviderRequest(
+    val messages: List<LLMMessage>,
+    val imageParts: List<LLMMessage.ImagePart>,
+)
+
+/**
+ * Apply the byte budget at the one public provider boundary shared by all
+ * callers. Top-level imageParts and structured message images are planned as
+ * one ordered occurrence list; this also makes repeated ByteArray references
+ * independent of one another.
+ */
+internal fun budgetProviderRequest(
+    messages: List<LLMMessage>,
+    imageParts: List<LLMMessage.ImagePart>,
+    maxRequestBytes: Long = ImageBudget.MAX_REQUEST_BYTES,
+): BudgetedProviderRequest {
+    data class Slot(
+        val messageIndex: Int? = null,
+        val partIndex: Int? = null,
+        val messageImageIndex: Int? = null,
+        val topLevelIndex: Int? = null,
+        val data: ByteArray,
+        val mimeType: String,
+        val linuxPath: String?,
+        var safeData: ByteArray? = null,
+        var safeMimeType: String = mimeType,
+        var dropped: Boolean = false,
+        var requestDropped: Boolean = false,
+    )
+
+    val slots = mutableListOf<Slot>()
+    messages.forEachIndexed { messageIndex, message ->
+        message.contentParts.forEachIndexed { partIndex, part ->
+            when (part) {
+                is AgentContentPart.ImageData -> slots += Slot(
+                    messageIndex = messageIndex,
+                    partIndex = partIndex,
+                    data = part.data,
+                    mimeType = part.mimeType,
+                    linuxPath = part.linuxPath,
+                )
+                is AgentContentPart.ToolResult -> part.imageData?.let { data ->
+                    slots += Slot(
+                        messageIndex = messageIndex,
+                        partIndex = partIndex,
+                        data = data,
+                        mimeType = part.imageMimeType ?: "image/jpeg",
+                        linuxPath = part.imageLinuxPath,
+                    )
+                }
+                else -> Unit
+            }
+        }
+        // Legacy LLMMessage.imageParts are still consumed by the Codex image
+        // generation builder when no structured image part exists.
+        if (message.contentParts.isEmpty()) {
+            message.imageParts.forEachIndexed { imageIndex, part ->
+                slots += Slot(
+                    messageIndex = messageIndex,
+                    messageImageIndex = imageIndex,
+                    data = part.data,
+                    mimeType = part.mimeType,
+                    linuxPath = part.linuxPath,
+                )
+            }
+        }
+    }
+    imageParts.forEachIndexed { index, part ->
+        slots += Slot(
+            topLevelIndex = index,
+            data = part.data,
+            mimeType = part.mimeType,
+            linuxPath = part.linuxPath,
+        )
+    }
+    if (slots.isEmpty()) return BudgetedProviderRequest(messages, imageParts)
+
+    // Normalize each occurrence before cumulative planning. A failed ladder
+    // is a hard failure for inline transport, never permission to send raw
+    // bytes that still exceed the 5MB limit.
+    for (slot in slots) {
+        if (slot.data.size.toLong() <= ImageBudget.MAX_PER_IMAGE_BYTES) {
+            slot.safeData = slot.data
+        } else {
+            val compressed = ImageBudget.compressUnderBudgetOrNull(slot.data)
+            if (compressed == null) {
+                slot.dropped = true
+            } else {
+                slot.safeData = compressed
+                if (compressed !== slot.data) slot.safeMimeType = "image/jpeg"
+            }
+        }
+    }
+
+    val validSlots = slots.filter { it.safeData != null && !it.dropped }
+    val requestPlan = ImageBudget.planRequestBudget(
+        validSlots.map { slot ->
+            ImageBudget.BudgetImage(
+                data = slot.safeData!!,
+                linuxPath = slot.linuxPath,
+                mimeType = slot.safeMimeType,
+            )
+        },
+        maxBytes = maxRequestBytes,
+    )
+    requestPlan.droppedIds.forEach { id ->
+        validSlots[id.occurrence].apply {
+            dropped = true
+            requestDropped = true
+        }
+    }
+    if (slots.none { it.dropped || it.safeData !== it.data }) {
+        return BudgetedProviderRequest(messages, imageParts)
+    }
+
+    val byMessagePart = slots
+        .filter { it.messageIndex != null && it.partIndex != null }
+        .associateBy { it.messageIndex!! to it.partIndex!! }
+    val byMessageImage = slots
+        .filter { it.messageIndex != null && it.messageImageIndex != null }
+        .associateBy { it.messageIndex!! to it.messageImageIndex!! }
+
+    fun placeholder(slot: Slot): String = ImageBudget.elidedImagePlaceholder(
+        linuxPath = slot.linuxPath,
+        maxBytes = if (slot.requestDropped) {
+            ImageBudget.MAX_REQUEST_BYTES
+        } else {
+            ImageBudget.MAX_PER_IMAGE_BYTES
+        },
+    )
+
+    val normalizedMessages = messages.mapIndexed { messageIndex, message ->
+        if (message.contentParts.isEmpty()) {
+            val normalizedImageParts = message.imageParts.mapIndexedNotNull { imageIndex, original ->
+                val slot = byMessageImage[messageIndex to imageIndex]
+                when {
+                    slot == null -> original
+                    slot.dropped -> null
+                    slot.safeData === original.data && slot.safeMimeType == original.mimeType -> original
+                    else -> original.copy(data = slot.safeData!!, mimeType = slot.safeMimeType)
+                }
+            }
+            val legacyPlaceholders = message.imageParts.mapIndexedNotNull { imageIndex, _ ->
+                val slot = byMessageImage[messageIndex to imageIndex]
+                slot?.takeIf { it.dropped }?.let(::placeholder)
+            }
+            if (legacyPlaceholders.isEmpty()) {
+                message.copy(imageParts = normalizedImageParts)
+            } else {
+                message.copy(
+                    content = message.content +
+                        (if (message.content.isEmpty()) "" else "\n") +
+                        legacyPlaceholders.joinToString("\n"),
+                    imageParts = normalizedImageParts,
+                )
+            }
+        } else {
+            val normalizedParts = message.contentParts.mapIndexed { partIndex, part ->
+                val slot = byMessagePart[messageIndex to partIndex]
+                when {
+                    slot == null -> part
+                    slot.dropped && part is AgentContentPart.ImageData ->
+                        AgentContentPart.Text(placeholder(slot))
+                    slot.dropped && part is AgentContentPart.ToolResult -> part.copy(
+                        imageData = null,
+                        imageMimeType = null,
+                        content = part.content +
+                            (if (part.content.isEmpty()) "" else "\n") +
+                            placeholder(slot),
+                    )
+                    part is AgentContentPart.ImageData -> part.copy(
+                        data = slot.safeData!!,
+                        mimeType = slot.safeMimeType,
+                    )
+                    part is AgentContentPart.ToolResult -> part.copy(
+                        imageData = slot.safeData,
+                        imageMimeType = slot.safeMimeType,
+                    )
+                    else -> part
+                }
+            }
+            message.copy(contentParts = normalizedParts)
+        }
+    }.toMutableList()
+
+    val topLevelSlots = slots.filter { it.topLevelIndex != null }
+    val normalizedTopLevel = topLevelSlots
+        .filterNot { it.dropped }
+        .map { slot ->
+            val original = imageParts[slot.topLevelIndex!!]
+            if (slot.safeData === original.data && slot.safeMimeType == original.mimeType) {
+                original
+            } else {
+                original.copy(data = slot.safeData!!, mimeType = slot.safeMimeType)
+            }
+        }
+    val topLevelPlaceholders = topLevelSlots
+        .filter { it.dropped }
+        .map { AgentContentPart.Text(placeholder(it)) }
+    if (topLevelPlaceholders.isNotEmpty()) {
+        val lastUserIndex = normalizedMessages.indexOfLast { it.role == LLMMessage.Role.USER }
+        if (lastUserIndex >= 0) {
+            val message = normalizedMessages[lastUserIndex]
+            normalizedMessages[lastUserIndex] = if (message.contentParts.isNotEmpty()) {
+                message.copy(contentParts = message.contentParts + topLevelPlaceholders)
+            } else {
+                message.copy(content = message.content +
+                    (if (message.content.isEmpty()) "" else "\n") +
+                    topLevelPlaceholders.joinToString("\n") { it.text })
+            }
+        }
+    }
+    return BudgetedProviderRequest(normalizedMessages, normalizedTopLevel)
+}
 
 interface LLMProvider {
     val name: String
@@ -59,10 +275,13 @@ interface LLMProvider {
         imageParts: List<LLMMessage.ImagePart> = emptyList(),
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
-    ): LLMResponse = sendMessageClamped(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools,
+    ): LLMResponse {
+        val budgeted = budgetProviderRequest(messages, imageParts)
+        return sendMessageClamped(
+        budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools,
         clampThinkingLevel(thinkingLevel),
-    )
+        )
+    }
 
     /** See [sendMessage] — the clamped, provider-implemented counterpart. */
     fun streamMessage(
@@ -73,10 +292,13 @@ interface LLMProvider {
         imageParts: List<LLMMessage.ImagePart> = emptyList(),
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
-    ): Flow<LLMStreamChunk> = streamMessageClamped(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools,
+    ): Flow<LLMStreamChunk> {
+        val budgeted = budgetProviderRequest(messages, imageParts)
+        return streamMessageClamped(
+        budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools,
         clampThinkingLevel(thinkingLevel),
-    )
+        )
+    }
 
     /**
      * [T-android-thinking-level-arch] Provider implementations override THIS

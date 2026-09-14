@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="settings_context_size">Context size</string>
+    <string name="settings_context_current">Current: %1$d tokens</string>
+    <string name="settings_context_custom">Custom tokens (8K–1M)</string>
+    <string name="settings_context_invalid">Enter a value between 8K and 1M tokens.</string>
+    <string name="settings_context_saved">Context size saved</string>
+    <string name="settings_context_restore_default">Restore Default</string>
     <string name="app_name">Minis</string>
     <string name="new_chat">New Chat</string>
     <string name="settings">Settings</string>

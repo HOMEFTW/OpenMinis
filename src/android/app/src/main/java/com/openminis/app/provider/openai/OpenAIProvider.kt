@@ -15,6 +15,7 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
@@ -606,14 +607,18 @@ class OpenAIProvider private constructor(
         // minis-model-use (ModelUseOffloadHandler) — get them on
         // LLMResponse.mediaAttachments and can write the image to --output.
         val media = mutableListOf<LLMMediaAttachment>()
-        streamMessage(
+        streamMessageClamped(
             messages = messages,
             systemPrompt = systemPrompt,
             maxTokens = maxTokens,
             temperature = temperature,
             imageParts = imageParts,
             tools = tools,
-            thinkingLevel = thinkingLevel,
+            // Keep direct calls to the implementation-compatible entry point
+            // equivalent to the public LLMProvider.sendMessage wrapper. The
+            // latter clamps before dispatch; this method must preserve that
+            // behavior when tests or in-module callers invoke it directly.
+            thinkingLevel = clampThinkingLevel(thinkingLevel),
         ).collect { chunk ->
             when (chunk) {
                 is LLMStreamChunk.Text -> textBuf.append(chunk.text)
@@ -634,9 +639,18 @@ class OpenAIProvider private constructor(
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
-    ): Flow<LLMStreamChunk> = rawStreamMessage(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
-    ).failOnSilentEmptyCompletion(name)
+    ): Flow<LLMStreamChunk> {
+        val budgeted = budgetProviderRequest(messages, imageParts)
+        return rawStreamMessage(
+            budgeted.messages,
+            systemPrompt,
+            maxTokens,
+            temperature,
+            budgeted.imageParts,
+            tools,
+            thinkingLevel,
+        ).failOnSilentEmptyCompletion(name)
+    }
 
     private fun rawStreamMessage(
         messages: List<LLMMessage>,
@@ -2632,9 +2646,15 @@ class OpenAIProvider private constructor(
         }.orEmpty()
         val userContent = "Use the image generation tool to create: $prompt"
         val references = if (model.isGPTImage25) {
-            lastUser?.imageParts.orEmpty() + imageParts +
-                lastUser?.contentParts.orEmpty().filterIsInstance<AgentContentPart.ImageData>()
+            val messageReferences = if (
+                lastUser?.contentParts?.any { it is AgentContentPart.ImageData } == true
+            ) {
+                lastUser.contentParts.filterIsInstance<AgentContentPart.ImageData>()
                     .map { LLMMessage.ImagePart(it.data, it.mimeType) }
+            } else {
+                lastUser?.imageParts.orEmpty()
+            }
+            messageReferences + imageParts
         } else emptyList()
         val content: Any = if (references.isEmpty()) userContent else JSONArray().apply {
             put(JSONObject().put("type", "input_text").put("text", userContent))

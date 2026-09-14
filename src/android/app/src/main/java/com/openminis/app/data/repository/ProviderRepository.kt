@@ -2196,7 +2196,10 @@ class ProviderRepository(private val context: Context) {
         ) {
             val models = OpenAIModelsApi.fetchModelsOAuth()
             if (models.isNotEmpty()) {
-                replaceEntries(instance.id, models)
+                // Refresh capability metadata as well as model ids. Some
+                // OpenAI-compatible catalogs omit modalities, while
+                // models.dev has the authoritative image-input flag.
+                replaceEntries(instance.id, ModelsDevApi.enrichModels(models))
                 return
             }
         }
@@ -2286,7 +2289,10 @@ class ProviderRepository(private val context: Context) {
 
             // Step 2: If API returned results, use them
             if (models.isNotEmpty()) {
-                replaceEntries(instance.id, models)
+                // Enrich live catalog entries so existing models pick up
+                // newly published capabilities (notably DeepSeek Flash
+                // image input) while replaceEntries preserves user overrides.
+                replaceEntries(instance.id, ModelsDevApi.enrichModels(models))
                 return
             }
         }

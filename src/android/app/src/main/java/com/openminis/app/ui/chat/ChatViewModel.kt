@@ -418,7 +418,6 @@ class ChatViewModel(
          * Mirrors iOS AIChatViewModel.maxAgentTurns.
          */
         private const val MAX_AGENT_TURNS = 200
-        private const val MIN_MAX_TOKENS = 1024
         /**
          * Hard ceiling on max_tokens we ever send to a provider, regardless
          * of what the model itself claims. Some models advertise 128K+
@@ -434,6 +433,158 @@ class ChatViewModel(
          * the remaining context window in dynamicMaxTokens().
          */
         private const val GLOBAL_MAX_TOKENS_CEILING = 128_000
+
+        /** Fixed overhead for a request envelope and its system instruction. */
+        private const val CONTEXT_REQUEST_OVERHEAD_TOKENS = 8
+
+        /** Conservative per-tool and per-content-part JSON overhead. */
+        private const val CONTEXT_TOOL_OVERHEAD_TOKENS = 8
+        private const val CONTEXT_PART_OVERHEAD_TOKENS = 2
+
+        /**
+         * Token estimate for the payload that a provider will receive.
+         *
+         * The provider APIs differ in their JSON envelope, but all of them
+         * carry the same semantic inputs: system text, tool schemas, message
+         * parts, and modality payloads. The estimate intentionally counts
+         * structured parts instead of `LLMMessage.content`, because the
+         * provider builders use `contentParts` whenever it is populated and
+         * otherwise use the legacy fields. Image bytes are represented by the
+         * image-token heuristic, never by their raw byte count.
+         */
+        internal data class ContextPayloadEstimate(
+            val inputTokens: Int,
+            val imageTokens: Int,
+            val imageBytes: Long,
+        )
+
+        internal fun estimateRequestPayload(
+            messages: List<LLMMessage>,
+            systemPrompt: String?,
+            tools: List<AgentToolDefinition>,
+        ): ContextPayloadEstimate {
+            var total = CONTEXT_REQUEST_OVERHEAD_TOKENS.toLong()
+            var imageTokens = 0L
+            var imageBytes = 0L
+
+            fun add(value: Int) {
+                total += value.toLong().coerceAtLeast(0L)
+            }
+
+            systemPrompt?.takeIf { it.isNotEmpty() }?.let {
+                add(BPETokenizer.countTokens(it) + CONTEXT_PART_OVERHEAD_TOKENS)
+            }
+
+            // Use the largest of the provider representations so a relay with
+            // a more verbose schema does not silently escape the estimate.
+            for (tool in tools) {
+                val schemaTokens = maxOf(
+                    BPETokenizer.countTokens(tool.toAnthropicJson().toString()),
+                    BPETokenizer.countTokens(tool.toGeminiJson().toString()),
+                    BPETokenizer.countTokens(tool.toOpenAIJson().toString()),
+                )
+                add(schemaTokens + CONTEXT_TOOL_OVERHEAD_TOKENS)
+            }
+
+            for (message in messages) {
+                add(BPETokenizer.TOKENS_PER_MESSAGE)
+                if (message.contentParts.isNotEmpty()) {
+                    for (part in message.contentParts) {
+                        add(CONTEXT_PART_OVERHEAD_TOKENS)
+                        when (part) {
+                            is AgentContentPart.Text -> add(BPETokenizer.countTokens(part.text))
+                            is AgentContentPart.ToolUse -> {
+                                add(BPETokenizer.countTokens(part.id))
+                                add(BPETokenizer.countTokens(part.name))
+                                add(BPETokenizer.countTokens(part.input.toString()))
+                            }
+                            is AgentContentPart.ToolResult -> {
+                                add(BPETokenizer.countTokens(part.id))
+                                add(BPETokenizer.countTokens(part.name))
+                                add(BPETokenizer.countTokens(part.content))
+                                part.imageData?.let { data ->
+                                    imageTokens += BPETokenizer.countImageTokens(data).toLong()
+                                    imageBytes += data.size.toLong()
+                                    add(BPETokenizer.countImageTokens(data))
+                                }
+                            }
+                            is AgentContentPart.ImageData -> {
+                                imageTokens += BPETokenizer.countImageTokens(part.data).toLong()
+                                imageBytes += part.data.size.toLong()
+                                add(BPETokenizer.countImageTokens(part.data))
+                            }
+                        }
+                    }
+                } else {
+                    // Legacy messages are serialized from these fields only.
+                    add(BPETokenizer.countTokens(message.content))
+                    for (image in message.imageParts) {
+                        imageTokens += BPETokenizer.countImageTokens(image.data).toLong()
+                        imageBytes += image.data.size.toLong()
+                        add(BPETokenizer.countImageTokens(image.data))
+                    }
+                    for (audio in message.audioParts) {
+                        add(BPETokenizer.countTokens(audio.base64Data))
+                        add(BPETokenizer.countTokens(audio.format))
+                    }
+                }
+
+                // Reasoning content is echoed by reasoning-capable providers
+                // on historical assistant turns. Count it even when the
+                // current provider may omit it; overestimating is safer than
+                // sending a payload that only fails after provider expansion.
+                message.reasoningContent?.let { add(BPETokenizer.countTokens(it)) }
+            }
+
+            return ContextPayloadEstimate(
+                inputTokens = total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                imageTokens = imageTokens.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                imageBytes = imageBytes,
+            )
+        }
+
+        internal fun estimateRequestTokens(
+            messages: List<LLMMessage>,
+            systemPrompt: String?,
+            tools: List<AgentToolDefinition>,
+        ): Int = estimateRequestPayload(messages, systemPrompt, tools).inputTokens
+
+        /** Resolve the smallest positive context limit from all authorities. */
+        internal fun effectiveContextWindowTokensFor(
+            modelWindow: Int?,
+            configuredWindow: Int?,
+            groupLimit: Int?,
+        ): Int? = listOfNotNull(modelWindow, configuredWindow, groupLimit)
+            .filter { it > 0 }
+            .minOrNull()
+
+        /**
+         * Return only the output tokens that fit after the current input.
+         * Zero means the caller must compact/stop; it is never raised to a
+         * provider-specific minimum because that would exceed the window.
+         */
+        internal fun maxOutputTokensFor(
+            contextWindow: Int,
+            outputCeiling: Int,
+            estimatedInputTokens: Int,
+        ): Int {
+            if (contextWindow <= 0 || outputCeiling <= 0) return 0
+            val remaining = contextWindow.toLong() - estimatedInputTokens.toLong()
+            if (remaining <= 0L) return 0
+            return minOf(outputCeiling.toLong(), remaining)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+        }
+
+        /** Max Output shown in the usage sheet, before the current input is known. */
+        internal fun displayedMaxOutputTokensFor(
+            contextWindow: Int?,
+            outputCeiling: Int?,
+        ): Int? = listOfNotNull(
+            contextWindow?.takeIf { it > 0 },
+            outputCeiling?.takeIf { it > 0 },
+        ).minOrNull()
+
         /**
          * Sentinel prefix on synthetic tool_result output marking
          * user-cancelled calls. Aligned with iOS
@@ -1813,20 +1964,31 @@ class ChatViewModel(
      *      on Android — persisted by the group editor but never consulted at
      *      runtime.
      */
-    private fun effectiveContextWindowTokens(): Int? {
+    private fun effectiveContextWindowTokens(modelOverride: LLMModel? = null): Int? {
         val config = providerRepository.config.value
-        val liveModel = _activeEntryId.value
+        val liveModel = modelOverride ?: _activeEntryId.value
             ?.let { id -> config.modelEntries.find { it.id == id }?.model }
             ?: currentModel
-        val window = liveModel?.contextWindowTokens ?: return null
+        val window = liveModel?.contextWindowTokens
+        val configuredLimit = com.openminis.app.ui.settings.ContextWindowSettings.get(context)
         val groupLimit = _selectedGroupId.value
             ?.let { gid -> config.modelGroups.find { it.id == gid }?.contextLimitTokens }
             ?.takeIf { it > 0 }
-        return if (groupLimit != null) minOf(window, groupLimit) else window
+        return Companion.effectiveContextWindowTokensFor(window, configuredLimit, groupLimit)
     }
 
     val currentModelMaxOutputTokens: Int?
-        get() = currentModel?.maxOutputTokens
+        get() {
+            val model = currentModel ?: return null
+            val providerCeiling = currentProvider?.effectiveMaxOutputTokens(model)
+                ?: model.maxOutputTokens
+                ?: 16_384
+            val outputCeiling = minOf(GLOBAL_MAX_TOKENS_CEILING, providerCeiling)
+            return Companion.displayedMaxOutputTokensFor(
+                contextWindow = effectiveContextWindowTokens(model),
+                outputCeiling = outputCeiling,
+            )
+        }
 
     // ── Session token usage (iOS parity: TokenUsageSheet data) ─────────────
 
@@ -2709,7 +2871,12 @@ class ChatViewModel(
     private fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> {
         // Collect every image in chronological order so the planner can
         // walk in reverse and protect the most recent images.
-        data class ImageRef(val msgIdx: Int, val partIdx: Int, val image: ImageBudget.BudgetImage)
+        data class ImageRef(
+            val occurrence: Int,
+            val msgIdx: Int,
+            val partIdx: Int,
+            val image: ImageBudget.BudgetImage,
+        )
         val images = mutableListOf<ImageRef>()
         messages.forEachIndexed { mi, msg ->
             msg.contentParts.forEachIndexed { pi, part ->
@@ -2717,6 +2884,7 @@ class ChatViewModel(
                     is AgentContentPart.ImageData -> {
                         images.add(
                             ImageRef(
+                                images.size,
                                 mi, pi,
                                 ImageBudget.BudgetImage(part.data, part.linuxPath, part.mimeType),
                             )
@@ -2727,6 +2895,7 @@ class ChatViewModel(
                         if (img != null) {
                             images.add(
                                 ImageRef(
+                                    images.size,
                                     mi, pi,
                                     ImageBudget.BudgetImage(
                                         img,
@@ -2753,7 +2922,7 @@ class ChatViewModel(
         }
         val resolvedPaths = HashMap<ImageBudget.ImagePartId, String?>()
         for (ref in images) {
-            val id = ImageBudget.ImagePartId.of(ref.image.data)
+            val id = ImageBudget.ImagePartId.of(ref.occurrence)
             if (id !in plan.droppedIds) continue
             val existing = ref.image.linuxPath
             if (existing != null) {
@@ -2776,7 +2945,7 @@ class ChatViewModel(
             val msg = mutated[mi]
             val newParts = msg.contentParts.toMutableList()
             for (ref in refs) {
-                val id = ImageBudget.ImagePartId.of(ref.image.data)
+                val id = ImageBudget.ImagePartId.of(ref.occurrence)
                 if (id !in plan.droppedIds) continue
                 val path = resolvedPaths[id]
                 val placeholder = AgentContentPart.Text(ImageBudget.elidedImagePlaceholder(path))
@@ -3371,16 +3540,28 @@ class ChatViewModel(
                     "was done\", NOT as an ongoing goal or todo list."
             )
         }
-        val model = currentModel
-        val contextWindow = model?.contextWindow ?: 128_000
-        val estimatedInput = userMessage.length / 4
-        val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
         val provider = currentProvider
             ?: throw IllegalStateException("No LLM provider available for compaction")
+        val summaryMessages = listOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = userMessage),
+        )
+        val estimatedInput = Companion.estimateRequestTokens(
+            messages = summaryMessages,
+            systemPrompt = compactSummarySystemPrompt,
+            tools = emptyList(),
+        )
+        // A compact summary should be bounded independently from a normal
+        // agent reply. Keep the existing 8K summary ceiling while still
+        // respecting the current request's remaining context space.
+        val maxOut = minOf(8_192, dynamicMaxTokens(provider, estimatedInput))
+        if (maxOut <= 0) {
+            throw ContextBudgetExceededException(
+                "Compaction input uses $estimatedInput tokens, leaving no output " +
+                    "space in the effective context window",
+            )
+        }
         val response = provider.sendMessage(
-            messages = listOf(
-                LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
-            ),
+            messages = summaryMessages,
             systemPrompt = compactSummarySystemPrompt,
             maxTokens = maxOut,
             // Mirror iOS AIChatViewModel.swift:12926 — null lets the
@@ -3467,9 +3648,20 @@ class ChatViewModel(
      * `exhausted` boundaries and still allow the send. That gives the user
      * a signal to invoke `/compact` explicitly without blocking their turn.
      */
-    private fun checkContextBeforeSend(): PreSendContextAction {
-        val tokens = _lastTurnContextTokens.value
-        if (tokens <= 0) return PreSendContextAction.PROCEED
+    private fun checkContextBeforeSend(pendingText: String? = null): PreSendContextAction {
+        // This is an early advisory check, before attachments have been
+        // materialised and before the final system prompt is built. Include
+        // the pending caption and current tool schemas, but leave the
+        // authoritative full-payload check to runAgentLoop after preparation.
+        val pendingMessage = pendingText
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { LLMMessage(LLMMessage.Role.USER, it) }
+        val history = if (pendingMessage == null) {
+            effectiveAgentHistory()
+        } else {
+            effectiveAgentHistory() + pendingMessage
+        }
+        val tokens = Companion.estimateRequestTokens(history, null, agentTools)
         // [T-context-window-live-read] Live window (entry re-resolved + group
         // contextLimitTokens folded in) — not the currentModel snapshot.
         val window = effectiveContextWindowTokens() ?: return PreSendContextAction.PROCEED
@@ -3522,6 +3714,8 @@ class ChatViewModel(
         /** Auto-compact is off — raise the dialog and let the user choose. */
         ASK_USER,
     }
+
+    private class ContextBudgetExceededException(message: String) : IllegalStateException(message)
 
     /**
      * Text + attachments held back while the "Context Near Capacity" dialog is
@@ -3607,12 +3801,34 @@ class ChatViewModel(
      * Blocks until the compaction attempt settles, because the next API call
      * must read the freshly-compacted history.
      */
-    private suspend fun inLoopContextCheck(compactionsSoFar: Int): InLoopContextAction {
-        val tokens = _lastTurnContextTokens.value
+    private suspend fun inLoopContextCheck(
+        compactionsSoFar: Int,
+        estimatedInputTokens: Int,
+        provider: LLMProvider,
+    ): InLoopContextAction {
+        val tokens = estimatedInputTokens
         if (tokens <= 0) return InLoopContextAction.PROCEED
-        val window = effectiveContextWindowTokens() ?: return InLoopContextAction.PROCEED
+        val window = effectiveContextWindowTokens(provider.model)
+            ?: return InLoopContextAction.PROCEED
         val policy = ContextPolicy.forContextWindow(window)
-        return when (policy.check(tokens, window)) {
+        val policyResult = policy.check(tokens, window)
+        // A small window may be below ContextPolicy's compact threshold while
+        // still having no room for even one output token. Treat that as
+        // exhaustion; for a compact-capable tier, use the existing compact
+        // path instead of allowing a zero-token request through.
+        val pressure = if (
+            policyResult == ContextPolicy.CheckResult.OK &&
+            dynamicMaxTokens(provider, tokens) <= 0
+        ) {
+            if (policy.compactThreshold > 0) {
+                ContextPolicy.CheckResult.NEEDS_COMPACT
+            } else {
+                ContextPolicy.CheckResult.EXHAUSTED
+            }
+        } else {
+            policyResult
+        }
+        return when (pressure) {
             ContextPolicy.CheckResult.OK -> InLoopContextAction.PROCEED
 
             ContextPolicy.CheckResult.NEEDS_COMPACT -> {
@@ -3641,17 +3857,8 @@ class ChatViewModel(
                 )
                 val ok = awaitCompaction()
                 if (!ok) return InLoopContextAction.STOP
-                // [T-android-auto-compact-inloop] Invalidate the stale reading.
-                // `_lastTurnContextTokens` is only refreshed by a usage chunk,
-                // which needs a COMPLETED API call — but this path compacts and
-                // `continue`s without one. Leaving the pre-compaction value in
-                // place made the very next iteration read the same number and
-                // compact again immediately, burning the whole budget in
-                // seconds (observed on device: two compactions 3s apart, both
-                // logging an identical 66358). Zeroing it makes the guard
-                // PROCEED once, so the next real response measures the
-                // post-compaction size and the decision is made on fresh data.
-                _lastTurnContextTokens.value = 0
+                // The next iteration rebuilds the post-compaction payload and
+                // therefore does not need a provider-usage sentinel here.
                 InLoopContextAction.COMPACTED
             }
 
@@ -6379,6 +6586,7 @@ class ChatViewModel(
             if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
             combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
         }
+        prepared.imageBudgetPlaceholders.forEach { combinedParts.add(AgentContentPart.Text(it)) }
         prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
 
         // Guard: every queued prompt produced no content (no text, no
@@ -6572,6 +6780,7 @@ class ChatViewModel(
                     if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
                     combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
                 }
+                prepared.imageBudgetPlaceholders.forEach { combinedParts.add(AgentContentPart.Text(it)) }
                 prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
 
                 val userText = combinedText.toString()
@@ -6703,7 +6912,7 @@ class ChatViewModel(
         // whole point is that the request which tripped the threshold must not
         // be the one that goes out over-length.
         if (!skipContextCheck) {
-            when (checkContextBeforeSend()) {
+            when (checkContextBeforeSend(text)) {
                 PreSendContextAction.PROCEED -> {}
                 PreSendContextAction.COMPACT_THEN_SEND -> {
                     pendingSendText = text
@@ -6863,6 +7072,7 @@ class ChatViewModel(
                 if (path != null) userContentParts.add(AgentContentPart.Text("[attached image: $path]"))
                 userContentParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
             }
+            prepared.imageBudgetPlaceholders.forEach { userContentParts.add(AgentContentPart.Text(it)) }
             prepared.attachedFilesXml?.let { userContentParts.add(AgentContentPart.Text(it)) }
 
             agentHistory.add(LLMMessage(
@@ -7465,15 +7675,15 @@ class ChatViewModel(
     }
 
     /**
-     * Compute max output tokens that fits within the remaining context window.
-     * Logic mirrors iOS's dynamicMaxTokens():
-     *   result = min(provider.defaultMaxTokens, max(contextWindow - inputTokens, MIN_MAX_TOKENS))
+     * Compute max output tokens from the payload that is about to be sent.
      *
-     * @param provider The current LLM provider (carries defaultMaxTokens).
-     * @param lastContextTokens API-reported input token count from the last call (0 = first call).
+     * The input count is intentionally supplied by the caller for the current
+     * request. API usage from a previous turn is useful for diagnostics, but
+     * it cannot describe a new tool result, attachment, system prompt, or
+     * tool schema and therefore must not control this limit.
      */
-    private fun dynamicMaxTokens(provider: LLMProvider, lastContextTokens: Int = 0): Int {
-        val model = currentModel ?: return minOf(GLOBAL_MAX_TOKENS_CEILING, provider.defaultMaxOutputTokens)
+    private fun dynamicMaxTokens(provider: LLMProvider, estimatedInputTokens: Int): Int {
+        val model = provider.model
         // Ceiling: min(global cap, model.maxOutputTokens-or-provider-default).
         // The global cap means we never send more than 128K regardless of
         // what the model claims it can output.
@@ -7483,14 +7693,16 @@ class ChatViewModel(
         // LLMModel.contextWindowTokens so the corrected Claude-1M / Gemini-1M
         // values apply here too, instead of the stale local "everything 200K"
         // copy that under-reported modern Claude/Gemini windows.
-        val contextWindow = model.contextWindowTokens
-        if (contextWindow <= 0) return maxOutputCeiling
-        val inputTokens = if (lastContextTokens > 0) lastContextTokens else 0
-        val remaining = contextWindow - inputTokens
-        val clamped = maxOf(remaining, MIN_MAX_TOKENS)
-        val result = minOf(maxOutputCeiling, clamped)
+        val contextWindow = effectiveContextWindowTokens(model)
+        if (contextWindow == null || contextWindow <= 0) return maxOutputCeiling
+        val result = Companion.maxOutputTokensFor(
+            contextWindow = contextWindow,
+            outputCeiling = maxOutputCeiling,
+            estimatedInputTokens = estimatedInputTokens,
+        )
         if (result < maxOutputCeiling) {
-            android.util.Log.i(TAG, "dynamicMaxTokens: $result (remaining=$remaining, ceiling=$maxOutputCeiling, window=$contextWindow, input=$inputTokens, model=${model.id})")
+            val remaining = contextWindow.toLong() - estimatedInputTokens.toLong()
+            android.util.Log.i(TAG, "dynamicMaxTokens: $result (remaining=$remaining, ceiling=$maxOutputCeiling, window=$contextWindow, input=$estimatedInputTokens, model=${model.id})")
         }
         return result
     }
@@ -7524,26 +7736,8 @@ class ChatViewModel(
      * offload itself uses precise [BPETokenizer.countTokens] per-part
      * for the candidate ranking.
      */
-    private fun estimateContextTokens(): Int {
-        var totalChars = 0
-        var imageTokens = 0
-        for (msg in agentHistory) {
-            for (part in msg.contentParts) {
-                when (part) {
-                    is AgentContentPart.Text -> totalChars += part.text.length
-                    is AgentContentPart.ToolUse -> totalChars += part.input.toString().length
-                    is AgentContentPart.ToolResult -> {
-                        totalChars += part.content.length
-                        part.imageData?.let { imageTokens += BPETokenizer.countImageTokens(it) }
-                    }
-                    is AgentContentPart.ImageData -> {
-                        imageTokens += BPETokenizer.countImageTokens(part.data)
-                    }
-                }
-            }
-        }
-        return (totalChars / 3.5).toInt() + imageTokens
-    }
+    private fun estimateContextTokens(): Int =
+        Companion.estimateRequestTokens(agentHistory, null, emptyList())
 
     /**
      * Approximate token count for a single agent content part. Used to rank
@@ -7578,7 +7772,7 @@ class ChatViewModel(
      * Walk [agentHistory], identify large tool outputs in the older
      * (non-protected) message range, and offload the highest-token ones to
      * disk until we're back under [ContextPolicy.offloadTarget]. Mirrors iOS
-     * `offloadContextIfNeeded(model:lastContextTokens:force:)` (line 7481).
+     * `offloadContextIfNeeded(model:estimatedInputTokens:force:)`.
      *
      * Protection rules (parity with iOS line 7535):
      *   - Last 4 messages are never offloaded — the model needs them
@@ -7599,7 +7793,7 @@ class ChatViewModel(
      */
     private fun offloadContextIfNeeded(
         contextWindow: Int,
-        lastContextTokens: Int,
+        estimatedInputTokens: Int,
         force: Boolean = false,
     ) {
         val sid = activeSessionId
@@ -7611,8 +7805,7 @@ class ChatViewModel(
             return
         }
 
-        val effectiveTokens =
-            if (lastContextTokens > 0) lastContextTokens else estimateContextTokens()
+        val effectiveTokens = estimatedInputTokens.coerceAtLeast(0)
 
         if (!force && effectiveTokens < policy.offloadThreshold) {
             // Below threshold — no work needed. Caller logs at debug level
@@ -7857,7 +8050,6 @@ class ChatViewModel(
         // args.
         val toolInputChunkRings: MutableMap<String, MutableList<String>> = mutableMapOf()
         var accumulatedText = ""
-        var lastContextTokens = 0  // updated each turn from API usage
 
         // T94 fix 2: throttle text-delta UI updates to ~20fps (50ms).
         // Pre-T94 the LLMStreamChunk.Text branch hopped to Dispatchers.Main
@@ -7960,6 +8152,19 @@ class ChatViewModel(
             // Sanitize history before each API call (mirrors iOS pre-API validation)
             sanitizeAgentHistory()
 
+            // Build the same payload shape that the provider will receive before
+            // deciding whether to offload or compact. This includes the live
+            // compact summary, tool results, attachments, system prompt, and
+            // tool schemas; usage from a prior response cannot describe these
+            // current inputs.
+            var outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
+            var outgoingTools = agentTools
+            var estimatedInputTokens = Companion.estimateRequestTokens(
+                messages = outgoingMessages,
+                systemPrompt = systemPrompt,
+                tools = outgoingTools,
+            )
+
             // Context window management: offload large tool outputs in older
             // messages to disk when the policy threshold for this model's
             // context window is crossed. Stubs in agentHistory still tell the
@@ -7972,12 +8177,23 @@ class ChatViewModel(
             // [T-context-window-live-read] Live read per loop turn — a stale
             // snapshot inside a long-running agent turn is exactly the iOS
             // fcc22b66 item-3 bug.
-            effectiveContextWindowTokens()?.takeIf { it > 0 }?.let { window ->
+            effectiveContextWindowTokens(currentProvider.model)?.takeIf { it > 0 }?.let { window ->
                 offloadContextIfNeeded(
                     contextWindow = window,
-                    lastContextTokens = lastContextTokens,
+                    estimatedInputTokens = estimatedInputTokens,
                 )
             }
+
+            // Offload mutates the canonical history. Rebuild the outgoing list
+            // and estimate so the guard and max output use the post-offload
+            // payload rather than a stale pre-offload count.
+            outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
+            outgoingTools = agentTools
+            estimatedInputTokens = Companion.estimateRequestTokens(
+                messages = outgoingMessages,
+                systemPrompt = systemPrompt,
+                tools = outgoingTools,
+            )
 
             // [T-android-auto-compact-inloop] In-loop context guard (iOS
             // f70ac173). checkContextBeforeSend only runs at the SEND entry
@@ -7987,7 +8203,7 @@ class ChatViewModel(
             // slam into the provider's context ceiling.
             //
             // Runs AFTER offload so it judges the post-offload size.
-            when (inLoopContextCheck(inLoopCompactions)) {
+            when (inLoopContextCheck(inLoopCompactions, estimatedInputTokens, currentProvider)) {
                 InLoopContextAction.PROCEED -> {}
                 InLoopContextAction.COMPACTED -> {
                     // The next API call reads the freshly-compacted
@@ -8201,7 +8417,6 @@ class ChatViewModel(
             // log it at turn-end alongside the empty-turn warning.
             var turnFinishReason: String? = null
             var lastUsage: LLMUsage? = null
-            val maxTokens = dynamicMaxTokens(provider, lastContextTokens)
             val toolCalls = mutableListOf<Triple<String, String, JSONObject>>() // id, name, args
             // [T-android-gemini3-thoughtsig / #179] toolCallId -> Gemini 3.x
             // thoughtSignature for this turn's calls (null for other providers).
@@ -8262,6 +8477,24 @@ class ChatViewModel(
                     // Non-Anthropic providers ignore it (cast fails silently).
                     (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
                         ?.enhancedCache = _enhancedCacheEnabled.value
+                    // Rebuild and re-estimate for every actual attempt. A retry
+                    // or fallback may run after settings/model state changed,
+                    // and the previous stream's usage is not this payload.
+                    outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
+                    outgoingTools = agentTools
+                    estimatedInputTokens = Companion.estimateRequestTokens(
+                        messages = outgoingMessages,
+                        systemPrompt = systemPrompt,
+                        tools = outgoingTools,
+                    )
+                    val maxTokens = dynamicMaxTokens(currentProvider, estimatedInputTokens)
+                    if (maxTokens <= 0) {
+                        val window = effectiveContextWindowTokens(currentProvider.model)
+                        throw ContextBudgetExceededException(
+                            "Request input uses $estimatedInputTokens tokens, leaving no " +
+                                "output space in the effective context window${window?.let { " ($it tokens)" } ?: ""}",
+                        )
+                    }
                     // [T-STALL-DIAG] First-chunk watchdog. The reported symptom
                     // is "new session shows thinking… forever, UI empty, stop
                     // button still armed" — which is indistinguishable, in the
@@ -8301,9 +8534,9 @@ class ChatViewModel(
                     // user message. Falls through to the raw agentHistory when
                     // no compact has happened, so the common path stays zero-copy.
                     currentProvider.streamMessage(
-                        applyRequestImageBudget(effectiveAgentHistory()),
-                        systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
-                        tools = agentTools,
+                        outgoingMessages,
+                        systemPrompt, maxTokens,
+                        tools = outgoingTools,
                         thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
                     ).collect { chunk ->
                 // [T-STALL-DIAG] Mark first byte back from the provider and log
@@ -8609,23 +8842,25 @@ class ChatViewModel(
                     }
                     is LLMStreamChunk.Usage -> {
                         lastUsage = chunk.usage
-                        // Update context token count for next turn's dynamicMaxTokens()
-                        // and publish to _lastTurnContextTokens so the ContextPolicy
-                        // gate in [checkContextBeforeSend] can see the latest pressure
-                        // without a DB round-trip.
-                        if (chunk.usage.latestContextTokens > 0) {
-                            lastContextTokens = chunk.usage.latestContextTokens
+                        // Keep provider usage for the UI/diagnostics only. It is
+                        // deliberately not used as the next request's budget:
+                        // that request can contain a new tool result, attachment,
+                        // summary, system prompt, or tool schema.
+                        val reportedContextTokens = if (chunk.usage.latestContextTokens > 0) {
+                            chunk.usage.latestContextTokens
                         } else if (chunk.usage.inputTokens > 0) {
                             // Fallback when a provider omits latestContextTokens: inputTokens is
                             // now fresh-only (cached portion subtracted in the parser), so add the
-                            // cache back to recover the true context size — otherwise a high
-                            // cache-hit turn would under-report context pressure and skip offload.
-                            lastContextTokens = chunk.usage.inputTokens +
+                            // cache back for a useful diagnostic reading. This
+                            // value never controls offload or max output.
+                            chunk.usage.inputTokens +
                                 (chunk.usage.cacheReadInputTokens ?: 0) +
                                 (chunk.usage.cacheCreationInputTokens ?: 0)
+                        } else {
+                            0
                         }
-                        if (lastContextTokens > 0) {
-                            _lastTurnContextTokens.value = lastContextTokens
+                        if (reportedContextTokens > 0) {
+                            _lastTurnContextTokens.value = reportedContextTokens
                         }
                     }
                     is LLMStreamChunk.ReasoningContent -> {
@@ -10844,7 +11079,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         //     inlined image, in the same order as `imageParts`.
         //   attachedFilesXml:  null when no attachments, otherwise the
         //     <user-attached-files> XML block iOS appends to the user turn.
-        val imageUploadPaths: List<String>,
+        val imageUploadPaths: List<String?>,
+        /** Placeholders for image occurrences removed before provider send. */
+        val imageBudgetPlaceholders: List<String>,
         val attachedFilesXml: String?,
         // T150: file:// URIs of persisted non-image attachments, in the same
         // order as the non-image suffix of `attachmentNames`. Carried into
@@ -10880,7 +11117,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // and restoredAttachmentUris also come out image-first/non-image-suffix.
         val imageMediaRefPartsJson = mutableListOf<String>()
         val nonImageMediaRefPartsJson = mutableListOf<String>()
-        val imageUploadPaths = mutableListOf<String>()
+        val imageUploadPaths = mutableListOf<String?>()
+        val imageBudgetPlaceholders = mutableListOf<String>()
         // T132: also write the resized bytes into the session's iSH-bound
         // attachments dir (filesDir/minis-sessions/<sid>/attachments/uploads/),
         // which is mounted at /var/minis/attachments/ inside iSH. This makes
@@ -10951,8 +11189,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     false
                 }
                 val linuxPath = if (uploadOk) "/var/minis/attachments/uploads/$safeName" else null
+                imageUploadPaths.add(linuxPath)
                 if (linuxPath != null) {
-                    imageUploadPaths.add(linuxPath)
                     metas.add(UploadMeta(linuxPath = linuxPath, size = rawBytes.size.toLong(), modifiedIso = nowStr))
                 }
 
@@ -11026,23 +11264,41 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // tell the user we touched their attachments.
         if (imageParts.isNotEmpty()) {
             val budgetResult = ImageBudget.applyMessageBudget(imageParts.map { it.data })
-            // budgetResult.keptBytes.size <= imageParts.size; tail-drop the
-            // parallel image-only lists symmetrically. Re-encoded bytes always
-            // come out as JPEG so flip the mimeType on any part whose bytes
-            // changed size (cheap proxy — never a false positive that hurts
-            // semantics because the byte stream itself is the JPEG header).
-            val newImageParts = budgetResult.keptBytes.mapIndexed { idx, kept ->
-                val orig = imageParts[idx]
+            // Keep every derived image value by the original occurrence index.
+            // A budget pass may remove an image in the middle; tail trimming
+            // the parallel lists would bind the following image to the wrong
+            // URI, name, mediaRef, upload path, or MIME type.
+            val newImageParts = budgetResult.keptBytes.mapIndexed { keptIndex, kept ->
+                val orig = imageParts[budgetResult.keptIndices[keptIndex]]
                 if (kept === orig.data) orig
                 else LLMMessage.ImagePart(kept, "image/jpeg", linuxPath = orig.linuxPath)
             }
+            val keptOccurrences = budgetResult.keptIndices.toSet()
+            imageParts.indices
+                .filterNot { it in keptOccurrences }
+                .forEach { index ->
+                    imageBudgetPlaceholders.add(
+                        ImageBudget.elidedImagePlaceholder(
+                            linuxPath = imageUploadPaths.getOrNull(index),
+                            maxBytes = ImageBudget.MAX_TOTAL_BYTES,
+                        ),
+                    )
+                }
             val newSize = newImageParts.size
             imageParts.clear()
             imageParts.addAll(newImageParts)
-            while (imageUris.size > newSize) imageUris.removeAt(imageUris.size - 1)
-            while (imageNames.size > newSize) imageNames.removeAt(imageNames.size - 1)
-            while (imageMediaRefPartsJson.size > newSize) imageMediaRefPartsJson.removeAt(imageMediaRefPartsJson.size - 1)
-            while (imageUploadPaths.size > newSize) imageUploadPaths.removeAt(imageUploadPaths.size - 1)
+            val keptIndices = budgetResult.keptIndices
+            fun <T> retainOccurrences(values: MutableList<T>) {
+                // Keep null slots (notably an image whose upload failed), or
+                // the following image would inherit the wrong Linux path.
+                val retained = keptIndices.map { values[it] }
+                values.clear()
+                values.addAll(retained)
+            }
+            retainOccurrences(imageUris)
+            retainOccurrences(imageNames)
+            retainOccurrences(imageMediaRefPartsJson)
+            retainOccurrences(imageUploadPaths)
             if (budgetResult.mutated) {
                 AppLogger.info(
                     TAG,
@@ -11080,6 +11336,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             attachmentNames = imageNames + nonImageNames,
             mediaRefPartsJson = imageMediaRefPartsJson + nonImageMediaRefPartsJson,
             imageUploadPaths = imageUploadPaths,
+            imageBudgetPlaceholders = imageBudgetPlaceholders,
             attachedFilesXml = xml,
             nonImageUris = nonImageUris,
         )
