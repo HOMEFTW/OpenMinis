@@ -41,8 +41,19 @@ internal fun budgetProviderRequest(
         var requestDropped: Boolean = false,
     )
 
+    // Structured content is the canonical representation. Drop the legacy
+    // message-level field up front so a later provider fallback cannot revive
+    // an image that was intentionally ignored by the budget planner.
+    val canonicalMessages = messages.map { message ->
+        if (message.contentParts.isNotEmpty() && message.imageParts.isNotEmpty()) {
+            message.copy(imageParts = emptyList())
+        } else {
+            message
+        }
+    }
+
     val slots = mutableListOf<Slot>()
-    messages.forEachIndexed { messageIndex, message ->
+    canonicalMessages.forEachIndexed { messageIndex, message ->
         message.contentParts.forEachIndexed { partIndex, part ->
             when (part) {
                 is AgentContentPart.ImageData -> slots += Slot(
@@ -65,7 +76,7 @@ internal fun budgetProviderRequest(
             }
         }
         // Legacy LLMMessage.imageParts are still consumed by the Codex image
-        // generation builder when no structured image part exists.
+        // generation builder only when structured content is absent.
         if (message.contentParts.isEmpty()) {
             message.imageParts.forEachIndexed { imageIndex, part ->
                 slots += Slot(
@@ -86,7 +97,7 @@ internal fun budgetProviderRequest(
             linuxPath = part.linuxPath,
         )
     }
-    if (slots.isEmpty()) return BudgetedProviderRequest(messages, imageParts)
+    if (slots.isEmpty()) return BudgetedProviderRequest(canonicalMessages, imageParts)
 
     // Normalize each occurrence before cumulative planning. A failed ladder
     // is a hard failure for inline transport, never permission to send raw
@@ -123,7 +134,7 @@ internal fun budgetProviderRequest(
         }
     }
     if (slots.none { it.dropped || it.safeData !== it.data }) {
-        return BudgetedProviderRequest(messages, imageParts)
+        return BudgetedProviderRequest(canonicalMessages, imageParts)
     }
 
     val byMessagePart = slots
@@ -142,7 +153,7 @@ internal fun budgetProviderRequest(
         },
     )
 
-    val normalizedMessages = messages.mapIndexed { messageIndex, message ->
+    val normalizedMessages = canonicalMessages.mapIndexed { messageIndex, message ->
         if (message.contentParts.isEmpty()) {
             val normalizedImageParts = message.imageParts.mapIndexedNotNull { imageIndex, original ->
                 val slot = byMessageImage[messageIndex to imageIndex]

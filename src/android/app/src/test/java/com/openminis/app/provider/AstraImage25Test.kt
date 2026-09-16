@@ -1,5 +1,6 @@
 package com.openminis.app.provider
 
+import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ThinkingLevel
@@ -140,5 +141,58 @@ class AstraImage25Test {
             .buildCodexImageBody(messages)
         assertEquals("gpt-5.5", old.getString("model"))
         assertFalse(old.getJSONArray("tools").getJSONObject(0).has("model"))
+    }
+
+    @Test
+    fun codexImageDoesNotRestoreLegacyImagesAfterAllStructuredImagesAreElided() {
+        val message = LLMMessage(
+            role = LLMMessage.Role.USER,
+            content = "prompt",
+            imageParts = listOf(LLMMessage.ImagePart(ByteArray(4), "image/jpeg")),
+            contentParts = listOf(AgentContentPart.ImageData(ByteArray(4), "image/png")),
+        )
+        val budgeted = budgetProviderRequest(
+            messages = listOf(message),
+            imageParts = emptyList(),
+            maxRequestBytes = 0L,
+        )
+        assertTrue(
+            budgeted.messages.single().contentParts.none { it is AgentContentPart.ImageData },
+        )
+        val body = OpenAIProvider(
+            oauthTokenProvider = { "test" },
+            model = LLMModel.gptImage25Flare,
+        ).buildCodexImageBody(budgeted.messages, budgeted.imageParts)
+
+        assertEquals(0, codexInputImages(body).size)
+    }
+
+    @Test
+    fun codexImageIgnoresLegacyImagesWhenStructuredContentIsTextOnly() {
+        val budgeted = budgetProviderRequest(
+            messages = listOf(
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = "prompt",
+                    imageParts = listOf(LLMMessage.ImagePart(byteArrayOf(1), "image/jpeg")),
+                    contentParts = listOf(AgentContentPart.Text("prompt")),
+                ),
+            ),
+            imageParts = emptyList(),
+        )
+        val body = OpenAIProvider(
+            oauthTokenProvider = { "test" },
+            model = LLMModel.gptImage25Flare,
+        ).buildCodexImageBody(budgeted.messages, budgeted.imageParts)
+
+        assertEquals(0, codexInputImages(body).size)
+    }
+
+    private fun codexInputImages(body: JSONObject): List<JSONObject> {
+        val content = body.getJSONArray("input").getJSONObject(0).optJSONArray("content")
+            ?: return emptyList()
+        return (0 until content.length())
+            .map { content.getJSONObject(it) }
+            .filter { it.optString("type") == "input_image" }
     }
 }

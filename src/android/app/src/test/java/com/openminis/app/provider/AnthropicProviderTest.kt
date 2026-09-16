@@ -80,6 +80,7 @@ class AnthropicProviderTest {
         assertEquals("end_turn", response.stopReason)
         assertEquals(10, response.usage?.inputTokens)
         assertEquals(5, response.usage?.outputTokens)
+        assertEquals(10, response.usage?.latestContextTokens)
     }
 
     @Test
@@ -121,6 +122,30 @@ class AnthropicProviderTest {
         val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
         assertEquals(50, response.usage?.cacheCreationInputTokens)
         assertEquals(30, response.usage?.cacheReadInputTokens)
+        assertEquals(100, response.usage?.inputTokens)
+        assertEquals(180, response.usage?.latestContextTokens)
+    }
+
+    @Test
+    fun `streamMessage includes cached context even with no fresh input`() = runBlocking {
+        for (freshInput in listOf(0, 5)) {
+            val sseBody = buildString {
+                appendLine("""data: {"type":"message_start","message":{"usage":{"input_tokens":$freshInput,"cache_creation_input_tokens":50,"cache_read_input_tokens":300}}}""")
+                appendLine()
+                appendLine("""data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}""")
+                appendLine()
+            }
+            server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
+            val usages = provider.streamMessage(
+                listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024,
+            ).toList().filterIsInstance<LLMStreamChunk.Usage>().map { it.usage }
+
+            assertEquals(2, usages.size)
+            assertEquals(freshInput, usages[0].inputTokens)
+            assertEquals(350 + freshInput, usages[0].latestContextTokens)
+            assertEquals(0, usages[1].latestContextTokens)
+            assertEquals(3, usages[1].outputTokens)
+        }
     }
 
     @Test

@@ -17,6 +17,35 @@ import org.junit.Test
 class CompactBudgetTest {
 
     @Test
+    fun `local overflows split into four real calls without exhausting six call budget`() {
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        fun summarize(estimatedInput: Int): Int {
+            val output = ChatViewModel.maxOutputTokensFor(64_000, 8_192, estimatedInput)
+            try {
+                ChatViewModel.reserveCompactCall(calls, output)
+                return 1
+            } catch (error: IllegalStateException) {
+                if (output > 0) throw error
+                check(calls.get() + 2 <= ChatViewModel.MAX_COMPACT_LLM_CALLS)
+                return summarize(estimatedInput / 2) + summarize(estimatedInput / 2)
+            }
+        }
+        assertEquals(4, summarize(164_000))
+        assertEquals(4, calls.get())
+    }
+
+    @Test
+    fun `six issued calls still prevent a seventh request`() {
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        repeat(ChatViewModel.MAX_COMPACT_LLM_CALLS) {
+            ChatViewModel.reserveCompactCall(calls, 8_192)
+        }
+        val result = runCatching { ChatViewModel.reserveCompactCall(calls, 8_192) }
+        assertTrue(result.isFailure)
+        assertEquals(ChatViewModel.MAX_COMPACT_LLM_CALLS, calls.get())
+    }
+
+    @Test
     fun `short transcript gets the base timeout`() {
         assertEquals(
             ChatViewModel.COMPACT_TIMEOUT_BASE_MS,

@@ -2646,14 +2646,17 @@ class OpenAIProvider private constructor(
         }.orEmpty()
         val userContent = "Use the image generation tool to create: $prompt"
         val references = if (model.isGPTImage25) {
-            val messageReferences = if (
-                lastUser?.contentParts?.any { it is AgentContentPart.ImageData } == true
-            ) {
-                lastUser.contentParts.filterIsInstance<AgentContentPart.ImageData>()
-                    .map { LLMMessage.ImagePart(it.data, it.mimeType) }
-            } else {
-                lastUser?.imageParts.orEmpty()
-            }
+            // Structured content is authoritative whenever present. In
+            // particular, an all-elided ImageData list must not fall back to
+            // the stale legacy field and bypass the request budget.
+            val messageReferences = lastUser?.let { message ->
+                if (message.contentParts.isNotEmpty()) {
+                    message.contentParts.filterIsInstance<AgentContentPart.ImageData>()
+                        .map { LLMMessage.ImagePart(it.data, it.mimeType) }
+                } else {
+                    message.imageParts
+                }
+            }.orEmpty()
             messageReferences + imageParts
         } else emptyList()
         val content: Any = if (references.isEmpty()) userContent else JSONArray().apply {

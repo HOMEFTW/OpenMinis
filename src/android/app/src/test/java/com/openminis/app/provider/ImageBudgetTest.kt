@@ -118,6 +118,31 @@ class ImageBudgetTest {
     }
 
     @Test
+    fun structuredContentTakesPriorityOverLegacyMessageImages() {
+        val budgeted = budgetProviderRequest(
+            messages = listOf(
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = "prompt",
+                    imageParts = listOf(LLMMessage.ImagePart(ByteArray(4), "image/jpeg")),
+                    contentParts = listOf(
+                        AgentContentPart.Text("prompt"),
+                        AgentContentPart.ImageData(ByteArray(4), "image/png"),
+                    ),
+                ),
+            ),
+            imageParts = emptyList(),
+            maxRequestBytes = 8L,
+        )
+
+        assertTrue(budgeted.messages.single().imageParts.isEmpty())
+        assertEquals(
+            1,
+            budgeted.messages.single().contentParts.count { it is AgentContentPart.ImageData },
+        )
+    }
+
+    @Test
     fun legacyMessageImagesAreBudgetedWhenStructuredPartsAreAbsent() {
         val budgeted = budgetProviderRequest(
             messages = listOf(

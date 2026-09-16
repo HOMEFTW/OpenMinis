@@ -3,12 +3,31 @@ package com.openminis.app.ui.chat
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMMessage
+import com.openminis.app.data.model.LLMModel
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ContextBudgetTest {
+
+    @Test
+    fun `live model limit replaces cached request model limit`() {
+        val cached = LLMModel("model", "Model", "provider", contextWindow = 400_000)
+        val live = cached.copy(contextWindow = 64_000, maxOutputTokens = 8_192)
+        val resolved = ChatViewModel.resolveBudgetModelFor(live, cached)!!
+        assertEquals(64_000, ChatViewModel.effectiveContextWindowTokensFor(
+            resolved.contextWindow, 105_000, null))
+        assertEquals(8_192, resolved.maxOutputTokens)
+    }
+
+    @Test
+    fun `fallback keeps its own model when active entry has not switched yet`() {
+        val active = LLMModel("old", "Old", "provider", contextWindow = 400_000)
+        val fallback = LLMModel("new", "New", "provider", contextWindow = 32_000)
+        assertEquals(fallback, ChatViewModel.resolveBudgetModelFor(active, fallback))
+        assertEquals(fallback, ChatViewModel.resolveBudgetModelFor(null, fallback))
+    }
 
     @Test
     fun `effective window uses the smallest positive limit`() {

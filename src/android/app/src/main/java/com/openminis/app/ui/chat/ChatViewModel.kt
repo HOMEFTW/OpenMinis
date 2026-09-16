@@ -558,6 +558,26 @@ class ChatViewModel(
             .filter { it > 0 }
             .minOrNull()
 
+        internal fun resolveBudgetModelFor(liveModel: LLMModel?, requestModel: LLMModel?): LLMModel? =
+            liveModel?.takeIf { requestModel == null || it.id == requestModel.id } ?: requestModel
+
+        /** A locally rejected segment has not consumed a model call. */
+        internal fun reserveCompactCall(
+            calls: java.util.concurrent.atomic.AtomicInteger,
+            maxOutputTokens: Int,
+        ): Int {
+            if (maxOutputTokens <= 0) {
+                throw ContextBudgetExceededException("Compaction input leaves no output space in the effective context window")
+            }
+            while (true) {
+                val issued = calls.get()
+                check(issued < MAX_COMPACT_LLM_CALLS) {
+                    "compaction exceeded its budget of $MAX_COMPACT_LLM_CALLS model calls"
+                }
+                if (calls.compareAndSet(issued, issued + 1)) return issued + 1
+            }
+        }
+
         /**
          * Return only the output tokens that fit after the current input.
          * Zero means the caller must compact/stop; it is never raised to a
@@ -1355,6 +1375,7 @@ class ChatViewModel(
      * a usage payload — in which case we treat the turn as low-pressure.
      */
     private val _lastTurnContextTokens = MutableStateFlow(0)
+    private val contextTokenCalibration = ContextTokenCalibration()
     val lastTurnContextTokens: StateFlow<Int> = _lastTurnContextTokens.asStateFlow()
 
     /**
@@ -1966,9 +1987,7 @@ class ChatViewModel(
      */
     private fun effectiveContextWindowTokens(modelOverride: LLMModel? = null): Int? {
         val config = providerRepository.config.value
-        val liveModel = modelOverride ?: _activeEntryId.value
-            ?.let { id -> config.modelEntries.find { it.id == id }?.model }
-            ?: currentModel
+        val liveModel = resolveBudgetModel(modelOverride)
         val window = liveModel?.contextWindowTokens
         val configuredLimit = com.openminis.app.ui.settings.ContextWindowSettings.get(context)
         val groupLimit = _selectedGroupId.value
@@ -1979,7 +1998,7 @@ class ChatViewModel(
 
     val currentModelMaxOutputTokens: Int?
         get() {
-            val model = currentModel ?: return null
+            val model = resolveBudgetModel(currentModel) ?: return null
             val providerCeiling = currentProvider?.effectiveMaxOutputTokens(model)
                 ?: model.maxOutputTokens
                 ?: 16_384
@@ -3447,21 +3466,11 @@ class ChatViewModel(
             "Previous context summary:\n$previousSummary\n\n" +
                 "New conversation to merge:\n$transcript"
         }
-        // [T-android-compact-runaway] Spend one unit of the run's call budget.
-        // The depth cap bounds how DEEP the recursion goes; this bounds how
-        // WIDE it gets in total, which is what actually determines wall-clock
-        // time when each call is slow rather than failing fast.
-        val spent = compactCallsIssued.incrementAndGet()
-        if (spent > MAX_COMPACT_LLM_CALLS) {
-            throw IllegalStateException(
-                "compaction exceeded its budget of $MAX_COMPACT_LLM_CALLS model calls"
-            )
-        }
         // [T-android-compact-progress] Publish before the call so the UI shows
         // the segment that is actually running, not the one that just finished.
         _compactProgress.value = _compactProgress.value?.copy(
             depth = depth,
-            callsIssued = spent,
+            callsIssued = compactCallsIssued.get(),
         )
         return try {
             generateCompactSummary(conversationText)
@@ -3545,7 +3554,7 @@ class ChatViewModel(
         val summaryMessages = listOf(
             LLMMessage(role = LLMMessage.Role.USER, content = userMessage),
         )
-        val estimatedInput = Companion.estimateRequestTokens(
+        val estimatedInput = estimateBudgetTokens(
             messages = summaryMessages,
             systemPrompt = compactSummarySystemPrompt,
             tools = emptyList(),
@@ -3554,12 +3563,8 @@ class ChatViewModel(
         // agent reply. Keep the existing 8K summary ceiling while still
         // respecting the current request's remaining context space.
         val maxOut = minOf(8_192, dynamicMaxTokens(provider, estimatedInput))
-        if (maxOut <= 0) {
-            throw ContextBudgetExceededException(
-                "Compaction input uses $estimatedInput tokens, leaving no output " +
-                    "space in the effective context window",
-            )
-        }
+        val spent = reserveCompactCall(compactCallsIssued, maxOut)
+        _compactProgress.value = _compactProgress.value?.copy(callsIssued = spent)
         val response = provider.sendMessage(
             messages = summaryMessages,
             systemPrompt = compactSummarySystemPrompt,
@@ -3661,7 +3666,7 @@ class ChatViewModel(
         } else {
             effectiveAgentHistory() + pendingMessage
         }
-        val tokens = Companion.estimateRequestTokens(history, null, agentTools)
+        val tokens = estimateBudgetTokens(history, null, agentTools)
         // [T-context-window-live-read] Live window (entry re-resolved + group
         // contextLimitTokens folded in) — not the currentModel snapshot.
         val window = effectiveContextWindowTokens() ?: return PreSendContextAction.PROCEED
@@ -7674,16 +7679,31 @@ class ChatViewModel(
         return e
     }
 
-    /**
-     * Compute max output tokens from the payload that is about to be sent.
-     *
-     * The input count is intentionally supplied by the caller for the current
-     * request. API usage from a previous turn is useful for diagnostics, but
-     * it cannot describe a new tool result, attachment, system prompt, or
-     * tool schema and therefore must not control this limit.
-     */
+    /** Live overrides apply only to the model used by this request. */
+    private fun resolveBudgetModel(requestModel: LLMModel?): LLMModel? =
+        Companion.resolveBudgetModelFor(
+            _activeEntryId.value?.let { id ->
+                providerRepository.config.value.modelEntries.find { it.id == id }?.model
+            },
+            requestModel ?: currentModel,
+        )
+
+    private fun contextCalibrationKey(model: LLMModel? = currentProvider?.model): String =
+        "${_activeEntryId.value}:${model?.id}"
+
+    private fun estimateBudgetTokens(
+        messages: List<LLMMessage>,
+        systemPrompt: String?,
+        tools: List<AgentToolDefinition>,
+        model: LLMModel? = currentProvider?.model,
+    ): Int = contextTokenCalibration.estimate(
+        contextCalibrationKey(model),
+        Companion.estimateRequestTokens(messages, systemPrompt, tools),
+    )
+
+    /** Bound output using the rebuilt payload, calibrated by prior input usage. */
     private fun dynamicMaxTokens(provider: LLMProvider, estimatedInputTokens: Int): Int {
-        val model = provider.model
+        val model = resolveBudgetModel(provider.model) ?: provider.model
         // Ceiling: min(global cap, model.maxOutputTokens-or-provider-default).
         // The global cap means we never send more than 128K regardless of
         // what the model claims it can output.
@@ -7952,8 +7972,12 @@ class ChatViewModel(
             parts[candidate.partIdx] = newPart
             agentHistory[candidate.msgIdx] = msg.copy(contentParts = parts)
 
-            currentTokens -= candidate.tokens
-            freedTokens += candidate.tokens
+            val freed = contextTokenCalibration.estimate(
+                contextCalibrationKey(),
+                (candidate.tokens - countPartTokens(newPart)).coerceAtLeast(0),
+            )
+            currentTokens -= freed
+            freedTokens += freed
             offloadedCount++
             val afterPct = (currentTokens.toLong() * 100 / contextWindow.coerceAtLeast(1)).toInt()
             AppLogger.info(
@@ -8159,10 +8183,11 @@ class ChatViewModel(
             // current inputs.
             var outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
             var outgoingTools = agentTools
-            var estimatedInputTokens = Companion.estimateRequestTokens(
+            var estimatedInputTokens = estimateBudgetTokens(
                 messages = outgoingMessages,
                 systemPrompt = systemPrompt,
                 tools = outgoingTools,
+                model = currentProvider.model,
             )
 
             // Context window management: offload large tool outputs in older
@@ -8189,10 +8214,11 @@ class ChatViewModel(
             // payload rather than a stale pre-offload count.
             outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
             outgoingTools = agentTools
-            estimatedInputTokens = Companion.estimateRequestTokens(
+            estimatedInputTokens = estimateBudgetTokens(
                 messages = outgoingMessages,
                 systemPrompt = systemPrompt,
                 tools = outgoingTools,
+                model = currentProvider.model,
             )
 
             // [T-android-auto-compact-inloop] In-loop context guard (iOS
@@ -8482,11 +8508,13 @@ class ChatViewModel(
                     // and the previous stream's usage is not this payload.
                     outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
                     outgoingTools = agentTools
-                    estimatedInputTokens = Companion.estimateRequestTokens(
+                    val rawInputEstimate = Companion.estimateRequestTokens(
                         messages = outgoingMessages,
                         systemPrompt = systemPrompt,
                         tools = outgoingTools,
                     )
+                    val requestCalibrationKey = contextCalibrationKey(currentProvider.model)
+                    estimatedInputTokens = contextTokenCalibration.estimate(requestCalibrationKey, rawInputEstimate)
                     val maxTokens = dynamicMaxTokens(currentProvider, estimatedInputTokens)
                     if (maxTokens <= 0) {
                         val window = effectiveContextWindowTokens(currentProvider.model)
@@ -8842,24 +8870,21 @@ class ChatViewModel(
                     }
                     is LLMStreamChunk.Usage -> {
                         lastUsage = chunk.usage
-                        // Keep provider usage for the UI/diagnostics only. It is
-                        // deliberately not used as the next request's budget:
-                        // that request can contain a new tool result, attachment,
-                        // summary, system prompt, or tool schema.
+                        // Calibrate against this attempt's raw input estimate.
+                        // Reapply the ratio to each rebuilt payload, so new
+                        // content is counted and compaction can reduce the size.
                         val reportedContextTokens = if (chunk.usage.latestContextTokens > 0) {
                             chunk.usage.latestContextTokens
-                        } else if (chunk.usage.inputTokens > 0) {
+                        } else {
                             // Fallback when a provider omits latestContextTokens: inputTokens is
                             // now fresh-only (cached portion subtracted in the parser), so add the
-                            // cache back for a useful diagnostic reading. This
-                            // value never controls offload or max output.
+                            // cache back before calibrating the full input.
                             chunk.usage.inputTokens +
                                 (chunk.usage.cacheReadInputTokens ?: 0) +
                                 (chunk.usage.cacheCreationInputTokens ?: 0)
-                        } else {
-                            0
                         }
                         if (reportedContextTokens > 0) {
+                            contextTokenCalibration.record(requestCalibrationKey, rawInputEstimate, reportedContextTokens)
                             _lastTurnContextTokens.value = reportedContextTokens
                         }
                     }
