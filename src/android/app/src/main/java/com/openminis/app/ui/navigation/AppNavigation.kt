@@ -52,6 +52,7 @@ import com.openminis.app.ui.sandbox.RootfsManagementScreen
 import com.openminis.app.ui.settings.EnvironmentVariablesScreen
 import com.openminis.app.ui.settings.AppearanceScreen
 import com.openminis.app.ui.settings.SettingsScreen
+import com.openminis.app.ui.settings.ContextWindowSettingsScreen
 import com.openminis.app.ui.settings.SystemPermissionsScreen
 import com.openminis.app.ui.settings.SessionStorageDetailScreen
 import com.openminis.app.ui.settings.SkillDetailScreen
@@ -92,6 +93,7 @@ object Routes {
     const val SESSION_LIST = "sessions"
     const val CHAT = "chat/{sessionId}"
     const val SETTINGS = "settings"
+    const val CONTEXT_WINDOW = "context_window"
     const val PROVIDER_LIST = "providers"
     const val ADD_PROVIDER = "add_provider"
     const val PROVIDER_DETAIL = "provider/{instanceId}"
@@ -599,6 +601,7 @@ fun AppNavigation(
                 onPermissionsClick = { navController.safeNavigate(Routes.PERMISSIONS) },
                 onUsageClick = { navController.safeNavigate(Routes.USAGE_STATS) },
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
+                onContextWindowClick = { navController.safeNavigate(Routes.CONTEXT_WINDOW) },
                 onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onAboutClick = { navController.safeNavigate(Routes.ABOUT) },
@@ -1340,6 +1343,10 @@ fun AppNavigation(
                 providerConfig = providerRepository.config.value,
                 onBack = { navController.safePopBackStack() },
             )
+        }
+
+        composable(Routes.CONTEXT_WINDOW) {
+            ContextWindowSettingsScreen(onBack = { navController.safePopBackStack() })
         }
 
         composable(Routes.APPEARANCE) {

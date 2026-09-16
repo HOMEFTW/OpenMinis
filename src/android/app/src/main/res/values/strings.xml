@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="settings_context_size">Context size</string>
-    <string name="settings_context_current">Current: %1$d tokens</string>
-    <string name="settings_context_custom">Custom tokens (8K–1M)</string>
-    <string name="settings_context_invalid">Enter a value between 8K and 1M tokens.</string>
+    <string name="settings_context_current">%1$,d tokens</string>
+    <string name="settings_context_custom">Custom limit</string>
+    <string name="settings_context_invalid">Enter a whole number from 8,000 to 1,000,000.</string>
     <string name="settings_context_saved">Context size saved</string>
     <string name="settings_context_restore_default">Restore Default</string>
+    <string name="settings_context_global_limit">Saved global limit</string>
+    <string name="settings_context_entry_summary">%1$s tokens · Global limit</string>
+    <string name="settings_context_explanation">Limits the context available to conversations. The effective window is the lowest of this limit, the model window and any model group limit.</string>
+    <string name="settings_context_presets">Quick choices</string>
+    <string name="settings_context_default_preset">%1$s · Default</string>
+    <string name="settings_context_unit">tokens</string>
+    <string name="settings_context_range">8,000–1,000,000 tokens · 1K = 1,000</string>
+    <string name="settings_context_unsaved">Unsaved changes · Save to apply.</string>
+    <string name="settings_context_edit_hint">Choose a preset or enter a limit, then save.</string>
     <string name="app_name">Minis</string>
     <string name="new_chat">New Chat</string>
     <string name="settings">Settings</string>

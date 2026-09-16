@@ -127,11 +127,20 @@
     <string name="settings_back">返回</string>
     <string name="settings_title">设置</string>
     <string name="settings_context_size">上下文大小</string>
-    <string name="settings_context_current">当前值：%1$d Token</string>
-    <string name="settings_context_custom">自定义 Token（8K-1M）</string>
-    <string name="settings_context_invalid">请输入 8K 至 1M 之间的整数 Token。</string>
+    <string name="settings_context_current">%1$,d Token</string>
+    <string name="settings_context_custom">自定义上限</string>
+    <string name="settings_context_invalid">请输入 8,000 至 1,000,000 之间的整数。</string>
     <string name="settings_context_saved">上下文大小已保存</string>
     <string name="settings_context_restore_default">恢复默认值</string>
+    <string name="settings_context_global_limit">已保存的全局上限</string>
+    <string name="settings_context_entry_summary">%1$s Token · 全局上限</string>
+    <string name="settings_context_explanation">限制对话可用的上下文大小。实际窗口取此上限、模型窗口和模型组上限中的最小值。</string>
+    <string name="settings_context_presets">快捷选择</string>
+    <string name="settings_context_default_preset">%1$s · 默认</string>
+    <string name="settings_context_unit">Token</string>
+    <string name="settings_context_range">8,000–1,000,000 Token · 1K = 1,000</string>
+    <string name="settings_context_unsaved">有未保存的修改，保存后生效。</string>
+    <string name="settings_context_edit_hint">选择预设或输入上限后，点击保存。</string>
     <string name="settings_section_llm_providers">LLM 提供商</string>
     <string name="settings_section_llm_providers_footer">配置 Agent 使用的模型,管理每个提供商的 API key 与 OAuth,并创建模型组用于回退或负载均衡。</string>
     <string name="settings_manage_providers">管理提供商</string>
