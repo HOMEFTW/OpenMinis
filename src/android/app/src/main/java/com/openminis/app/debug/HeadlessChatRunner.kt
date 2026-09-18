@@ -145,6 +145,44 @@ internal object HeadlessChatRunner {
     }
 
     /** Send a prompt and observe the state of this invocation only. */
+    data class SessionMailRun(val viewModel: ChatViewModel, val runId: String)
+
+    suspend fun startSessionMail(
+        context: Context,
+        sessionId: String,
+        defer: () -> Unit,
+        claim: suspend () -> String?,
+    ): SessionMailRun? =
+        withContext(Dispatchers.Main) {
+            val vm = viewModel(context, sessionId)
+            if (!vm.canAcceptSessionMail()) return@withContext null
+            // Let the existing provider resolver settle after loading a cold session.
+            withTimeoutOrNull(5_000) { vm.activeEntryId.first { it != null } }
+            if (!vm.canAcceptSessionMail()) return@withContext null
+            val text = withContext(Dispatchers.IO) { claim() } ?: return@withContext null
+            if (!vm.canAcceptSessionMail()) {
+                withContext(Dispatchers.IO) { defer() }
+                return@withContext null
+            }
+            val runId = vm.allocateRunId()
+            vm.startSessionMailForRun(text, runId)
+            SessionMailRun(vm, runId)
+        }
+
+    suspend fun awaitSessionMail(context: Context, sessionId: String, run: SessionMailRun): PromptResult =
+        withContext(Dispatchers.Main) {
+            // Keep the same VM even if its store is released by a session deletion.
+            val vm = run.viewModel
+            var state = vm.runState(run.runId)
+            while (state?.status?.isTerminal != true) {
+                state = withTimeoutOrNull(5_000) { vm.runStateFlow(run.runId).first { it.status.isTerminal } }
+                if (state == null && app(context).chatRepository.getSession(sessionId) == null) {
+                    return@withContext PromptResult("Error", "Target session was deleted", false, runId = run.runId)
+                }
+            }
+            PromptResult(state.status.wireName, vm.assistantTextForRun(run.runId) ?: state.error, false, runId = run.runId)
+        }
+
     suspend fun prompt(
         context: Context,
         sessionId: String,

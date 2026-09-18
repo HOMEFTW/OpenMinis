@@ -148,6 +148,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         private set
     lateinit var chatRepository: ChatRepository
         private set
+    val sessionMessenger by lazy { com.openminis.app.service.SessionMessenger(this) }
     lateinit var providerRepository: ProviderRepository
         private set
     lateinit var envVarRepository: EnvVarRepository
@@ -454,6 +455,11 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
 
         // Force-stop removes alarms; re-arm persisted tasks when the app starts again.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try { sessionMessenger } catch (e: Exception) {
+                Log.w("MinisApp", "Could not open session mailbox", e)
+            }
+        }
         try {
             com.openminis.app.scheduled.ScheduledTaskManager(this).rescheduleAll()
         } catch (e: Exception) {

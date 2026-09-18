@@ -1010,6 +1010,7 @@ class ChatViewModel(
             val current = _runStates.value[runId] ?: ChatRunState(runId = runId)
             val now = System.currentTimeMillis()
             val nextState = ChatRunStatePolicy.transition(current, status, error, now)
+            if (nextState.status.isTerminal) sessionMailRunIds.remove(runId)
             val next = _runStates.value.toMutableMap()
             next[runId] = nextState
             _runStates.value = next
@@ -1072,6 +1073,20 @@ class ChatViewModel(
         sendMessage(text, skipContextCheck = false, runId = runId)
         return admission(runId)
     }
+
+    private val sessionMailRunIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    internal fun startSessionMailForRun(text: String, runId: String): ChatRunAdmission {
+        sessionMailRunIds.add(runId)
+        return startPromptForRun(text, runId)
+    }
+
+    /** Never consume a user's composer, pending edit, or interrupted run for relayed work. */
+    internal fun canAcceptSessionMail(): Boolean = sessionLoaded.value &&
+        !_isStreaming.value && !_isCompacting.value && !_canResume.value &&
+        _promptQueue.value.isEmpty() && pendingSendText == null &&
+        _inputText.value.isEmpty() && _attachments.value.isEmpty() &&
+        _pastedTexts.value.isEmpty() && _editingMessageId.value == null
 
     internal fun startRetryForRun(messageId: String, runId: String? = null): ChatRunAdmission {
         val runId = runId ?: newRunId()
@@ -1544,7 +1559,7 @@ class ChatViewModel(
                 providerRepository, context,
             ),
             memoryEnabled = _memoryEnabled.value,
-        )
+        ) + com.openminis.app.tools.SessionMessageTool.definition()
 
     /**
      * Per-session loop detector. Reset alongside [agentHistory] whenever the
@@ -7009,7 +7024,8 @@ class ChatViewModel(
             // [T-android-paste-mediaref] Fold `[Pasted#N]` markers out to disk
             // BEFORE persisting, so the stored message carries a mediaRef per
             // paste instead of one huge text part.
-            val pasted = buildPastedParts(trimmed, activeSessionId)
+            // Relayed text must never resolve markers against a newly typed local draft.
+            val pasted = if (effectiveRunId in sessionMailRunIds) null else buildPastedParts(trimmed, activeSessionId)
             if (pasted != null) {
                 // Safe to clear now: the content is on disk and the parts JSON
                 // below references it, so nothing depends on the buffer any more.
@@ -9849,6 +9865,8 @@ class ChatViewModel(
         val toolTitle = try { JSONObject(argsJson).optString("tool_title", name) } catch (_: Exception) { name }
 
         return when (name) {
+            com.openminis.app.tools.SessionMessageTool.NAME ->
+                com.openminis.app.tools.SessionMessageTool.execute(argsJson, activeSessionId, context)
             FileReadTool.NAME -> {
                 val result = FileReadTool.execute(argsJson, activeSessionId, context)
                 // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.

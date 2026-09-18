@@ -1,5 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="session_mail_title">Session communication</string>
+    <string name="session_mail_help">Send text to another session to run with its model and permissions (uses tokens). Busy sessions, unfinished turns and unsent drafts wait. Replies appear here; AI can read them with session_message. Replies do not automatically start another turn. Text only; no attachments or full-history sharing.</string>
+    <string name="session_mail_allow">Allow other AI sessions to send requests here</string>
+    <string name="session_mail_save_first">Send a normal message first to create this session.</string>
+    <string name="session_mail_pick">Choose a target session</string>
+    <string name="session_mail_content">Message to send</string>
+    <string name="session_mail_forward_latest">Use latest assistant reply</string>
+    <string name="session_mail_send">Send and run in target session</string>
+    <string name="session_mail_history">Messages and replies</string>
+    <string name="session_mail_empty">No cross-session messages yet.</string>
+    <string name="session_mail_to">To: %1$s</string>
+    <string name="session_mail_from">From: %1$s</string>
+    <string name="session_mail_queued">Queued · waiting for an idle session with an empty composer</string>
+    <string name="session_mail_running">Processing · open the target session for approvals or to stop</string>
+    <string name="session_mail_completed">Completed</string>
+    <string name="session_mail_interrupted">Interrupted · check the target before sending again</string>
+    <string name="session_mail_failed">Failed</string>
+    <string name="session_mail_reply">Reply / result</string>
+    <string name="session_mail_expand">Show full message</string>
+    <string name="session_mail_collapse">Collapse</string>
+    <string name="session_mail_cancel">Cancel queued message</string>
+    <string name="session_mail_remove">Remove record from both mailboxes</string>
     <string name="settings_context_size">Context size</string>
     <string name="settings_context_current">%1$,d tokens</string>
     <string name="settings_context_custom">Custom limit</string>

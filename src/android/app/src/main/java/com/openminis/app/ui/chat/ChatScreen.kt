@@ -116,6 +116,8 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Image
@@ -900,6 +902,7 @@ fun ChatScreen(
     // [T-mcp-integration-android] MCPs-in-Session sheet visibility.
     var showMcpsSheet by remember { mutableStateOf(false) }
     var showTokenUsageSheet by remember { mutableStateOf(false) }
+    var showSessionCommunication by remember { mutableStateOf(false) }
     // T185: Move-to-session sheet visibility. Hoisted to the top of
     // ChatScreen so the trigger (capsule inside the composer) and the
     // sheet body (rendered later in the layout tree) share the same
@@ -2740,6 +2743,7 @@ fun ChatScreen(
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.task_budget_title)) },
                                 onClick = { showChatMenu = false; showTaskBudget = true },
+                                leadingIcon = { Icon(Icons.Default.Speed, contentDescription = null) },
                             )
                             // Browse Chat Files (iOS parity) — opens file browser at /var/minis
                             DropdownMenuItem(
@@ -2794,6 +2798,11 @@ fun ChatScreen(
                             }
                             MinisMenuDivider()
                             // Token Usage (iOS parity)
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.session_mail_title)) },
+                                onClick = { showChatMenu = false; showSessionCommunication = true },
+                                leadingIcon = { Icon(Icons.Default.SwapHoriz, contentDescription = null) },
+                            )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.settings_token_usage)) },
                                 onClick = {
@@ -6623,6 +6632,13 @@ fun ChatScreen(
     }
 
     // Session Token Usage bottom sheet
+    if (showSessionCommunication) {
+        SessionCommunicationSheet(
+            sessionId = viewModel.currentSessionId,
+            latestReply = messages.lastOrNull { it.role == "assistant" && !it.isStreaming }?.content.orEmpty(),
+            onDismiss = { showSessionCommunication = false },
+        )
+    }
     if (showTokenUsageSheet) {
         TokenUsageSheet(
             viewModel = viewModel,

@@ -1,5 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="session_mail_title">對話通訊</string>
+    <string name="session_mail_help">向另一對話傳送文字，使用對方的模型和權限執行，會消耗 Token。對方忙碌、有未完成工作或未傳送草稿時等待。回覆顯示於此，AI 可用 session_message 讀取；回覆不會自動觸發下一輪。僅傳送文字，不自動共用附件或完整歷史。</string>
+    <string name="session_mail_allow">允許其他對話的 AI 向本對話傳送請求</string>
+    <string name="session_mail_save_first">請先傳送一則一般訊息以建立目前對話。</string>
+    <string name="session_mail_pick">選擇目標對話</string>
+    <string name="session_mail_content">要傳送的訊息</string>
+    <string name="session_mail_forward_latest">填入最近一次 AI 回覆</string>
+    <string name="session_mail_send">傳送並在目標對話執行</string>
+    <string name="session_mail_history">通訊記錄與回覆</string>
+    <string name="session_mail_empty">尚無跨對話訊息。</string>
+    <string name="session_mail_to">傳送至：%1$s</string>
+    <string name="session_mail_from">來自：%1$s</string>
+    <string name="session_mail_queued">排隊中 · 等待目標對話閒置且輸入框無草稿</string>
+    <string name="session_mail_running">處理中 · 可前往目標對話處理核准或停止工作</string>
+    <string name="session_mail_completed">已完成</string>
+    <string name="session_mail_interrupted">已中斷 · 重新傳送前請檢查目標對話</string>
+    <string name="session_mail_failed">失敗</string>
+    <string name="session_mail_reply">回覆 / 結果</string>
+    <string name="session_mail_expand">展開全文</string>
+    <string name="session_mail_collapse">收起</string>
+    <string name="session_mail_cancel">取消排隊訊息</string>
+    <string name="session_mail_remove">刪除雙方通訊記錄</string>
     <string name="app_name">Minis</string>
     <string name="new_chat">新增對話</string>
     <string name="settings">設定</string>
