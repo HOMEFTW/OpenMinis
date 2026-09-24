@@ -9,6 +9,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.openminis.app.agent.Level
 import com.openminis.app.agent.ToolLoopDetector
 import com.openminis.app.browser.BrowserActionInput
@@ -1477,7 +1480,9 @@ class ChatViewModel(
     @Volatile
     private var streamJob: Job? = null
     private var currentProvider: LLMProvider? = null
-    private var currentModel: LLMModel? = null
+    // Capabilities are read directly by Compose; changes must invalidate those reads
+    // even when the display name and selected entry id stay the same.
+    private var currentModel: LLMModel? by mutableStateOf(null)
 
     /**
      * Does the CURRENTLY RESOLVED main model natively consume image pixels?
@@ -4169,6 +4174,14 @@ class ChatViewModel(
                 // selection; _availableGroups has no such risk because the sheet
                 // re-reads it on each open.
                 _availableGroups.value = config.modelGroups
+                // Refresh capabilities on the existing binding without rerouting the group.
+                // Previously a cached provider kept the pre-edit reasoning flag indefinitely.
+                val refreshedModel = config.modelEntries.firstOrNull { it.id == _activeEntryId.value }?.model
+                if (refreshedModel != null && refreshedModel.id == currentModel?.id && refreshedModel != currentModel) {
+                    currentModel = refreshedModel
+                    currentProvider?.takeIf { it.model.id == refreshedModel.id }?.model = refreshedModel
+                    _modelName.value = refreshedModel.displayName
+                }
                 // [T-android-disabled-provider-still-selectable-via-group #34]
                 // Runtime re-resolution when a GROUP-bound session's currently
                 // active member has its provider DISABLED mid-session. The

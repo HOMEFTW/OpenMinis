@@ -58,7 +58,7 @@ fun ModelEntryDetailScreen(
         return
     }
 
-    val baseModel = entry.baseModel
+    val baseModel = entry.baseModel.withKnownCapabilityDefaults()
     val overrides = entry.overrides
 
     var modelId by remember { mutableStateOf(baseModel.id) }

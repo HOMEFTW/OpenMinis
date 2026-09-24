@@ -60,12 +60,14 @@ data class LLMModel(
     val isGPTImage25: Boolean get() = isGPTImage25Id(id)
     val isDeepSeekFlash: Boolean get() = isDeepSeekFlashId(id)
 
-    /** Fill unknown metadata on entries saved before these models were supported. */
+    /** Repair old catalog capabilities; ModelEntry applies user overrides afterward. */
     fun withKnownCapabilityDefaults(): LLMModel = if (!isDeepSeekFlash && !isGPT6SolOrLuna) this else copy(
         contextWindow = contextWindow ?: if (isDeepSeekFlash) 1_000_000 else 1_050_000,
         maxOutputTokens = maxOutputTokens ?: if (isDeepSeekFlash) 384_000 else 128_000,
-        supportsReasoning = supportsReasoning ?: true,
-        reasoningEffortValues = reasoningEffortValues ?: if (isDeepSeekFlash) deepSeekFlashEfforts else gpt6Efforts,
+        supportsReasoning = true,
+        reasoningEffortValues = reasoningEffortValues?.takeIf { it.isNotEmpty() }
+            ?: if (isDeepSeekFlash) deepSeekFlashEfforts else gpt6Efforts,
+        declaresNoEffortTiers = false,
         inputModalities = inputModalities ?: listOf("text", "image"),
     )
 

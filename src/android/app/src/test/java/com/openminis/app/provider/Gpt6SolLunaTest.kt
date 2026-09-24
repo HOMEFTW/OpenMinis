@@ -3,6 +3,7 @@ package com.openminis.app.provider
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.openai.OpenAIModelsApi
 import com.openminis.app.provider.openai.OpenAIProvider
@@ -19,6 +20,34 @@ class Gpt6SolLunaTest {
         ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX)
     private val efforts = listOf("none", "low", "medium", "high", "xhigh", "max")
     private val messages = listOf(LLMMessage(LLMMessage.Role.USER, "Hello"))
+
+    @Test fun staleNegativeCapabilityMetadataDoesNotHideKnownModelThinking() {
+        for (id in ids + "deepseek-flash") {
+            val stale = LLMModel(id, id, "Custom", supportsReasoning = false,
+                reasoningEffortValues = emptyList(), declaresNoEffortTiers = true)
+            val entry = ModelEntry("provider", stale)
+            val resolved = entry.model
+            val expected = if (id == "deepseek-flash") listOf(ThinkingLevel.LOW, ThinkingLevel.HIGH, ThinkingLevel.MAX)
+                else levels.drop(1)
+            assertEquals(true, resolved.supportsReasoning)
+            assertEquals(expected, resolved.chatThinkingLevels(entry.effectiveMaxThinkingLevel))
+            assertEquals(expected.map { it.name.lowercase() }, resolved.reasoningEffortValues)
+            assertEquals(false, resolved.declaresNoEffortTiers)
+            // Repair the resolved capabilities without rewriting stored configuration.
+            assertEquals(false, stale.supportsReasoning)
+        }
+    }
+
+    @Test fun explicitUserDisableStillWinsOverKnownLunaCapabilities() {
+        val base = LLMModel("gpt-6-luna", "GPT-6 Luna", "Custom", supportsReasoning = false)
+        val disabled = ModelEntry("provider", base, ModelOverrides(supportsReasoning = false))
+        assertEquals(false, disabled.model.supportsReasoning)
+        assertEquals(ThinkingLevel.OFF, disabled.effectiveMaxThinkingLevel)
+        val capped = ModelEntry("provider", base, ModelOverrides(maxThinkingLevel = ThinkingLevel.HIGH))
+        assertEquals(levels.drop(1).take(3), capped.model.chatThinkingLevels(capped.effectiveMaxThinkingLevel))
+        val unrelated = ModelEntry("provider", LLMModel("custom-model", "Custom", "Custom", supportsReasoning = false))
+        assertEquals(false, unrelated.model.supportsReasoning)
+    }
 
     @Test fun builtinsDiscoveryAndSavedEntriesExposeFiveEffortsAndVision() = runBlocking {
         val oauth = OpenAIModelsApi.fetchModelsOAuth()
