@@ -22,6 +22,7 @@ class ChatRepository(internal val dao: ChatDao) {
         // here; existing call sites that omit it keep the prior
         // memoryEnabled=1 behavior (legacy default).
         memoryEnabled: Boolean = true,
+        thinkingOverride: String? = null,
     ): ChatSessionEntity {
         val now = System.currentTimeMillis()
         val session = ChatSessionEntity(
@@ -31,12 +32,24 @@ class ChatRepository(internal val dao: ChatDao) {
             createdAt = now,
             updatedAt = now,
             memoryEnabled = if (memoryEnabled) 1 else 0,
+            thinkingOverride = thinkingOverride,
         )
         dao.insertSession(session)
         return session
     }
 
     suspend fun getSession(id: String): ChatSessionEntity? = dao.getSession(id)
+
+    /** Draft preferences stay in memory until the first message creates the session. */
+    suspend fun updateSessionThinkingOverride(sessionId: String, level: String) {
+        if (sessionId.isEmpty()) return
+        dao.updateThinkingOverride(sessionId, level)
+    }
+
+    suspend fun updateSessionMemoryEnabled(sessionId: String, enabled: Boolean) {
+        if (sessionId.isEmpty()) return
+        dao.updateMemoryEnabled(sessionId, if (enabled) 1 else 0)
+    }
 
     /** All persisted token_usage JSON strings for a session (one per LLM call). */
     suspend fun sessionTokenUsages(sessionId: String): List<String> = dao.tokenUsages(sessionId)

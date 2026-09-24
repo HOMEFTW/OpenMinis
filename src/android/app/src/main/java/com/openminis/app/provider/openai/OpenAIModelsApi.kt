@@ -30,6 +30,8 @@ object OpenAIModelsApi {
     // pill in chat is disabled and the user can't pick low/medium/high.
     fun fetchModelsOAuth(): List<LLMModel> = listOf(
         LLMModel.gpt6Astra,
+        LLMModel.gpt6Sol,
+        LLMModel.gpt6Luna,
         // [T-android-thinking-level-arch] GPT-5.6 family — Codex OAuth only
         // (not in LLMModel.allOpenAI, matching iOS). sol/terra reach ULTRA,
         // luna reaches MAX (see ThinkingLevelCatalog).
@@ -157,7 +159,7 @@ object OpenAIModelsApi {
                 // the `reasoning` flag yet, and without this the pill
                 // stays disabled.
                 val idLower = id.lowercase()
-                val knownReasoning = LLMModel.isGPT6AstraId(id) || idLower.startsWith("gpt-5") ||
+                val knownReasoning = LLMModel.isGPT6Id(id) || idLower.startsWith("gpt-5") ||
                     idLower.startsWith("o1") ||
                     idLower.startsWith("o3") ||
                     idLower.startsWith("o4") ||

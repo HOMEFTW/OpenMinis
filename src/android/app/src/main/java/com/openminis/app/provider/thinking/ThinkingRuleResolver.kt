@@ -1,6 +1,7 @@
 package com.openminis.app.provider.thinking
 
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.LLMModel
 import org.json.JSONObject
 
 /**
@@ -252,6 +253,17 @@ object ThinkingRuleResolver {
 
         // DeepSeek V4 vendor-native sibling shape (iOS 847822eb, Android df776253). Only
         // when NOT on a unified gateway — that rule above already claimed those.
+        if (LLMModel.isDeepSeekFlashId(ctx.modelId)) {
+            add(
+                ThinkingRule(
+                    kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
+                    scope = ThinkingRule.Scope.ModelPattern(ctx.modelId),
+                    wireFormat = ThinkingWireFormat.DeepSeekSibling,
+                    reasoningEcho = ReasoningEchoPolicy("reasoning_content", ReasoningEchoPolicy.Timing.EVERY_TURN),
+                    label = "deepseek-flash-official",
+                ),
+            )
+        }
         add(
             ThinkingRule(
                 kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
@@ -344,7 +356,7 @@ object ThinkingRuleResolver {
             }
 
             is ThinkingWireFormat.ReasoningEffort -> {
-                val isOpenAINative = lid.startsWith("o") || lid.startsWith("gpt-5") || com.openminis.app.data.model.LLMModel.isGPT6AstraId(lid)
+                val isOpenAINative = lid.startsWith("o") || lid.startsWith("gpt-5") || LLMModel.isGPT6Id(lid)
                 if (!ctx.level.isEnabled) {
                     // OFF is a separate dispatch on Android, reproduced verbatim from the
                     // pre-refactor chain. Order matters: OpenAI-native ids send the tier
@@ -432,7 +444,8 @@ object ThinkingRuleResolver {
 
             is ThinkingWireFormat.DeepSeekSibling -> {
                 if (ctx.level.isEnabled) {
-                    val requested = wireEffort(ctx.level)
+                    val requested = wireEffort(if (LLMModel.isDeepSeekFlashId(ctx.modelId))
+                        LLMModel.deepSeekFlashThinkingLevel(ctx.level) else ctx.level)
                     val clamped = clampEffort(requested, ctx.declaredEffortValues)
                     body.put("thinking", JSONObject().put("type", "enabled"))
                     body.put("reasoning_effort", clamped)

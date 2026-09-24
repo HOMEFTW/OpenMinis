@@ -17,7 +17,7 @@ object ThinkingLevelCatalog {
     private data class Rule(val match: (String) -> Boolean, val max: ThinkingLevel)
 
     private val rules: List<Rule> = listOf(
-        Rule({ LLMModel.isGPT6AstraId(it) }, ThinkingLevel.MAX),
+        Rule({ LLMModel.isGPT6Id(it) }, ThinkingLevel.MAX),
         // GPT-5.6 family: sol / terra / luna all reach MAX. ULTRA is a
         // client-side "Max + orchestration" concept, never a wire effort — the
         // effort layer maps both MAX and ULTRA to "max". Keep in lockstep with
@@ -148,3 +148,11 @@ val LLMModel.selectableThinkingLevels: List<ThinkingLevel>
  */
 val ModelEntry.effectiveMaxThinkingLevel: ThinkingLevel
     get() = overrides.maxThinkingLevel ?: model.catalogMaxThinkingLevel
+
+/** Keep the Flash picker aligned with its three distinct wire efforts. */
+internal fun LLMModel.chatThinkingLevels(ceiling: ThinkingLevel): List<ThinkingLevel> {
+    val levels = if (isDeepSeekFlash) selectableThinkingLevels.ifEmpty {
+        listOf(ThinkingLevel.LOW, ThinkingLevel.HIGH, ThinkingLevel.MAX)
+    } else ThinkingLevel.entries
+    return levels.filter { it != ThinkingLevel.OFF && it.rank <= ceiling.rank }
+}

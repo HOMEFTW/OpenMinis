@@ -444,7 +444,13 @@ class AnthropicProvider(
             "[resolve] provider=anthropic model=${model.id} level=${thinkingLevel.name} " +
                 "shape=[${thinkShape.keys.sorted().joinToString(",")}]",
         )
-        if (thinkingLevel.isEnabled) {
+        if (model.isDeepSeekFlash) {
+            body.put("thinking", JSONObject().put("type", if (thinkingLevel.isEnabled) "enabled" else "disabled"))
+            if (thinkingLevel.isEnabled) {
+                body.put("output_config", JSONObject().put("effort",
+                    ThinkingRuleResolver.wireEffort(LLMModel.deepSeekFlashThinkingLevel(thinkingLevel))))
+            }
+        } else if (thinkingLevel.isEnabled) {
             if (modelUsesAdaptiveThinking(model.id)) {
                 // [T-anthropic-thinking-display] Explicitly request summarized
                 // thinking. This is the SECOND half of the "thinking on but no

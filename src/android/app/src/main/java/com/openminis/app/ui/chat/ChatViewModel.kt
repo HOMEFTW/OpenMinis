@@ -49,6 +49,7 @@ import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.provider.catalogMaxThinkingLevel
+import com.openminis.app.provider.chatThinkingLevels
 import com.openminis.app.provider.effectiveMaxThinkingLevel
 import com.openminis.app.agent.shell.BashismDetector
 import com.openminis.app.agent.shell.BashismReminder
@@ -1974,8 +1975,12 @@ class ChatViewModel(
     val availableThinkingLevels: List<ThinkingLevel>
         get() {
             val ceiling = currentModelMaxThinkingLevel
+            currentModel?.let { return it.chatThinkingLevels(ceiling) }
             return ThinkingLevel.entries.filter { it != ThinkingLevel.OFF && it.rank <= ceiling.rank }
         }
+
+    fun thinkingLevelForDisplay(level: ThinkingLevel): ThinkingLevel =
+        if (currentModel?.isDeepSeekFlash == true) LLMModel.deepSeekFlashThinkingLevel(level) else level
 
     // [T-anthropic-context-window] Token Usage sheet's context-window row.
     // Route through contextWindowTokens (heuristic-backed) so models without an
@@ -2203,13 +2208,9 @@ class ChatViewModel(
     private fun toggleMemoryEnabled() {
         val newValue = !_memoryEnabled.value
         _memoryEnabled.value = newValue
+        val sid = realSessionId
         viewModelScope.launch {
-            // Toggling before the first message means the row doesn't exist
-            // yet — materialize the session row so the preference lands on
-            // the persisted id instead of silently updating zero rows under
-            // the draft key.
-            val sid = ensureSession()
-            chatRepository.dao.updateMemoryEnabled(sid, if (newValue) 1 else 0)
+            chatRepository.updateSessionMemoryEnabled(sid, newValue)
         }
         appendSystemInfo(
             text = "Memory writes ${if (newValue) "enabled" else "disabled"}. Reads are unaffected.",
@@ -2260,14 +2261,13 @@ class ChatViewModel(
      * value here — including OFF — because the user's explicit "turn it
      * off for this session" must persist as distinct from "never set".
      *
-     * Uses [ensureSession] so toggling on a draft (no DB row yet) first
-     * materialises the row, mirroring how toggleMemoryEnabled lands its
-     * preference on the persisted id rather than the `__new__…` draft key.
+     * A draft keeps the value in memory. [ensureSession] snapshots it into the
+     * initial row on first send, so setting preferences cannot create an empty chat.
      */
     private fun persistThinkingOverride(level: ThinkingLevel) {
+        val sid = realSessionId
         viewModelScope.launch {
-            val sid = ensureSession()
-            chatRepository.dao.updateThinkingOverride(sid, level.name)
+            chatRepository.updateSessionThinkingOverride(sid, level.name)
         }
     }
 
@@ -4299,6 +4299,7 @@ class ChatViewModel(
         val session = chatRepository.createSession(
             modelId = modelId,
             memoryEnabled = _memoryEnabled.value,
+            thinkingOverride = _thinkingLevel.value.name,
         )
         realSessionId = session.id
         // "New Chat in Group": file the just-promoted draft into its folder.
@@ -5256,10 +5257,7 @@ class ChatViewModel(
         val level = group.defaultThinkingLevel ?: return
         if (_thinkingLevel.value == level) return
         _thinkingLevel.value = level
-        viewModelScope.launch {
-            val sid = ensureSession()
-            chatRepository.dao.updateThinkingOverride(sid, level.name)
-        }
+        persistThinkingOverride(level)
     }
 
     /**

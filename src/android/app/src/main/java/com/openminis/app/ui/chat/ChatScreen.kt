@@ -4706,7 +4706,7 @@ fun ChatScreen(
                                     if (isThinking && thinkingSupported) {
                                         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
                                             ThinkingLevelPicker(
-                                                current = thinkingLevelState,
+                                                current = viewModel.thinkingLevelForDisplay(thinkingLevelState),
                                                 availableLevels = viewModel.availableThinkingLevels,
                                                 onSelect = viewModel::setThinkingLevel,
                                             )
@@ -5844,7 +5844,7 @@ fun ChatScreen(
                         groups = availableGroups,
                         selectedGroupId = selectedGroupId,
                         activeEntryId = composerEntryId,
-                        currentThinking = composerThinking,
+                        currentThinking = viewModel.thinkingLevelForDisplay(composerThinking),
                         availableLevels = viewModel.availableThinkingLevels,
                         supportsThinking = viewModel.currentModelSupportsReasoning,
                         fastMode = composerFastEligible && composerFastOn,

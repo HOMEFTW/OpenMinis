@@ -7,10 +7,18 @@ data class LLMModel(
     val id: String,
     val displayName: String,
     val provider: String,
-    val contextWindow: Int? = null,
-    val maxOutputTokens: Int? = null,
+    val contextWindow: Int? = when {
+        isDeepSeekFlashId(id) -> 1_000_000
+        isGPT6SolOrLunaId(id) -> 1_050_000
+        else -> null
+    },
+    val maxOutputTokens: Int? = when {
+        isDeepSeekFlashId(id) -> 384_000
+        isGPT6SolOrLunaId(id) -> 128_000
+        else -> null
+    },
     val supportsReasoning: Boolean? = when {
-        isGPT6AstraId(id) -> true
+        isGPT6Id(id) || isDeepSeekFlashId(id) -> true
         isGPTImage25Id(id) -> false
         else -> null
     },
@@ -23,7 +31,11 @@ data class LLMModel(
     // replaces the old hardcoded deepseek/glm/kimi/minimax skip list; the
     // contents are the ALLOWED tiers, which the request builder clamps onto
     // (the catalog's sets vary: ["low","medium","high"], ["high","max"], …).
-    val reasoningEffortValues: List<String>? = if (isGPT6AstraId(id)) astraEfforts else null,
+    val reasoningEffortValues: List<String>? = when {
+        isGPT6Id(id) -> gpt6Efforts
+        isDeepSeekFlashId(id) -> deepSeekFlashEfforts
+        else -> null
+    },
     // [OpenMinis#163] The catalog affirmatively declares NO effort tiers for
     // this model — it reasons, but takes no `reasoning_effort` parameter.
     // Mirrors iOS LLMModel.declaresNoEffortTiers.
@@ -39,14 +51,38 @@ data class LLMModel(
     val declaresNoEffortTiers: Boolean? = null,
     // Input/output modalities from models.dev (e.g. "text", "image", "audio", "video", "pdf").
     // Mirrors iOS ModelModality flags. When null, treat as text-in/text-out only.
-    val inputModalities: List<String>? = if (isGPT6AstraId(id) || isGPTImage25Id(id)) listOf("text", "image") else null,
+    val inputModalities: List<String>? = if (isGPT6Id(id) || isGPTImage25Id(id) || isDeepSeekFlashId(id)) listOf("text", "image") else null,
     val outputModalities: List<String>? = if (isGPTImage25Id(id)) listOf("image") else null,
 ) {
     val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
+    val isGPT6: Boolean get() = isGPT6Id(id)
+    val isGPT6SolOrLuna: Boolean get() = isGPT6SolOrLunaId(id)
     val isGPTImage25: Boolean get() = isGPTImage25Id(id)
+    val isDeepSeekFlash: Boolean get() = isDeepSeekFlashId(id)
+
+    /** Fill unknown metadata on entries saved before these models were supported. */
+    fun withKnownCapabilityDefaults(): LLMModel = if (!isDeepSeekFlash && !isGPT6SolOrLuna) this else copy(
+        contextWindow = contextWindow ?: if (isDeepSeekFlash) 1_000_000 else 1_050_000,
+        maxOutputTokens = maxOutputTokens ?: if (isDeepSeekFlash) 384_000 else 128_000,
+        supportsReasoning = supportsReasoning ?: true,
+        reasoningEffortValues = reasoningEffortValues ?: if (isDeepSeekFlash) deepSeekFlashEfforts else gpt6Efforts,
+        inputModalities = inputModalities ?: listOf("text", "image"),
+    )
 
     companion object {
-        val astraEfforts = listOf("low", "medium", "high", "xhigh", "max")
+        val gpt6Efforts = listOf("low", "medium", "high", "xhigh", "max")
+        val deepSeekFlashEfforts = listOf("low", "high", "max")
+
+        // Official API uses deepseek-flash; accept versioned IDs from compatible providers too.
+        fun isDeepSeekFlashId(id: String): Boolean = matchesModelId(id, "deepseek-flash") ||
+            matchesModelId(id.replace("v4-1", "v4.1", ignoreCase = true), "deepseek-v4.1-flash")
+
+        // https://api-docs.deepseek.com/guides/thinking_mode
+        fun deepSeekFlashThinkingLevel(level: ThinkingLevel): ThinkingLevel = when (level) {
+            ThinkingLevel.OFF, ThinkingLevel.LOW -> level
+            ThinkingLevel.MEDIUM, ThinkingLevel.HIGH, ThinkingLevel.XHIGH -> ThinkingLevel.HIGH
+            ThinkingLevel.MAX, ThinkingLevel.ULTRA -> ThinkingLevel.MAX
+        }
 
         // Include snapshots and provider-prefixed IDs, but not lookalike names.
         private fun matchesModelId(id: String, name: String): Boolean {
@@ -55,6 +91,8 @@ data class LLMModel(
         }
 
         fun isGPT6AstraId(id: String): Boolean = matchesModelId(id, "gpt-6-astra")
+        fun isGPT6SolOrLunaId(id: String): Boolean = matchesModelId(id, "gpt-6-sol") || matchesModelId(id, "gpt-6-luna")
+        fun isGPT6Id(id: String): Boolean = isGPT6AstraId(id) || isGPT6SolOrLunaId(id)
         fun isGPTImage25Id(id: String): Boolean =
             matchesModelId(id, "gpt-image-2.5-flare") || matchesModelId(id, "gpt-image-2.5-sunburst")
 
@@ -112,6 +150,8 @@ data class LLMModel(
         // OpenAIAgentProvider `supportsReasoning ?? true` GPT-5.x
         // assumption (T119).
         val gpt6Astra = LLMModel("gpt-6-astra", "GPT-6 Astra", "OpenAI")
+        val gpt6Sol = LLMModel("gpt-6-sol", "GPT-6 Sol", "OpenAI")
+        val gpt6Luna = LLMModel("gpt-6-luna", "GPT-6 Luna", "OpenAI")
         val gptImage25Flare = LLMModel("gpt-image-2.5-flare", "GPT Image 2.5 Flare", "OpenAI")
         val gptImage25Sunburst = LLMModel("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst", "OpenAI")
         val gpt55 = LLMModel("gpt-5.5", "GPT-5.5", "OpenAI", supportsReasoning = true)
@@ -125,7 +165,7 @@ data class LLMModel(
         val o4Mini = LLMModel("o4-mini", "o4 Mini", "OpenAI", supportsReasoning = true)
         val codexMini = LLMModel("codex-mini-latest", "Codex Mini", "OpenAI", supportsReasoning = true)
 
-        val allOpenAI = listOf(gpt6Astra, gptImage25Flare, gptImage25Sunburst, gpt55, gpt53Codex, gpt52Codex, gpt51CodexMax, gpt52, gpt4o, gpt4oMini, o3, o4Mini, codexMini)
+        val allOpenAI = listOf(gpt6Astra, gpt6Sol, gpt6Luna, gptImage25Flare, gptImage25Sunburst, gpt55, gpt53Codex, gpt52Codex, gpt51CodexMax, gpt52, gpt4o, gpt4oMini, o3, o4Mini, codexMini)
 
         // OpenRouter (matching iOS built-in set)
         val orClaudeSonnet4 = LLMModel("anthropic/claude-sonnet-4", "Claude Sonnet 4", "OpenRouter")
