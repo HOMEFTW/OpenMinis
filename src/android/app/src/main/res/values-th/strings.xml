@@ -1611,8 +1611,8 @@
     <string name="import_zip_summary">นำเข้าแล้ว %1$d จาก %2$d ไฟล์</string>
     <string name="image_budget_compressed">บีบอัดรูปภาพ %1$d รูปก่อนส่ง</string>
     <string name="image_budget_dropped">ข้าม URL ที่ใหญ่เกินไป %1$d รายการ (&gt;5MB)</string>
-    <string name="image_budget_total_exceeded">ขนาดรูปภาพรวมเกิน 25MB ระบบจึงข้ามรูปที่เหลือ</string>
-    <string name="image_budget_request_elided">นำรูปภาพเก่า %1$d รูปออกจากคำขอเพื่อให้อยู่ในขีดจำกัด 25MB</string>
+    <string name="image_budget_total_exceeded">ขนาดรูปภาพรวมเกิน 100MiB ระบบจึงข้ามรูปที่เหลือ</string>
+    <string name="image_budget_request_elided">นำรูปภาพเก่า %1$d รูปออกจากคำขอเพื่อให้อยู่ในขีดจำกัด 100MiB</string>
     <string name="composer_swipe_release_to_send">ปล่อยเพื่อส่ง</string>
     <string name="composer_swipe_release_to_queue">ปล่อยเพื่อเข้าคิว</string>
     <string name="chat_message_large_collapsed_title">เนื้อหาขนาดใหญ่ (%1$s)</string>

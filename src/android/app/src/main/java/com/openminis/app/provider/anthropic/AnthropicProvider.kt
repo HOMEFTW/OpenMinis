@@ -13,9 +13,12 @@ import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.SseProgressWatchdog
+import com.openminis.app.provider.cancelOnCancellation
 import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
@@ -30,6 +33,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
@@ -157,12 +161,24 @@ class AnthropicProvider(
             headerMap[name] = request.headers[name] ?: ""
         }
 
-        val response = client.newCall(request).execute()
+        val call = client.newCall(request)
+        // Register cancellation before execute()/readLine(): awaitClose below
+        // is too late to interrupt a collector cancelled during blocking I/O.
+        val callCancellation = cancelOnCancellation {
+            try { call.cancel() } catch (_: Throwable) {}
+        }
+        val response = try {
+            call.execute()
+        } catch (e: Throwable) {
+            callCancellation.cancel()
+            throw e
+        }
         val durationMs = System.currentTimeMillis() - startTime
 
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
             response.close()
+            callCancellation.cancel()
             // T302: skip the LLMRequestLog write entirely on release builds —
             // see OpenAIProvider for the full rationale (release users never
             // reach debug.llmRequests, so retaining multi-MB request bodies
@@ -198,6 +214,42 @@ class AnthropicProvider(
             )
         }
 
+        val producerScope = this
+        val progressWatchdog = SseProgressWatchdog(
+            onTimeout = { timeout ->
+                try { call.cancel() } finally {
+                    producerScope.cancel(
+                        "SSE stream idle timeout",
+                        com.openminis.app.data.model.LLMError.NetworkError(timeout),
+                    )
+                }
+            },
+        )
+        val progressWatchdogJob = progressWatchdog.start(producerScope)
+        val cleanedUp = AtomicBoolean(false)
+        fun cleanupCall() {
+            if (cleanedUp.compareAndSet(false, true)) {
+                progressWatchdogJob.cancel()
+                callCancellation.cancel()
+                response.close()
+            }
+        }
+        fun LLMStreamChunk.isActualProgress(): Boolean = when (this) {
+            is LLMStreamChunk.Text -> text.isNotEmpty()
+            is LLMStreamChunk.ThinkingDelta -> text.isNotEmpty()
+            is LLMStreamChunk.ReasoningContent -> content.isNotEmpty()
+            is LLMStreamChunk.ToolUseStart,
+            is LLMStreamChunk.ToolInputDelta,
+            is LLMStreamChunk.ToolCallComplete,
+            is LLMStreamChunk.Finished,
+            is LLMStreamChunk.MediaAttachment -> true
+            is LLMStreamChunk.Started,
+            is LLMStreamChunk.Usage -> false
+        }
+        suspend fun sendChunk(chunk: LLMStreamChunk) {
+            if (chunk.isActualProgress()) progressWatchdog.markProgress()
+            send(chunk)
+        }
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
         // Track current tool_use block being streamed
         var currentToolId: String? = null
@@ -218,9 +270,9 @@ class AnthropicProvider(
 
                 when (eventType) {
                     "message_start" -> {
-                        send(LLMStreamChunk.Started)
+                        sendChunk(LLMStreamChunk.Started)
                         event.optJSONObject("message")?.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            sendChunk(LLMStreamChunk.Usage(parseUsage(usage)))
                         }
                     }
                     "content_block_start" -> {
@@ -230,7 +282,7 @@ class AnthropicProvider(
                             currentToolName = contentBlock.safeOptString("name", "")
                             toolInputBuffer.clear()
                             android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart id=$currentToolId name=$currentToolName")
-                            send(LLMStreamChunk.ToolUseStart(currentToolId!!, currentToolName!!))
+                            sendChunk(LLMStreamChunk.ToolUseStart(currentToolId!!, currentToolName!!))
                         }
                     }
                     "content_block_delta" -> {
@@ -238,18 +290,18 @@ class AnthropicProvider(
                         when (delta.safeOptString("type", "")) {
                             "text_delta" -> {
                                 val text = delta.safeOptString("text", "")
-                                if (text.isNotEmpty()) send(LLMStreamChunk.Text(text))
+                                if (text.isNotEmpty()) sendChunk(LLMStreamChunk.Text(text))
                             }
                             "thinking_delta" -> {
                                 val thinking = delta.safeOptString("thinking", "")
-                                if (thinking.isNotEmpty()) send(LLMStreamChunk.ThinkingDelta(thinking))
+                                if (thinking.isNotEmpty()) sendChunk(LLMStreamChunk.ThinkingDelta(thinking))
                             }
                             "input_json_delta" -> {
                                 val partial = delta.safeOptString("partial_json", "")
                                 if (partial.isNotEmpty() && currentToolId != null) {
                                     toolInputBuffer.append(partial)
                                     android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars")
-                                    send(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
+                                    sendChunk(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
                                 }
                             }
                         }
@@ -262,7 +314,7 @@ class AnthropicProvider(
                                 JSONObject()
                             }
                             android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=$currentToolId name=$currentToolName args=${args.toString().take(300)}")
-                            send(LLMStreamChunk.ToolCallComplete(currentToolId!!, currentToolName!!, args))
+                            sendChunk(LLMStreamChunk.ToolCallComplete(currentToolId!!, currentToolName!!, args))
                             currentToolId = null
                             currentToolName = null
                             toolInputBuffer.clear()
@@ -270,22 +322,34 @@ class AnthropicProvider(
                     }
                     "message_delta" -> {
                         event.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            sendChunk(LLMStreamChunk.Usage(parseUsage(usage)))
                         }
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
-                        send(LLMStreamChunk.Finished(stopReason))
+                        sendChunk(LLMStreamChunk.Finished(stopReason))
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            val timeout = progressWatchdog.timeoutException
+            if (timeout == null) throw e
+            cancel(
+                "SSE stream idle timeout",
+                com.openminis.app.data.model.LLMError.NetworkError(timeout),
+            )
         } catch (e: Exception) {
-            cancel("Stream error", mapError(e))
+            val timeout = progressWatchdog.timeoutException
+            cancel(
+                if (timeout == null) "Stream error" else "SSE stream idle timeout",
+                if (timeout == null) mapError(e)
+                else com.openminis.app.data.model.LLMError.NetworkError(timeout),
+            )
         } finally {
             reader.close()
-            response.close()
+            cleanupCall()
         }
         channel.close()
-        awaitClose()
+        awaitClose { cleanupCall() }
     }
 
     /**

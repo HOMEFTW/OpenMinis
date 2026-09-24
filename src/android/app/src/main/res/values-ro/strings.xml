@@ -1615,8 +1615,8 @@
     <string name="import_zip_summary">S-au importat %1$d din %2$d fișiere</string>
     <string name="image_budget_compressed">%1$d imagini au fost comprimate înainte de trimitere</string>
     <string name="image_budget_dropped">%1$d adrese URL supradimensionate au fost omise (&gt;5 MB)</string>
-    <string name="image_budget_total_exceeded">Dimensiunea totală a imaginilor depășește 25 MB; imaginile următoare au fost omise</string>
-    <string name="image_budget_request_elided">%1$d imagini mai vechi au fost scoase din cerere pentru a încadra limita de 25 MB</string>
+    <string name="image_budget_total_exceeded">Dimensiunea totală a imaginilor depășește 100MiB; imaginile următoare au fost omise</string>
+    <string name="image_budget_request_elided">%1$d imagini mai vechi au fost scoase din cerere pentru a încadra limita de 100MiB</string>
     <string name="composer_swipe_release_to_send">Eliberează pentru a trimite</string>
     <string name="composer_swipe_release_to_queue">Eliberează pentru a pune la coadă</string>
     <string name="chat_message_large_collapsed_title">Conținut mare (%1$s)</string>

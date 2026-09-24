@@ -1611,8 +1611,8 @@
     <string name="import_zip_summary">%1$d fichiers importés sur %2$d</string>
     <string name="image_budget_compressed">%1$d image(s) compressée(s) avant l\'envoi</string>
     <string name="image_budget_dropped">%1$d URL trop volumineuse(s) ignorée(s) (plus de 5 Mo)</string>
-    <string name="image_budget_total_exceeded">La taille totale des images dépasse 25 Mo ; les images suivantes ont été abandonnées</string>
-    <string name="image_budget_request_elided">%1$d image(s) plus ancienne(s) retirée(s) de la requête pour respecter la limite de 25 Mo</string>
+    <string name="image_budget_total_exceeded">La taille totale des images dépasse 100MiB ; les images suivantes ont été abandonnées</string>
+    <string name="image_budget_request_elided">%1$d image(s) plus ancienne(s) retirée(s) de la requête pour respecter la limite de 100MiB</string>
     <string name="composer_swipe_release_to_send">Relâcher pour envoyer</string>
     <string name="composer_swipe_release_to_queue">Relâcher pour mettre en file</string>
     <string name="chat_message_large_collapsed_title">Contenu volumineux (%1$s)</string>

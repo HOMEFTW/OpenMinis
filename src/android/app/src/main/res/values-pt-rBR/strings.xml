@@ -1611,8 +1611,8 @@
     <string name="import_zip_summary">%1$d de %2$d arquivos importados</string>
     <string name="image_budget_compressed">%1$d imagens foram comprimidas antes do envio</string>
     <string name="image_budget_dropped">%1$d URLs grandes demais foram ignoradas (&gt;5 MB)</string>
-    <string name="image_budget_total_exceeded">O tamanho total das imagens passa de 25 MB; as seguintes foram ignoradas</string>
-    <string name="image_budget_request_elided">%1$d imagens antigas saíram da requisição para caber no limite de 25 MB</string>
+    <string name="image_budget_total_exceeded">O tamanho total das imagens passa de 100MiB; as seguintes foram ignoradas</string>
+    <string name="image_budget_request_elided">%1$d imagens antigas saíram da requisição para caber no limite de 100MiB</string>
     <string name="composer_swipe_release_to_send">Solte para enviar</string>
     <string name="composer_swipe_release_to_queue">Solte para colocar na fila</string>
     <string name="chat_message_large_collapsed_title">Conteúdo grande (%1$s)</string>

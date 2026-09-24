@@ -2902,7 +2902,9 @@ class ChatViewModel(
      * Emits a one-shot [requestBudgetEvent] for the UI Snackbar so the
      * user knows older images were compacted into placeholders.
      */
-    private fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> {
+    private fun applyRequestImageBudget(rawMessages: List<LLMMessage>): List<LLMMessage> {
+        val messages = loadHistoryImages(rawMessages,
+            onBudgetElision = { _requestBudgetEvent.tryEmit(it) }, load = ::loadImageForRequest)
         // Collect every image in chronological order so the planner can
         // walk in reverse and protect the most recent images.
         data class ImageRef(
@@ -3018,8 +3020,70 @@ class ChatViewModel(
      * [dropOrphanedToolParts] for why the sweep exists and what it can and
      * cannot fix.
      */
-    private fun effectiveAgentHistory(): List<LLMMessage> =
-        dropOrphanedToolParts(effectiveAgentHistoryUncounted())
+    private fun effectiveAgentHistory(): List<LLMMessage> {
+        parkHistoryImages()
+        return dropOrphanedToolParts(effectiveAgentHistoryUncounted())
+    }
+
+    private fun localHistoryImage(linuxPath: String?): java.io.File? {
+        val relative = linuxPath?.takeIf { it.startsWith("/var/minis/attachments/") ||
+            it.startsWith("/var/minis/offloads/") }?.removePrefix("/var/minis/") ?: return null
+        val root = java.io.File(context.filesDir, "minis-sessions/${activeSessionId}").canonicalFile
+        val file = java.io.File(root, relative).canonicalFile
+        return file.takeIf { it.path.startsWith(root.path + java.io.File.separator) && it.isFile }
+    }
+
+    /** Drop resident history pixels only after a recoverable local reference exists. */
+    private fun parkHistoryImages() {
+        val root = java.io.File(context.filesDir, "minis-sessions/${activeSessionId}/attachments")
+        for (i in agentHistory.indices) {
+            val message = agentHistory[i]
+            var changed = false
+            val parts = message.contentParts.map { part ->
+                if (part !is AgentContentPart.ImageData || part.data.isEmpty()) return@map part
+                val linuxPath = part.linuxPath ?: ImageBudget.ensureSpillover(root, part.data, part.mimeType)
+                val local = part.localPath?.let { java.io.File(it).takeIf(java.io.File::isFile) }
+                    ?: localHistoryImage(linuxPath)
+                if (local == null) part else {
+                    changed = true
+                    part.copy(data = byteArrayOf(), localPath = local.path, linuxPath = linuxPath)
+                }
+            }
+            if (changed) agentHistory[i] = message.copy(contentParts = parts, imageParts = emptyList())
+        }
+    }
+
+    /** Reuse normalized disk copies; the full original is never retained by history. */
+    private fun loadImageForRequest(file: java.io.File, mime: String): LLMMessage.ImagePart? = try {
+        val key = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("${file.path}:${file.length()}:${file.lastModified()}".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        val cache = java.io.File(context.cacheDir, "history-images-v1/$key")
+        val cached = if (cache.isFile) ImageBudget.normalizeImage(cache.readBytes(), mime) else null
+        val normalized = cached ?: run {
+            val source = if (file.length() > ImageBudget.MAX_PER_IMAGE_BYTES) {
+                // Decode large originals straight from disk with sampling, never readBytes().
+                resizeImage({ options -> BitmapFactory.decodeFile(file.path, options) }, mime, force = true)
+                    ?: return@run null
+            } else {
+                val raw = file.readBytes()
+                resizeImageBytes(raw, mime) ?: LLMMessage.ImagePart(raw, mime)
+            }
+            ImageBudget.normalizeImage(source.data, source.mimeType)
+                ?.also { image ->
+                    runCatching {
+                        cache.parentFile?.mkdirs()
+                        val temporary = java.io.File(cache.path + ".tmp")
+                        temporary.writeBytes(image.data)
+                        if (!temporary.renameTo(cache)) temporary.delete()
+                    }
+                }
+        }
+        normalized?.let { LLMMessage.ImagePart(it.data, it.mimeType) }
+    } catch (e: Exception) {
+        AppLogger.warning(TAG, "History image could not be loaded: ${e.javaClass.simpleName}")
+        null
+    }
 
     private fun effectiveAgentHistoryUncounted(): List<LLMMessage> {
         val summary = _compactSummary.value
@@ -3158,13 +3222,8 @@ class ChatViewModel(
                     result.addAll(postAnchor.subList(0, firstUserOffset))
                 }
                 val target = postAnchor[firstUserOffset]
-                // Prepend `<context-summary>...` to the user content. We
-                // edit `content` directly because Android LLMMessage uses
-                // `content: String` as the canonical text payload; any
-                // contentParts the message also carries get preserved.
-                val injected = target.copy(
-                    content = summaryWrappedText + "\n\n" + target.content,
-                )
+                // Providers prefer structured parts, so update both representations.
+                val injected = prependContextSummary(target, summaryWrappedText)
                 result.add(injected)
                 if (firstUserOffset + 1 < postAnchor.size) {
                     result.addAll(postAnchor.subList(firstUserOffset + 1, postAnchor.size))
@@ -3536,7 +3595,7 @@ class ChatViewModel(
             // are already ordered oldest-first, which is the same signal in
             // positional form, and each is internally coherent because it was
             // summarised under the full system prompt.
-            summary1 + "\n\n" + summary2
+            joinCompactSummaries(previousSummary, summary1, summary2)
         }
     }
 
@@ -6660,27 +6719,7 @@ class ChatViewModel(
             bodyPartsJson = queuedPaste?.partsJson,
         )
         val userEntity = chatRepository.appendMessage(sid, "user", userPartsJson)
-        agentHistory.add(
-            LLMMessage(
-                role = LLMMessage.Role.USER,
-                // Expanded for the model; the persisted row above stays small.
-                content = queuedPaste?.modelText ?: userText,
-                imageParts = prepared.imageParts,
-                contentParts = queuedPaste?.let { p ->
-                    // Replace the whole LEADING RUN of text parts with the one
-                    // expanded body, then keep everything after it.
-                    //
-                    // Not "index 0": each queued prompt contributes its own text
-                    // part, and combinedText joined them with blank lines —
-                    // p.modelText is the expansion of that join, so it stands
-                    // for all of them. The image and <user-attached-files> parts
-                    // that follow must survive untouched.
-                    val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
-                    listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
-                } ?: combinedParts,
-                dbMessageId = userEntity.id,
-            ),
-        )
+        agentHistory.add(userEntity.toLLMMessage())
 
         // Finalize the just-finished assistant bubble in the UI on Main:
         // (a) un-queue the queued chat bubbles, (b) flush the side-channel
@@ -6818,17 +6857,8 @@ class ChatViewModel(
                     prepared.attachedFilesXml,
                     bodyPartsJson = drainPaste?.partsJson,
                 )
-                chatRepository.appendMessage(sid, "user", userPartsJson)
-
-                agentHistory.add(LLMMessage(
-                    role = LLMMessage.Role.USER,
-                    content = drainPaste?.modelText ?: userText,
-                    imageParts = prepared.imageParts,
-                    contentParts = drainPaste?.let { p ->
-                        val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
-                        listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
-                    } ?: combinedParts,
-                ))
+                val userEntity = chatRepository.appendMessage(sid, "user", userPartsJson)
+                agentHistory.add(userEntity.toLLMMessage())
 
                 runAgentLoop(
                     provider = provider,
@@ -7066,43 +7096,8 @@ class ChatViewModel(
                 attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
             )
             _messages.value = _messages.value + userMsg
-            val imageParts = prepared.imageParts
-
-            // T132: build the user contentParts in iOS order — caption first
-            // (only if non-empty), then per image emit
-            //   text("[attached image: /var/minis/attachments/uploads/<f>]")
-            //   ImageData(<bytes>, <mime>)
-            // so the caption sits adjacent to the image in the wire payload,
-            // and the agent's read_image tool can resolve the same path back
-            // to bytes. Trailing <user-attached-files> XML block lets the
-            // model see filenames/sizes without needing tool calls.
-            // [T-android-paste-mediaref] The MODEL gets the fully expanded body
-            // even though the bubble and the DB row do not. This is the whole
-            // point of the split: local rendering stays cheap, the prompt is
-            // unchanged from what it used to be.
-            //
-            // On later turns the same expansion is rebuilt from disk by
-            // toLLMMessage's mediaRef branch, so history replay (retry, rerun,
-            // session reload, compaction) sees the identical text.
-            val modelBody = pasted?.modelText ?: trimmed
-
-            val userContentParts = mutableListOf<AgentContentPart>()
-            if (modelBody.isNotEmpty()) userContentParts.add(AgentContentPart.Text(modelBody))
-            imageParts.forEachIndexed { idx, part ->
-                val path = prepared.imageUploadPaths.getOrNull(idx)
-                if (path != null) userContentParts.add(AgentContentPart.Text("[attached image: $path]"))
-                userContentParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
-            }
-            prepared.imageBudgetPlaceholders.forEach { userContentParts.add(AgentContentPart.Text(it)) }
-            prepared.attachedFilesXml?.let { userContentParts.add(AgentContentPart.Text(it)) }
-
-            agentHistory.add(LLMMessage(
-                role = LLMMessage.Role.USER,
-                content = modelBody,
-                imageParts = imageParts,
-                contentParts = userContentParts,
-                dbMessageId = persistedUser.id,
-            ))
+            // Fresh sends and restored sessions share the same file-backed image history.
+            agentHistory.add(persistedUser.toLLMMessage())
 
             // Refresh OAuth token if needed before sending (mirrors iOS validAccessToken)
             if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
@@ -7831,14 +7826,14 @@ class ChatViewModel(
         contextWindow: Int,
         estimatedInputTokens: Int,
         force: Boolean = false,
-    ) {
+    ): Boolean {
         val sid = activeSessionId
         val policy = ContextPolicy.forContextWindow(contextWindow)
 
         if (!force && policy.offloadThreshold == 0) {
             // Small-window tier: offload disabled — UI surfaces "exhausted"
             // when the user crosses the threshold. Nothing to do here.
-            return
+            return false
         }
 
         val effectiveTokens = estimatedInputTokens.coerceAtLeast(0)
@@ -7846,7 +7841,7 @@ class ChatViewModel(
         if (!force && effectiveTokens < policy.offloadThreshold) {
             // Below threshold — no work needed. Caller logs at debug level
             // via dynamicMaxTokens; we stay silent to keep logs readable.
-            return
+            return false
         }
 
         val targetTokens = if (force) 0 else policy.offloadTarget
@@ -8011,6 +8006,7 @@ class ChatViewModel(
             AppLogger.info(TAG, "  After:  $currentTokens/$contextWindow ($afterPct%)")
             AppLogger.info(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         }
+        return offloadedCount > 0
     }
 
     private suspend fun runAgentLoop(
@@ -8218,17 +8214,20 @@ class ChatViewModel(
             // [T-context-window-live-read] Live read per loop turn — a stale
             // snapshot inside a long-running agent turn is exactly the iOS
             // fcc22b66 item-3 bug.
-            effectiveContextWindowTokens(currentProvider.model)?.takeIf { it > 0 }?.let { window ->
+            val offloaded = effectiveContextWindowTokens(currentProvider.model)?.takeIf { it > 0 }?.let { window ->
                 offloadContextIfNeeded(
                     contextWindow = window,
                     estimatedInputTokens = estimatedInputTokens,
                 )
-            }
+            } ?: false
 
             // Offload mutates the canonical history. Rebuild the outgoing list
             // and estimate so the guard and max output use the post-offload
             // payload rather than a stale pre-offload count.
-            outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
+            if (offloaded) {
+                outgoingMessages = emptyList() // release pixels before rebuilding a large request
+                outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
+            }
             outgoingTools = agentTools
             estimatedInputTokens = estimateBudgetTokens(
                 messages = outgoingMessages,
@@ -8449,6 +8448,24 @@ class ChatViewModel(
                 }
             }
             val turnThinking = StringBuilder()
+            val thinkingUpdateGate = ThinkingUpdateGate()
+            suspend fun publishThinking(force: Boolean = false, streaming: Boolean = true) {
+                if (!thinkingUpdateGate.shouldPublish(
+                        android.os.SystemClock.elapsedRealtime(), turnThinking.length, force,
+                    )) return
+                val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
+                val text = turnThinking.toString()
+                if (thinkIdx < 0) {
+                    allToolBlocks.add(AssistantBlock(
+                        id = "thinking_$turn", kind = "thinking", content = text, toolTitle = "Thinking",
+                    ))
+                } else {
+                    allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = text)
+                }
+                withContext(Dispatchers.Main) {
+                    updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), streaming, allToolBlocks)
+                }
+            }
             // Opaque reasoning_content blob captured from the provider's
             // ReasoningContent stream chunk. When set (including empty string),
             // takes precedence over turnThinking concatenation so the exact
@@ -8510,6 +8527,7 @@ class ChatViewModel(
             // so we catch at collect level and unwrap.
             var collectDone = false
             var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
+            val recoveryStartedAt = android.os.SystemClock.elapsedRealtime()
             while (!collectDone) {
                 try {
                     // [T-android-enhanced-cache] Stamp the per-turn Enhanced
@@ -8519,10 +8537,8 @@ class ChatViewModel(
                     // Non-Anthropic providers ignore it (cast fails silently).
                     (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
                         ?.enhancedCache = _enhancedCacheEnabled.value
-                    // Rebuild and re-estimate for every actual attempt. A retry
-                    // or fallback may run after settings/model state changed,
-                    // and the previous stream's usage is not this payload.
-                    outgoingMessages = applyRequestImageBudget(effectiveAgentHistory())
+                    // Re-estimate against live model settings, while reusing the
+                    // unchanged history and its already-loaded images on retries.
                     outgoingTools = agentTools
                     val rawInputEstimate = Companion.estimateRequestTokens(
                         messages = outgoingMessages,
@@ -8595,21 +8611,7 @@ class ChatViewModel(
                 when (chunk) {
                     is LLMStreamChunk.ThinkingDelta -> {
                         turnThinking.append(chunk.text)
-                        // Update thinking block in UI
-                        val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
-                        if (thinkIdx < 0) {
-                            allToolBlocks.add(AssistantBlock(
-                                id = "thinking_$turn",
-                                kind = "thinking",
-                                content = turnThinking.toString(),
-                                toolTitle = "Thinking",
-                            ))
-                        } else {
-                            allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = turnThinking.toString())
-                        }
-                        withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
-                        }
+                        publishThinking()
                     }
                     is LLMStreamChunk.Text -> {
                         // [T-android-readaloud-stop-stale] First actual text of
@@ -8927,6 +8929,7 @@ class ChatViewModel(
                     }
                 }
                     }  // end collect
+                    publishThinking(force = true)
                     // T94 fix 2: flush any text that landed in the throttle
                     // window after the last UI tick. The retry-rollback /
                     // turn-finalize paths below assume _messages reflects all
@@ -8968,8 +8971,15 @@ class ChatViewModel(
                         }
                     }
                 } catch (e: Exception) {
-                    if (e is CancellationException && e.cause == null) throw e  // real job cancellation
+                    if (e is CancellationException && e.cause == null) {
+                        withContext(NonCancellable) { publishThinking(force = true, streaming = false) }
+                        throw e
+                    }
                     val actual = unwrapFlowException(e)
+                    // Keep the final reasoning tail visible if recovery is not possible.
+                    publishThinking(force = true)
+                    val recoveryElapsed = android.os.SystemClock.elapsedRealtime() - recoveryStartedAt
+                    if (!StreamRetryPolicy.canStartRecovery(recoveryElapsed)) throw actual
                     val isRateLimit = actual is com.openminis.app.data.model.LLMError.RateLimited
                     val is5xx = actual is com.openminis.app.data.model.LLMError.ProviderError &&
                         actual.detail.contains(Regex("[5][0-9]{2}"))
@@ -8980,7 +8990,8 @@ class ChatViewModel(
                     val isTransient = actual is com.openminis.app.data.model.LLMError.NetworkError ||
                         actual is com.openminis.app.data.model.LLMError.TransientError ||
                         is5xx
-                    if (isTransient && retryAttempt < AUTO_RETRY_DELAYS_SEC.size) {
+                    if (isTransient && retryAttempt < AUTO_RETRY_DELAYS_SEC.size &&
+                        StreamRetryPolicy.canRetrySameProvider(actual, recoveryElapsed)) {
                         val delaySec = AUTO_RETRY_DELAYS_SEC[retryAttempt]
                         retryAttempt += 1
                         val errDesc = actual.message ?: actual.javaClass.simpleName
@@ -9031,6 +9042,7 @@ class ChatViewModel(
                         // this turn's partial blocks.
                         turnTextBlockIdx = -1
                         turnThinking.clear()
+                        thinkingUpdateGate.reset()
                         toolCalls.clear()
                         toolCallSignatures.clear()  // [T-android-gemini3-thoughtsig / #179]
                         // T94 fix 2 + T256: throttle bookkeeping is per-stream
@@ -9152,6 +9164,7 @@ class ChatViewModel(
                         // shifted every block index anyway.
                         turnTextBlockIdx = -1
                         turnThinking.clear()
+                        thinkingUpdateGate.reset()
                         toolCalls.clear()
                         toolCallSignatures.clear()  // [T-android-gemini3-thoughtsig / #179]
                         // loop continues — will retry collect with currentProvider
@@ -9683,14 +9696,13 @@ class ChatViewModel(
             }
 
             // Persist tool results as user-role message (mirrors iOS)
-            val toolResultDbId = persistToolResultMessage(resultParts)
+            val persistedToolResult = persistToolResultMessage(resultParts)
 
             // Add tool results to history
-            agentHistory.add(LLMMessage(
+            agentHistory.add(persistedToolResult?.toLLMMessage() ?: LLMMessage(
                 role = LLMMessage.Role.USER,
                 content = "",
                 contentParts = resultParts,
-                dbMessageId = toolResultDbId,
             ))
 
             // Auto-title after first exchange (mirrors iOS generateSessionTitleIfNeeded)
@@ -10754,20 +10766,20 @@ class ChatViewModel(
     }
 
     /** Persist tool results as a user-role message (mirrors iOS behavior). */
-    private suspend fun persistToolResultMessage(parts: List<AgentContentPart>): String? {
+    private suspend fun persistToolResultMessage(parts: List<AgentContentPart>): MessageEntity? {
         val results = parts.filterIsInstance<AgentContentPart.ToolResult>()
         if (results.isEmpty()) return null
-        val partsJson = buildString {
-            append("[")
-            results.forEachIndexed { index, result ->
-                if (index > 0) append(",")
-                val snapshotText = escapeJson(result.content.lines().takeLast(30).joinToString("\n"))
-                append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(result.content)},"success":${!result.isError},"snapshot":{"type":"text","text":$snapshotText}}}""")
-            }
-            append("]")
+        val partsJson = serializeToolResults(results) { result ->
+            val bytes = requireNotNull(result.imageData)
+            val mime = result.imageMimeType ?: "image/png"
+            val ref = mediaStore.saveMedia(bytes, mime, activeSessionId)
+            val linuxPath = result.imageLinuxPath ?: ImageBudget.ensureSpillover(
+                java.io.File(context.filesDir, "minis-sessions/$activeSessionId/attachments"), bytes, mime,
+            )
+            JSONObject(buildMediaRefPartJson(ref, linuxPath))
         }
         val entity = chatRepository.appendMessage(realSessionId.ifEmpty { sessionId }, "user", partsJson)
-        return entity.id
+        return entity
     }
 
     private fun buildSystemPrompt(): String? {
@@ -11078,26 +11090,43 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         rawBytes: ByteArray,
         mimeType: String,
         maxEdge: Int = 2000,
-    ): ByteArray? {
+    ): LLMMessage.ImagePart? = resizeImage(
+        { options -> BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, options) }, mimeType, maxEdge,
+    )
+
+    private fun resizeImage(
+        decode: (BitmapFactory.Options) -> Bitmap?,
+        mimeType: String,
+        maxEdge: Int = 2000,
+        force: Boolean = false,
+    ): LLMMessage.ImagePart? {
+        var original: Bitmap? = null
+        var scaled: Bitmap? = null
         return try {
-            val original = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
-            if (original.width <= maxEdge && original.height <= maxEdge) {
-                original.recycle()
-                return null
-            }
-            val scale = maxEdge.toFloat() / maxOf(original.width, original.height)
-            val w = (original.width * scale).toInt()
-            val h = (original.height * scale).toInt()
-            val scaled = Bitmap.createScaledBitmap(original, w, h, true)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            decode(bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            if (!force && bounds.outWidth <= maxEdge && bounds.outHeight <= maxEdge) return null
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxEdge * 2) sample *= 2
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            original = decode(options) ?: return null
+            val scale = minOf(1f, maxEdge.toFloat() / maxOf(original.width, original.height))
+            val w = (original.width * scale).toInt().coerceAtLeast(1)
+            val h = (original.height * scale).toInt().coerceAtLeast(1)
+            scaled = Bitmap.createScaledBitmap(original, w, h, true)
             val out = ByteArrayOutputStream()
             val format = if (mimeType.contains("png")) Bitmap.CompressFormat.PNG
             else Bitmap.CompressFormat.JPEG
-            scaled.compress(format, 85, out)
-            if (scaled !== original) scaled.recycle()
-            original.recycle()
-            out.toByteArray()
+            val encoded = scaled.compress(format, 85, out)
+            if (!encoded || out.size() == 0) null else LLMMessage.ImagePart(
+                out.toByteArray(), if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg",
+            )
         } catch (_: Exception) {
             null
+        } finally {
+            if (scaled !== original) scaled?.recycle()
+            original?.recycle()
         }
     }
 
@@ -11211,8 +11240,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 // close-enough sketch of the picture for the model. Falls
                 // back to raw bytes if the source is already small or the
                 // decode/compress step fails.
-                val inferenceBytes = resizeImageBytes(rawBytes, attachment.mimeType, maxEdge = 2000)
-                    ?: rawBytes
+                val inferenceImage = resizeImageBytes(rawBytes, attachment.mimeType, maxEdge = 2000)
+                    ?: LLMMessage.ImagePart(rawBytes, attachment.mimeType)
 
                 // Mirror ORIGINAL bytes into the iSH uploads dir under a
                 // unique safe name so agent shell tools see the full-res
@@ -11237,7 +11266,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     metas.add(UploadMeta(linuxPath = linuxPath, size = rawBytes.size.toLong(), modifiedIso = nowStr))
                 }
 
-                imageParts.add(LLMMessage.ImagePart(inferenceBytes, attachment.mimeType, linuxPath = linuxPath))
+                imageParts.add(inferenceImage.copy(linuxPath = linuxPath))
                 val savedFile = java.io.File(mediaStore.mediaBaseDir, ref.relativePath)
                 imageUris.add(Uri.fromFile(savedFile))
                 imageNames.add(attachment.fileName)
@@ -11338,9 +11367,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 values.clear()
                 values.addAll(retained)
             }
-            retainOccurrences(imageUris)
-            retainOccurrences(imageNames)
-            retainOccurrences(imageMediaRefPartsJson)
+            // Request elision must not delete attachments from the UI or persisted history.
             retainOccurrences(imageUploadPaths)
             if (budgetResult.mutated) {
                 AppLogger.info(
@@ -12682,6 +12709,16 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                                 success = value.optBoolean("success", true),
                             )
                         }
+                    } else if (obj.optString("type") == "mediaRef") {
+                        val value = obj.optJSONObject("value") ?: continue
+                        val toolId = value.optString("toolUseId", "")
+                        val path = value.optString("relativePath", "")
+                        if (toolId.isNotEmpty() && path.isNotEmpty()) {
+                            val file = java.io.File(mediaStore.mediaBaseDir, path)
+                            if (file.isFile) toolResultMap[toolId]?.let {
+                                toolResultMap[toolId] = it.copy(imageFilePath = file.path)
+                            }
+                        }
                     }
                 }
             } catch (_: Exception) { /* skip malformed */ }
@@ -12770,7 +12807,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             // Merge tool result output (iOS: block.content = tr.output)
                             val result = toolResultMap[toolId]
                             val pageURL = value.optString("pageURL", "").ifEmpty { null }
-                            val imgPath = value.optString("imageFilePath", "").ifEmpty { null }
+                            val imgPath = result?.imageFilePath ?: value.optString("imageFilePath", "").ifEmpty { null }
                             blocks.add(AssistantBlock(
                                 id = toolId,
                                 kind = "tool_use",
@@ -12797,6 +12834,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         "mediaRef" -> {
                             if (entity.role != "user") continue
                             val value = obj.optJSONObject("value") ?: continue
+                            if (value.optString("toolUseId", "").isNotEmpty()) continue
                             val rel = value.optString("relativePath", "")
                             if (rel.isEmpty()) continue
                             val file = java.io.File(mediaStore.mediaBaseDir, rel)
@@ -12921,7 +12959,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         }
     }
 
-    private data class ToolResultData(val output: String, val success: Boolean)
+    private data class ToolResultData(val output: String, val success: Boolean, val imageFilePath: String? = null)
 
     private fun MessageEntity.toLLMMessage(): LLMMessage {
         val r = if (role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
@@ -13041,8 +13079,6 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         }
                         if (!mime.startsWith("image/")) continue
                         val file = java.io.File(mediaStore.mediaBaseDir, rel)
-                        if (!file.exists()) continue
-                        val bytes = try { file.readBytes() } catch (_: Exception) { continue }
                         val restoredPath = v.optString("linuxPath", "").ifEmpty { null }
                         // [T-android-vision-group / GH#182] Seed the read_image
                         // hint on restored images too, so a non-vision main model
@@ -13050,8 +13086,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         // on subsequent turns after a session reload (not the bare
                         // "can't see it" literal).
                         val restoredPlaceholder = visionPlaceholderFor(restoredPath)
-                        imageParts.add(LLMMessage.ImagePart(bytes, mime, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
-                        contentParts.add(AgentContentPart.ImageData(bytes, mime, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
+                        if (restoredPath != null) contentParts.add(AgentContentPart.Text("[attached image: $restoredPath]"))
+                        contentParts.add(AgentContentPart.ImageData(byteArrayOf(), mime,
+                            localPath = file.path, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
                     }
                 }
             }

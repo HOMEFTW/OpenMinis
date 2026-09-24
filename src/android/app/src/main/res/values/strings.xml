@@ -1801,9 +1801,9 @@
     <!-- T-imgsize: composer-side image-budget Snackbar messages -->
     <string name="image_budget_compressed">Compressed %1$d image(s) before send</string>
     <string name="image_budget_dropped">Skipped %1$d oversized URL(s) (&gt;5MB)</string>
-    <string name="image_budget_total_exceeded">Total image size exceeds 25MB; later images dropped</string>
+    <string name="image_budget_total_exceeded">Total image size exceeds 100MiB; some images omitted from this request; originals kept</string>
     <!-- T-request-imgsize: request-level image-budget Snackbar message -->
-    <string name="image_budget_request_elided">Older %1$d image(s) elided from request to fit 25MB budget</string>
+    <string name="image_budget_request_elided">Older %1$d image(s) elided from request to fit 100MiB budget</string>
     <string name="composer_swipe_release_to_send">Release to send</string>
     <string name="composer_swipe_release_to_queue">Release to queue</string>
 

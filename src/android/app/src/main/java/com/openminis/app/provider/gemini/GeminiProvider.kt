@@ -6,6 +6,7 @@ import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.cancelOnCancellation
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.LLMMediaAttachment
@@ -14,9 +15,11 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.SseProgressWatchdog
 import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -30,6 +33,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
@@ -126,13 +130,61 @@ class GeminiProvider(
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
+        val call = client.newCall(request)
+        // Register before execute()/readLine(): awaitClose below is too late
+        // to interrupt a collector cancelled during blocking I/O.
+        val callCancellation = cancelOnCancellation {
+            try { call.cancel() } catch (_: Throwable) {}
+        }
+        val response = try {
+            call.execute()
+        } catch (e: Throwable) {
+            callCancellation.cancel()
+            throw e
+        }
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
             response.close()
+            callCancellation.cancel()
             throw mapHttpError(response.code, errorBody)
         }
 
+        val producerScope = this
+        val progressWatchdog = SseProgressWatchdog(
+            onTimeout = { timeout ->
+                try { call.cancel() } finally {
+                    producerScope.cancel(
+                        "SSE stream idle timeout",
+                        LLMError.NetworkError(timeout),
+                    )
+                }
+            },
+        )
+        val progressWatchdogJob = progressWatchdog.start(producerScope)
+        val cleanedUp = AtomicBoolean(false)
+        fun cleanupCall() {
+            if (cleanedUp.compareAndSet(false, true)) {
+                progressWatchdogJob.cancel()
+                callCancellation.cancel()
+                response.close()
+            }
+        }
+        fun LLMStreamChunk.isActualProgress(): Boolean = when (this) {
+            is LLMStreamChunk.Text -> text.isNotEmpty()
+            is LLMStreamChunk.ThinkingDelta -> text.isNotEmpty()
+            is LLMStreamChunk.ReasoningContent -> content.isNotEmpty()
+            is LLMStreamChunk.ToolUseStart,
+            is LLMStreamChunk.ToolInputDelta,
+            is LLMStreamChunk.ToolCallComplete,
+            is LLMStreamChunk.Finished,
+            is LLMStreamChunk.MediaAttachment -> true
+            is LLMStreamChunk.Started,
+            is LLMStreamChunk.Usage -> false
+        }
+        suspend fun sendChunk(chunk: LLMStreamChunk) {
+            if (chunk.isActualProgress()) progressWatchdog.markProgress()
+            send(chunk)
+        }
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
         try {
             var started = false
@@ -146,28 +198,28 @@ class GeminiProvider(
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }
 
                 if (!started) {
-                    send(LLMStreamChunk.Started)
+                    sendChunk(LLMStreamChunk.Started)
                     started = true
                 }
 
                 // Separate thought parts from text parts
                 val (text, thinking) = extractTextAndThinking(json)
                 if (thinking.isNotEmpty()) {
-                    send(LLMStreamChunk.ThinkingDelta(thinking))
+                    sendChunk(LLMStreamChunk.ThinkingDelta(thinking))
                 }
                 if (text.isNotEmpty()) {
-                    send(LLMStreamChunk.Text(text))
+                    sendChunk(LLMStreamChunk.Text(text))
                 }
 
                 // Extract function calls from streaming response
                 val functionCalls = extractFunctionCalls(json)
                 for ((fcName, fcArgs, fcSig) in functionCalls) {
                     val toolId = "gemini_${System.nanoTime()}"
-                    send(LLMStreamChunk.ToolUseStart(toolId, fcName))
+                    sendChunk(LLMStreamChunk.ToolUseStart(toolId, fcName))
                     // [T-android-gemini3-thoughtsig / #179] Carry the part's
                     // thoughtSignature through so it can be persisted and replayed
                     // on the historical functionCall (gemini-3.x requires it).
-                    send(LLMStreamChunk.ToolCallComplete(toolId, fcName, fcArgs, thoughtSignature = fcSig))
+                    sendChunk(LLMStreamChunk.ToolCallComplete(toolId, fcName, fcArgs, thoughtSignature = fcSig))
                 }
 
                 extractUsage(json)?.let { usage ->
@@ -176,17 +228,31 @@ class GeminiProvider(
 
                 extractFinishReason(json)?.let { reason ->
                     lastFinishReason = reason
+                    // A finish reason is real completion progress even if the
+                    // final Finished chunk is delayed by a heartbeat/flush.
+                    progressWatchdog.markProgress()
                 }
             }
-            send(LLMStreamChunk.Finished(lastFinishReason ?: "end_turn"))
+            sendChunk(LLMStreamChunk.Finished(lastFinishReason ?: "end_turn"))
+        } catch (e: CancellationException) {
+            val timeout = progressWatchdog.timeoutException
+            if (timeout == null) throw e
+            cancel(
+                "SSE stream idle timeout",
+                LLMError.NetworkError(timeout),
+            )
         } catch (e: Exception) {
-            cancel("Stream error", mapError(e))
+            val timeout = progressWatchdog.timeoutException
+            cancel(
+                if (timeout == null) "Stream error" else "SSE stream idle timeout",
+                if (timeout == null) mapError(e) else LLMError.NetworkError(timeout),
+            )
         } finally {
             reader.close()
-            response.close()
+            cleanupCall()
         }
         channel.close()
-        awaitClose()
+        awaitClose { cleanupCall() }
     }
 
     private fun buildRequestBody(

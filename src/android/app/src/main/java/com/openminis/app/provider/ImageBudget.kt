@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.openminis.app.logging.AppLogger
 import java.io.ByteArrayOutputStream
+import java.util.Collections
+import java.util.WeakHashMap
 
 /**
  * Per-message inline-image byte budget — mirrors iOS AIChatViewModel.swift
@@ -23,7 +25,7 @@ import java.io.ByteArrayOutputStream
  *   2. Provider boundary (AnthropicProvider / OpenAIProvider) — belt and
  *      braces for history image parts that bypass the composer (e.g. tool
  *      results screenshot bytes, restored sessions, retry-after-edit). Each
- *      oversize part is silently re-encoded in-place via [compressBytes].
+ *      every part is validated and normalized via [normalizeImage].
  *
  * URL HEAD pre-check (spec §2.b) intentionally omitted — both Android
  * providers always base64-inline image bytes (no remote URL forwarding),
@@ -34,7 +36,7 @@ object ImageBudget {
     const val MAX_PER_IMAGE_BYTES = 5L * 1024 * 1024
 
     /** Cumulative inline-image bytes per user message. */
-    const val MAX_TOTAL_BYTES = 25L * 1024 * 1024
+    const val MAX_TOTAL_BYTES = 100L * 1024 * 1024
 
     /**
      * Cumulative inline-image bytes across ALL messages in a single
@@ -46,7 +48,7 @@ object ImageBudget {
      * empty SSE with `finish_reason=stop`. Eldest images are elided
      * to text placeholders first.
      */
-    const val MAX_REQUEST_BYTES = 25L * 1024 * 1024
+    const val MAX_REQUEST_BYTES = 100L * 1024 * 1024
 
     /** Default re-encode target longest edge in pixels. */
     const val MAX_EDGE_PX = 2000
@@ -55,6 +57,18 @@ object ImageBudget {
     const val JPEG_QUALITY = 80
 
     private const val TAG = "ImageBudget"
+    private const val MAX_VALIDATION_EDGE_PX = 256
+    private const val INVALID_MIME = ""
+    private val validationCache = Collections.synchronizedMap(WeakHashMap<ByteArray, String>())
+
+    data class NormalizedImage(
+        val data: ByteArray,
+        val mimeType: String,
+    )
+
+    private val PNG_SIGNATURE = byteArrayOf(
+        0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+    )
 
     /**
      * (maxEdge, quality) candidates the per-image compressor walks until the
@@ -72,12 +86,109 @@ object ImageBudget {
     )
 
     /**
-     * Re-encode [input] to a JPEG with max longest edge [maxEdge] at JPEG
-     * quality [q]. Returns the original bytes on decode/encode failure
-     * (caller's existing payload is always safer than dropping the image).
+     * Validate and normalize an image before it reaches any provider.
+     * Supported formats stay in their original encoding when already under
+     * the single-image cap; other decodable formats are re-encoded as JPEG.
      */
-    fun compressBytes(input: ByteArray, maxEdge: Int = MAX_EDGE_PX, q: Int = JPEG_QUALITY): ByteArray {
-        if (input.isEmpty()) return input
+    fun normalizeImage(data: ByteArray, mimeType: String): NormalizedImage? {
+        if (data.isEmpty()) return null
+
+        val magicMime = detectMagicMime(data)
+        if (magicMime != null) {
+            if (data.size.toLong() <= MAX_PER_IMAGE_BYTES) {
+                when (cachedValidationMime(data)) {
+                    INVALID_MIME -> return null
+                    magicMime -> return NormalizedImage(data, magicMime)
+                }
+                if (!decodeSample(data)) {
+                    cacheValidation(data, INVALID_MIME)
+                    return null
+                }
+                cacheValidation(data, magicMime)
+                return NormalizedImage(data, magicMime)
+            }
+
+            val jpeg = compressUnderBudgetOrNull(data) ?: run {
+                cacheValidation(data, INVALID_MIME)
+                return null
+            }
+            cacheValidation(data, magicMime)
+            return NormalizedImage(jpeg, "image/jpeg")
+        }
+
+        // Unknown encodings (for example HEIC) are accepted only when Android
+        // can decode them, and are always converted to a bounded JPEG.
+        val jpeg = compressUnderBudgetOrNull(
+            input = data,
+            targetMaxBytes = MAX_PER_IMAGE_BYTES,
+            forceReencode = true,
+        ) ?: return null
+        return jpeg.takeIf { it.isNotEmpty() && it.size.toLong() <= MAX_PER_IMAGE_BYTES }
+            ?.let { NormalizedImage(it, "image/jpeg") }
+    }
+
+    private fun detectMagicMime(data: ByteArray): String? = when {
+        data.size >= PNG_SIGNATURE.size && PNG_SIGNATURE.indices.all { data[it] == PNG_SIGNATURE[it] } -> "image/png"
+        data.size >= 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "image/jpeg"
+        data.size >= 12 && hasAscii(data, 0, "RIFF") && hasAscii(data, 8, "WEBP") -> "image/webp"
+        data.size >= 6 && (hasAscii(data, 0, "GIF87a") || hasAscii(data, 0, "GIF89a")) -> "image/gif"
+        else -> null
+    }
+
+    private fun hasAscii(data: ByteArray, offset: Int, value: String): Boolean =
+        offset >= 0 && offset + value.length <= data.size && value.indices.all {
+            data[offset + it] == value[it].code.toByte()
+        }
+
+    private fun cachedValidationMime(data: ByteArray): String? = synchronized(validationCache) {
+        validationCache[data]
+    }
+
+    private fun cacheValidation(data: ByteArray, mimeType: String) {
+        synchronized(validationCache) {
+            validationCache[data] = mimeType
+        }
+    }
+
+    /** Bounds decode first, then decode only a small sampled bitmap. */
+    private fun decodeSample(data: ByteArray): Boolean {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, MAX_VALIDATION_EDGE_PX)
+            }
+            val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size, options) ?: return false
+            try {
+                bitmap.width > 0 && bitmap.height > 0
+            } finally {
+                bitmap.recycle()
+            }
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "decodeSample failed (${data.size}B): ${t.message}")
+            false
+        }
+    }
+
+    private fun sampleSize(width: Int, height: Int, maxEdge: Int): Int {
+        var sample = 1
+        val target = maxEdge.coerceAtLeast(1).toLong()
+        while (width.toLong() / sample > target || height.toLong() / sample > target) {
+            if (sample > Int.MAX_VALUE / 2) return sample
+            sample *= 2
+        }
+        return sample
+    }
+
+    /**
+     * Re-encode [input] to a JPEG with max longest edge [maxEdge] at JPEG
+     * quality [q]. Returns null on decode/encode failure.
+     */
+    fun compressBytes(input: ByteArray, maxEdge: Int = MAX_EDGE_PX, q: Int = JPEG_QUALITY): ByteArray? {
+        if (input.isEmpty()) return null
+        var decoded: Bitmap? = null
+        var scaled: Bitmap? = null
         return try {
             // Two-pass decode mirroring PhotosOffloadHandler.copyResized — sampled
             // bounds first to keep the in-memory bitmap proportional to maxEdge,
@@ -86,33 +197,39 @@ object ImageBudget {
             BitmapFactory.decodeByteArray(input, 0, input.size, boundsOpts)
             val w0 = boundsOpts.outWidth
             val h0 = boundsOpts.outHeight
-            if (w0 <= 0 || h0 <= 0) return input
+            if (w0 <= 0 || h0 <= 0) return null
+            val edge = maxEdge.coerceAtLeast(1)
             var sample = 1
-            while (w0 / sample > maxEdge * 2 || h0 / sample > maxEdge * 2) sample *= 2
+            val sampleTarget = edge.toLong() * 2L
+            while (w0.toLong() / sample > sampleTarget || h0.toLong() / sample > sampleTarget) {
+                if (sample > Int.MAX_VALUE / 2) return null
+                sample *= 2
+            }
             val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
-            val decoded = BitmapFactory.decodeByteArray(input, 0, input.size, decodeOpts)
-                ?: return input
+            decoded = BitmapFactory.decodeByteArray(input, 0, input.size, decodeOpts) ?: return null
             val scale = minOf(
-                maxEdge.toFloat() / decoded.width,
-                maxEdge.toFloat() / decoded.height,
+                edge.toFloat() / decoded.width,
+                edge.toFloat() / decoded.height,
                 1f,
             )
             val out = if (scale < 1f) {
-                Bitmap.createScaledBitmap(
+                scaled = Bitmap.createScaledBitmap(
                     decoded,
                     (decoded.width * scale).toInt().coerceAtLeast(1),
                     (decoded.height * scale).toInt().coerceAtLeast(1),
                     true,
                 )
-            } else decoded
+                scaled ?: return null
+            } else decoded!!
             val baos = ByteArrayOutputStream()
-            out.compress(Bitmap.CompressFormat.JPEG, q.coerceIn(1, 100), baos)
-            if (out !== decoded) out.recycle()
-            decoded.recycle()
-            baos.toByteArray()
+            if (!out.compress(Bitmap.CompressFormat.JPEG, q.coerceIn(1, 100), baos)) return null
+            baos.toByteArray().takeIf { it.isNotEmpty() }
         } catch (t: Throwable) {
-            AppLogger.warning(TAG, "compressBytes failed (${input.size}B → keeping original): ${t.message}")
-            input
+            AppLogger.warning(TAG, "compressBytes failed (${input.size}B): ${t.message}")
+            null
+        } finally {
+            if (scaled != null && scaled !== decoded) scaled?.recycle()
+            decoded?.recycle()
         }
     }
 
@@ -137,13 +254,19 @@ object ImageBudget {
     fun compressUnderBudgetOrNull(
         input: ByteArray,
         targetMaxBytes: Long = MAX_PER_IMAGE_BYTES,
+    ): ByteArray? = compressUnderBudgetOrNull(input, targetMaxBytes, forceReencode = false)
+
+    private fun compressUnderBudgetOrNull(
+        input: ByteArray,
+        targetMaxBytes: Long,
+        forceReencode: Boolean,
     ): ByteArray? {
         val normalizedTarget = targetMaxBytes.coerceAtLeast(0L)
-        if (input.size.toLong() <= normalizedTarget) return input
-        var best: ByteArray = input
-        var bestSize = input.size
+        if (!forceReencode && input.size.toLong() <= normalizedTarget) return input
+        var best: ByteArray? = if (forceReencode) null else input
+        var bestSize = best?.size ?: Int.MAX_VALUE
         for ((edge, q) in LADDER) {
-            val candidate = compressBytes(input, edge, q)
+            val candidate = compressBytes(input, edge, q) ?: continue
             if (candidate.size < bestSize) {
                 best = candidate
                 bestSize = candidate.size
@@ -153,8 +276,8 @@ object ImageBudget {
                 return candidate
             }
         }
-        AppLogger.warning(TAG, "compressUnderBudget exhausted ladder: ${input.size}B → ${best.size}B (target=${normalizedTarget}B)")
-        return if (best.size.toLong() <= normalizedTarget) best else null
+        AppLogger.warning(TAG, "compressUnderBudget exhausted ladder: ${input.size}B → ${best?.size ?: 0}B (target=${normalizedTarget}B)")
+        return best?.takeIf { it.size.toLong() <= normalizedTarget }
     }
 
     /** Result of [applyMessageBudget]. */
@@ -331,11 +454,26 @@ object ImageBudget {
         linuxPath: String?,
         maxBytes: Long = MAX_REQUEST_BYTES,
     ): String {
-        val budgetLabel = if (maxBytes == MAX_REQUEST_BYTES) "25MB" else "${maxBytes.coerceAtLeast(0L)}B"
+        val normalizedBytes = maxBytes.coerceAtLeast(0L)
+        val mib = 1024L * 1024L
+        val budgetLabel = if (normalizedBytes % mib == 0L) {
+            "${normalizedBytes / mib}MiB"
+        } else {
+            "${normalizedBytes}B"
+        }
         return if (linuxPath != null) {
             "[image elided to fit $budgetLabel request budget. Original at $linuxPath — re-fetch with `read_image $linuxPath` if you need to see it.]"
         } else {
             "[image elided to fit $budgetLabel request budget. Original bytes no longer addressable; ask the user to re-attach if needed.]"
+        }
+    }
+
+    fun invalidImagePlaceholder(linuxPath: String?, mimeType: String?): String {
+        val declaredMime = mimeType?.trim()?.takeIf { it.isNotEmpty() } ?: "unknown MIME"
+        return if (linuxPath != null) {
+            "[image omitted: invalid or empty image ($declaredMime). Original at $linuxPath — re-fetch with `read_image $linuxPath` if needed.]"
+        } else {
+            "[image omitted: invalid or empty image ($declaredMime). Ask the user to re-attach it if needed.]"
         }
     }
 

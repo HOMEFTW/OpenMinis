@@ -70,16 +70,19 @@ sealed class AgentContentPart {
          * only when a Vision Group is configured; null → provider default literal.
          */
         val noVisionPlaceholder: String? = null,
+        /** Local media file; history keeps this reference instead of resident pixels. */
+        val localPath: String? = null,
     ) : AgentContentPart() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is ImageData) return false
-            return data.contentEquals(other.data) && mimeType == other.mimeType &&
+            return data.contentEquals(other.data) && mimeType == other.mimeType && localPath == other.localPath &&
                 linuxPath == other.linuxPath && noVisionPlaceholder == other.noVisionPlaceholder
         }
 
         override fun hashCode(): Int {
             var result = 31 * data.contentHashCode() + mimeType.hashCode()
+            result = 31 * result + (localPath?.hashCode() ?: 0)
             result = 31 * result + (linuxPath?.hashCode() ?: 0)
             result = 31 * result + (noVisionPlaceholder?.hashCode() ?: 0)
             return result

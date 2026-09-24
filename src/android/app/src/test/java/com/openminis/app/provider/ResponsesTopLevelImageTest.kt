@@ -33,8 +33,9 @@ class ResponsesTopLevelImageTest {
 
     private lateinit var server: MockWebServer
 
-    /** 1x1 PNG-ish bytes; content is irrelevant, presence on the wire is not. */
-    private val pixels = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
+    /** Real 1x1 PNG bytes; the wire assertions still prove the image survives. */
+    private val pixels: ByteArray
+        get() = ImageTestFixtures.png1x1
 
     @Before
     fun setUp() {
@@ -73,7 +74,9 @@ class ResponsesTopLevelImageTest {
         model = model,
         basePath = server.url("/").toString().trimEnd('/'),
         useResponsesAPI = true,
-    )
+    ).apply {
+        imageNormalizer = ImageTestFixtures::normalize
+    }
 
     /** Run one request and return the JSON body that actually went out. */
     private fun capturedBody(

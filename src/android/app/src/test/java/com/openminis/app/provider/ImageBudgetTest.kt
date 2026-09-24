@@ -2,6 +2,8 @@ package com.openminis.app.provider
 
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,6 +14,70 @@ class ImageBudgetTest {
         linuxPath = path,
         mimeType = "image/jpeg",
     )
+
+    @Test
+    fun imageBudgetsUse100MiBRequestAndMessageCaps() {
+        assertEquals(5L * 1024 * 1024, ImageBudget.MAX_PER_IMAGE_BYTES)
+        assertEquals(100L * 1024 * 1024, ImageBudget.MAX_TOTAL_BYTES)
+        assertEquals(100L * 1024 * 1024, ImageBudget.MAX_REQUEST_BYTES)
+    }
+
+    @Test
+    fun defaultPlaceholderUsesTheCurrentRequestBudget() {
+        val placeholder = ImageBudget.elidedImagePlaceholder(null)
+
+        assertTrue(placeholder.contains("100MiB request budget"))
+        assertFalse(placeholder.contains("25MB"))
+    }
+
+    @Test
+    fun injectedJvmNormalizerRequiresARealImageAndUsesTheEncodedMime() {
+        val png = ImageTestFixtures.png1x1
+
+        val normalized = ImageTestFixtures.normalize(png, "image/jpeg")
+
+        assertTrue(normalized != null)
+        assertEquals("image/png", normalized!!.mimeType)
+        assertArrayEquals(png, normalized.data)
+    }
+
+    @Test
+    fun injectedJvmNormalizerRejectsEmptyTruncatedAndGarbageBytes() {
+        assertTrue(ImageTestFixtures.normalize(ByteArray(0), "image/png") == null)
+        assertTrue(
+            ImageTestFixtures.normalize(
+                byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A),
+                "image/png",
+            ) == null,
+        )
+        assertTrue(ImageTestFixtures.normalize(byteArrayOf(1, 2, 3), "image/jpeg") == null)
+    }
+
+    @Test
+    fun providerBoundaryReplacesInvalidImageWithAnExplicitPlaceholder() {
+        val validPng = ImageTestFixtures.png1x1
+        val budgeted = budgetProviderRequest(
+            messages = listOf(
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = "look",
+                    contentParts = listOf(
+                        AgentContentPart.ImageData(byteArrayOf(1, 2, 3), "image/png"),
+                        AgentContentPart.ImageData(validPng, "image/jpeg"),
+                    ),
+                ),
+            ),
+            imageParts = emptyList(),
+            normalizer = ImageTestFixtures::normalize,
+        )
+
+        val parts = budgeted.messages.single().contentParts
+        assertTrue(parts[0] is AgentContentPart.Text)
+        assertTrue((parts[0] as AgentContentPart.Text).text.contains("invalid"))
+        val kept = parts[1] as AgentContentPart.ImageData
+        assertEquals("image/png", kept.mimeType)
+        assertArrayEquals(validPng, kept.data)
+    }
 
     @Test
     fun negativeBudgetIsTreatedAsZeroBytes() {
@@ -92,22 +158,25 @@ class ImageBudgetTest {
 
     @Test
     fun mixedStructuredAndTopLevelImagesShareRequestBudget() {
-        val shared = ByteArray(4)
+        val shared = ImageTestFixtures.png1x1
+        val middle = ImageTestFixtures.png1x1
+        val latest = ImageTestFixtures.png1x1
         val messages = listOf(
             LLMMessage(
                 role = LLMMessage.Role.USER,
                 content = "",
                 contentParts = listOf(
                     AgentContentPart.ImageData(shared, "image/jpeg", linuxPath = "/old"),
-                    AgentContentPart.ImageData(ByteArray(4), "image/png", linuxPath = "/middle"),
+                    AgentContentPart.ImageData(middle, "image/png", linuxPath = "/middle"),
                 ),
             ),
         )
 
         val budgeted = budgetProviderRequest(
             messages = messages,
-            imageParts = listOf(LLMMessage.ImagePart(ByteArray(4), "image/jpeg", linuxPath = "/latest")),
-            maxRequestBytes = 8L,
+            imageParts = listOf(LLMMessage.ImagePart(latest, "image/jpeg", linuxPath = "/latest")),
+            maxRequestBytes = shared.size.toLong() * 2,
+            normalizer = ImageTestFixtures::normalize,
         )
 
         val parts = budgeted.messages.single().contentParts
@@ -119,20 +188,22 @@ class ImageBudgetTest {
 
     @Test
     fun structuredContentTakesPriorityOverLegacyMessageImages() {
+        val png = ImageTestFixtures.png1x1
         val budgeted = budgetProviderRequest(
             messages = listOf(
                 LLMMessage(
                     role = LLMMessage.Role.USER,
                     content = "prompt",
-                    imageParts = listOf(LLMMessage.ImagePart(ByteArray(4), "image/jpeg")),
+                    imageParts = listOf(LLMMessage.ImagePart(png, "image/jpeg")),
                     contentParts = listOf(
                         AgentContentPart.Text("prompt"),
-                        AgentContentPart.ImageData(ByteArray(4), "image/png"),
+                        AgentContentPart.ImageData(png, "image/png"),
                     ),
                 ),
             ),
             imageParts = emptyList(),
-            maxRequestBytes = 8L,
+            maxRequestBytes = png.size.toLong(),
+            normalizer = ImageTestFixtures::normalize,
         )
 
         assertTrue(budgeted.messages.single().imageParts.isEmpty())
@@ -144,16 +215,18 @@ class ImageBudgetTest {
 
     @Test
     fun legacyMessageImagesAreBudgetedWhenStructuredPartsAreAbsent() {
+        val png = ImageTestFixtures.png1x1
         val budgeted = budgetProviderRequest(
             messages = listOf(
                 LLMMessage(
                     role = LLMMessage.Role.USER,
                     content = "prompt",
-                    imageParts = listOf(LLMMessage.ImagePart(ByteArray(4), "image/jpeg")),
+                    imageParts = listOf(LLMMessage.ImagePart(png, "image/jpeg")),
                 ),
             ),
             imageParts = emptyList(),
             maxRequestBytes = 0L,
+            normalizer = ImageTestFixtures::normalize,
         )
 
         assertTrue(budgeted.messages.single().imageParts.isEmpty())

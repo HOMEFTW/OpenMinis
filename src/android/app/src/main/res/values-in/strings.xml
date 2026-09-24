@@ -1616,8 +1616,8 @@
     <string name="import_zip_summary">Mengimpor %1$d dari %2$d berkas</string>
     <string name="image_budget_compressed">%1$d gambar dikompresi sebelum dikirim</string>
     <string name="image_budget_dropped">%1$d URL berukuran berlebih dilewati (&gt;5MB)</string>
-    <string name="image_budget_total_exceeded">Total ukuran gambar melebihi 25MB; gambar berikutnya dilewati</string>
-    <string name="image_budget_request_elided">%1$d gambar lama dikeluarkan dari permintaan agar muat dalam batas 25MB</string>
+    <string name="image_budget_total_exceeded">Total ukuran gambar melebihi 100MiB; gambar berikutnya dilewati</string>
+    <string name="image_budget_request_elided">%1$d gambar lama dikeluarkan dari permintaan agar muat dalam batas 100MiB</string>
     <string name="composer_swipe_release_to_send">Lepaskan untuk mengirim</string>
     <string name="composer_swipe_release_to_queue">Lepaskan untuk mengantrekan</string>
     <string name="chat_message_large_collapsed_title">Konten besar (%1$s)</string>

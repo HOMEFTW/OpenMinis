@@ -145,16 +145,18 @@ class AstraImage25Test {
 
     @Test
     fun codexImageDoesNotRestoreLegacyImagesAfterAllStructuredImagesAreElided() {
+        val png = ImageTestFixtures.png1x1
         val message = LLMMessage(
             role = LLMMessage.Role.USER,
             content = "prompt",
-            imageParts = listOf(LLMMessage.ImagePart(ByteArray(4), "image/jpeg")),
-            contentParts = listOf(AgentContentPart.ImageData(ByteArray(4), "image/png")),
+            imageParts = listOf(LLMMessage.ImagePart(png, "image/jpeg")),
+            contentParts = listOf(AgentContentPart.ImageData(png, "image/png")),
         )
         val budgeted = budgetProviderRequest(
             messages = listOf(message),
             imageParts = emptyList(),
             maxRequestBytes = 0L,
+            normalizer = ImageTestFixtures::normalize,
         )
         assertTrue(
             budgeted.messages.single().contentParts.none { it is AgentContentPart.ImageData },
@@ -169,16 +171,18 @@ class AstraImage25Test {
 
     @Test
     fun codexImageIgnoresLegacyImagesWhenStructuredContentIsTextOnly() {
+        val png = ImageTestFixtures.png1x1
         val budgeted = budgetProviderRequest(
             messages = listOf(
                 LLMMessage(
                     role = LLMMessage.Role.USER,
                     content = "prompt",
-                    imageParts = listOf(LLMMessage.ImagePart(byteArrayOf(1), "image/jpeg")),
+                    imageParts = listOf(LLMMessage.ImagePart(png, "image/jpeg")),
                     contentParts = listOf(AgentContentPart.Text("prompt")),
                 ),
             ),
             imageParts = emptyList(),
+            normalizer = ImageTestFixtures::normalize,
         )
         val body = OpenAIProvider(
             oauthTokenProvider = { "test" },

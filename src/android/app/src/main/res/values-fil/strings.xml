@@ -1611,8 +1611,8 @@
     <string name="import_zip_summary">Na-import ang %1$d sa %2$d file</string>
     <string name="image_budget_compressed">%1$d larawan ang na-compress bago ipadala</string>
     <string name="image_budget_dropped">%1$d URL na sobra sa laki ang nilaktawan (&gt;5MB)</string>
-    <string name="image_budget_total_exceeded">Lumampas sa 25MB ang kabuuang laki ng larawan; nilaktawan ang mga sumunod</string>
-    <string name="image_budget_request_elided">%1$d lumang larawan ang inalis sa request para kasya sa 25MB</string>
+    <string name="image_budget_total_exceeded">Lumampas sa 100MiB ang kabuuang laki ng larawan; nilaktawan ang mga sumunod</string>
+    <string name="image_budget_request_elided">%1$d lumang larawan ang inalis sa request para kasya sa 100MiB</string>
     <string name="composer_swipe_release_to_send">Bitawan para ipadala</string>
     <string name="composer_swipe_release_to_queue">Bitawan para ipila</string>
     <string name="chat_message_large_collapsed_title">Malaking nilalaman (%1$s)</string>

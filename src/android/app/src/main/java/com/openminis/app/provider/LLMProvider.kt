@@ -26,6 +26,8 @@ internal fun budgetProviderRequest(
     messages: List<LLMMessage>,
     imageParts: List<LLMMessage.ImagePart>,
     maxRequestBytes: Long = ImageBudget.MAX_REQUEST_BYTES,
+    normalizer: (ByteArray, String) -> ImageBudget.NormalizedImage? =
+        ImageBudget::normalizeImage,
 ): BudgetedProviderRequest {
     data class Slot(
         val messageIndex: Int? = null,
@@ -38,6 +40,7 @@ internal fun budgetProviderRequest(
         var safeData: ByteArray? = null,
         var safeMimeType: String = mimeType,
         var dropped: Boolean = false,
+        var invalid: Boolean = false,
         var requestDropped: Boolean = false,
     )
 
@@ -99,20 +102,17 @@ internal fun budgetProviderRequest(
     }
     if (slots.isEmpty()) return BudgetedProviderRequest(canonicalMessages, imageParts)
 
-    // Normalize each occurrence before cumulative planning. A failed ladder
-    // is a hard failure for inline transport, never permission to send raw
-    // bytes that still exceed the 5MB limit.
+    // Normalize every occurrence before cumulative planning. This is also the
+    // only place that permits bytes into provider payloads, so invalid bytes
+    // cannot fall through as a base64 image or as an over-limit original.
     for (slot in slots) {
-        if (slot.data.size.toLong() <= ImageBudget.MAX_PER_IMAGE_BYTES) {
-            slot.safeData = slot.data
+        val normalized = normalizer(slot.data, slot.mimeType)
+        if (normalized == null) {
+            slot.dropped = true
+            slot.invalid = true
         } else {
-            val compressed = ImageBudget.compressUnderBudgetOrNull(slot.data)
-            if (compressed == null) {
-                slot.dropped = true
-            } else {
-                slot.safeData = compressed
-                if (compressed !== slot.data) slot.safeMimeType = "image/jpeg"
-            }
+            slot.safeData = normalized.data
+            slot.safeMimeType = normalized.mimeType
         }
     }
 
@@ -133,7 +133,9 @@ internal fun budgetProviderRequest(
             requestDropped = true
         }
     }
-    if (slots.none { it.dropped || it.safeData !== it.data }) {
+    if (slots.none {
+            it.dropped || it.safeData !== it.data || it.safeMimeType != it.mimeType
+        }) {
         return BudgetedProviderRequest(canonicalMessages, imageParts)
     }
 
@@ -144,14 +146,18 @@ internal fun budgetProviderRequest(
         .filter { it.messageIndex != null && it.messageImageIndex != null }
         .associateBy { it.messageIndex!! to it.messageImageIndex!! }
 
-    fun placeholder(slot: Slot): String = ImageBudget.elidedImagePlaceholder(
-        linuxPath = slot.linuxPath,
-        maxBytes = if (slot.requestDropped) {
-            ImageBudget.MAX_REQUEST_BYTES
-        } else {
-            ImageBudget.MAX_PER_IMAGE_BYTES
-        },
-    )
+    fun placeholder(slot: Slot): String = if (slot.invalid) {
+        ImageBudget.invalidImagePlaceholder(slot.linuxPath, slot.mimeType)
+    } else {
+        ImageBudget.elidedImagePlaceholder(
+            linuxPath = slot.linuxPath,
+            maxBytes = if (slot.requestDropped) {
+                ImageBudget.MAX_REQUEST_BYTES
+            } else {
+                ImageBudget.MAX_PER_IMAGE_BYTES
+            },
+        )
+    }
 
     val normalizedMessages = canonicalMessages.mapIndexed { messageIndex, message ->
         if (message.contentParts.isEmpty()) {
@@ -242,6 +248,14 @@ interface LLMProvider {
     var model: LLMModel
 
     /**
+     * Image validator used at the shared provider boundary. Production
+     * providers inherit the Android implementation; JVM tests may supply a
+     * per-instance decoder without weakening the production check.
+     */
+    val imageNormalizer: (ByteArray, String) -> ImageBudget.NormalizedImage?
+        get() = ImageBudget::normalizeImage
+
+    /**
      * Effective max output tokens ceiling for the given model.
      * Priority: model.maxOutputTokens > provider-level default.
      * Used as the upper bound in dynamicMaxTokens().
@@ -287,7 +301,11 @@ interface LLMProvider {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): LLMResponse {
-        val budgeted = budgetProviderRequest(messages, imageParts)
+        val budgeted = budgetProviderRequest(
+            messages,
+            imageParts,
+            normalizer = imageNormalizer,
+        )
         return sendMessageClamped(
         budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools,
         clampThinkingLevel(thinkingLevel),
@@ -304,7 +322,11 @@ interface LLMProvider {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): Flow<LLMStreamChunk> {
-        val budgeted = budgetProviderRequest(messages, imageParts)
+        val budgeted = budgetProviderRequest(
+            messages,
+            imageParts,
+            normalizer = imageNormalizer,
+        )
         return streamMessageClamped(
         budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools,
         clampThinkingLevel(thinkingLevel),

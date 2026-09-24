@@ -15,10 +15,13 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.SseProgressWatchdog
+import com.openminis.app.provider.cancelOnCancellation
 import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -49,6 +52,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
 
@@ -94,6 +98,9 @@ class OpenAIProvider private constructor(
     private val azureBase: String? = null,
 ) : LLMProvider {
     override val name = "OpenAI"
+    override var imageNormalizer: (ByteArray, String) -> com.openminis.app.provider.ImageBudget.NormalizedImage? =
+        com.openminis.app.provider.ImageBudget::normalizeImage
+        internal set
 
     /**
      * [T-android-thinking-rules-phase2] Owning provider-instance id, set by
@@ -640,7 +647,7 @@ class OpenAIProvider private constructor(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> {
-        val budgeted = budgetProviderRequest(messages, imageParts)
+        val budgeted = budgetProviderRequest(messages, imageParts, normalizer = imageNormalizer)
         return rawStreamMessage(
             budgeted.messages,
             systemPrompt,
@@ -759,6 +766,11 @@ class OpenAIProvider private constructor(
         // (b) evict THIS ONE connection on timeout.
         val watchState = CallWatchState()
         val call = client.newCall(request.newBuilder().tag(CallWatchState::class.java, watchState).build())
+        // Register cancellation before execute()/readLine(): awaitClose below
+        // is too late to interrupt a collector cancelled during blocking I/O.
+        val callCancellation = cancelOnCancellation {
+            try { call.cancel() } catch (_: Throwable) {}
+        }
         // [T-android-stale-conn-retry-hang] Time-to-first-byte watchdog. A
         // request written into a dead pooled h2 tunnel (local proxy socket
         // survives a network flap) produces NO further events — no headers,
@@ -779,7 +791,7 @@ class OpenAIProvider private constructor(
         val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
         val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
         val callStartNanos = System.nanoTime()
-        val ttfbWatchdog = launch {
+        val ttfbWatchdog = launch(start = CoroutineStart.UNDISPATCHED) {
             val pollMs = 250L
             var timedOutPhase: String? = null
             while (!headersArrived.get()) {
@@ -814,8 +826,9 @@ class OpenAIProvider private constructor(
                 }
             }
         }
+        var responseReceived = false
         val response = try {
-            call.execute()
+            call.execute().also { responseReceived = true }
         } catch (e: IOException) {
             if (ttfbTimedOut.get()) {
                 throw LLMError.TransientError(
@@ -826,6 +839,7 @@ class OpenAIProvider private constructor(
         } finally {
             headersArrived.set(true)
             ttfbWatchdog.cancel()
+            if (!responseReceived) callCancellation.cancel()
         }
         // T321: response-side diagnostic log (status + select header values).
         run {
@@ -848,6 +862,7 @@ class OpenAIProvider private constructor(
                 "[T321] ← HTTP ${response.code} error body: $errorBody"
             )
             response.close()
+            callCancellation.cancel()
             // T302: skip the LLMRequestLog write entirely on release builds —
             // not just to avoid the (already-truncated) retention cost, but to
             // dodge constructing the Entry / headerMap copies that go with it.
@@ -879,6 +894,42 @@ class OpenAIProvider private constructor(
             )
         }
 
+        val producerScope = this
+        val progressWatchdog = SseProgressWatchdog(
+            onTimeout = { timeout ->
+                try { call.cancel() } finally {
+                    producerScope.cancel(
+                        "SSE stream idle timeout",
+                        com.openminis.app.data.model.LLMError.NetworkError(timeout),
+                    )
+                }
+            },
+        )
+        val progressWatchdogJob = progressWatchdog.start(producerScope)
+        val cleanedUp = AtomicBoolean(false)
+        fun cleanupCall() {
+            if (cleanedUp.compareAndSet(false, true)) {
+                progressWatchdogJob.cancel()
+                callCancellation.cancel()
+                response.close()
+            }
+        }
+        fun LLMStreamChunk.isActualProgress(): Boolean = when (this) {
+            is LLMStreamChunk.Text -> text.isNotEmpty()
+            is LLMStreamChunk.ThinkingDelta -> text.isNotEmpty()
+            is LLMStreamChunk.ReasoningContent -> content.isNotEmpty()
+            is LLMStreamChunk.ToolUseStart,
+            is LLMStreamChunk.ToolInputDelta,
+            is LLMStreamChunk.ToolCallComplete,
+            is LLMStreamChunk.Finished,
+            is LLMStreamChunk.MediaAttachment -> true
+            is LLMStreamChunk.Started,
+            is LLMStreamChunk.Usage -> false
+        }
+        suspend fun sendChunk(chunk: LLMStreamChunk) {
+            if (chunk.isActualProgress()) progressWatchdog.markProgress()
+            send(chunk)
+        }
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
 
         // [T-codex-gpt-image2-oauth-android] gpt-image-2: the Codex backend
@@ -889,20 +940,34 @@ class OpenAIProvider private constructor(
         // chunk, and finishes — bypassing the chat/tool SSE state machine below.
         if (isCodexImageModel) {
             try {
-                handleCodexImageStream(reader) { chunk -> trySend(chunk) }
+                handleCodexImageStream(
+                    reader = reader,
+                    emit = { chunk ->
+                        if (chunk.isActualProgress()) progressWatchdog.markProgress()
+                        trySend(chunk)
+                    },
+                    onProgress = { progressWatchdog.markProgress() },
+                )
             } catch (e: CancellationException) {
-                throw e
+                val timeout = progressWatchdog.timeoutException
+                if (timeout == null) throw e
+                cancel(
+                    "SSE stream idle timeout",
+                    com.openminis.app.data.model.LLMError.NetworkError(timeout),
+                )
             } catch (e: Exception) {
-                cancel("Image stream error", mapError(e))
+                val timeout = progressWatchdog.timeoutException
+                cancel(
+                    if (timeout == null) "Image stream error" else "SSE stream idle timeout",
+                    if (timeout == null) mapError(e)
+                    else com.openminis.app.data.model.LLMError.NetworkError(timeout),
+                )
             } finally {
                 reader.close()
-                response.close()
+                cleanupCall()
             }
             channel.close()
-            awaitClose {
-                try { call.cancel() } catch (_: Exception) {}
-                try { response.close() } catch (_: Exception) {}
-            }
+            awaitClose { cleanupCall() }
             return@callbackFlow
         }
 
@@ -953,7 +1018,7 @@ class OpenAIProvider private constructor(
         var sentFinished = false
 
         try {
-            send(LLMStreamChunk.Started)
+            sendChunk(LLMStreamChunk.Started)
             var line: String?
 
             // Branch streaming parser based on API format
@@ -979,9 +1044,9 @@ class OpenAIProvider private constructor(
                     thinkParser.finishTurn().let { fin ->
                         if (fin.thinking.isNotEmpty()) {
                             reasoningAccum.append(fin.thinking)
-                            send(LLMStreamChunk.ThinkingDelta(fin.thinking))
+                            sendChunk(LLMStreamChunk.ThinkingDelta(fin.thinking))
                         }
-                        if (fin.visible.isNotEmpty()) send(LLMStreamChunk.Text(fin.visible))
+                        if (fin.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(fin.visible))
                     }
                     // [T-android-think-prefix-stream] Persist reasoning captured
                     // EITHER from the `reasoning_content` field or from a
@@ -989,9 +1054,9 @@ class OpenAIProvider private constructor(
                     // stream think-tag reasoning live and then drop it — the
                     // thinking bubble would vanish on session reload.
                     if (sawReasoningField || reasoningAccum.isNotEmpty()) {
-                        send(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
+                        sendChunk(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
                     }
-                    send(LLMStreamChunk.Finished(finishReason))
+                    sendChunk(LLMStreamChunk.Finished(finishReason))
                     sentFinished = true
                     break
                 }
@@ -1073,12 +1138,12 @@ class OpenAIProvider private constructor(
                                     )
                                     sawReasoningDelta = true
                                 }
-                                send(LLMStreamChunk.ThinkingDelta(delta))
+                                sendChunk(LLMStreamChunk.ThinkingDelta(delta))
                             }
                         }
                         type == "response.output_text.delta" -> {
                             val delta = event.optString("delta", "")
-                            if (delta.isNotEmpty()) send(LLMStreamChunk.Text(delta))
+                            if (delta.isNotEmpty()) sendChunk(LLMStreamChunk.Text(delta))
                         }
                         // function_call item announced — capture call_id + name, start accumulator.
                         type == "response.output_item.added" -> {
@@ -1092,7 +1157,7 @@ class OpenAIProvider private constructor(
                                     responsesToolCalls[itemId] = ResponsesToolCallAccumulator(callId = callId, name = name)
                                     val combined = combineResponsesAPIIds(callId, itemId)
                                     android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart (Responses) id=$combined name=$name")
-                                    send(LLMStreamChunk.ToolUseStart(combined, name))
+                                    sendChunk(LLMStreamChunk.ToolUseStart(combined, name))
                                     responsesToolCalls[itemId]?.started = true
                                 }
                             }
@@ -1104,7 +1169,7 @@ class OpenAIProvider private constructor(
                             if (acc != null && delta.isNotEmpty()) {
                                 acc.args.append(delta)
                                 val combined = combineResponsesAPIIds(acc.callId, itemId)
-                                send(LLMStreamChunk.ToolInputDelta(combined, acc.args.toString()))
+                                sendChunk(LLMStreamChunk.ToolInputDelta(combined, acc.args.toString()))
                             } else if (acc == null) {
                                 // Pre-T107 this branch silently dropped the entire tool call
                                 // because no accumulator was set up — leaving the model with
@@ -1131,7 +1196,7 @@ class OpenAIProvider private constructor(
                                 val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
                                 val combined = combineResponsesAPIIds(acc.callId, itemId)
                                 android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${args.toString().take(300)}")
-                                send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
+                                sendChunk(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
                         }
                         type == "response.failed" -> {
@@ -1236,6 +1301,9 @@ class OpenAIProvider private constructor(
                             )
                         }
                         type == "response.completed" -> {
+                            // A terminal event is real progress even when the
+                            // API does not send a separate [DONE] sentinel.
+                            progressWatchdog.markProgress()
                             val resp = event.optJSONObject("response")
                             val status = resp?.optString("status", "")
                             // When the model emitted tool calls the API returns status=completed
@@ -1276,7 +1344,7 @@ class OpenAIProvider private constructor(
                                     "OpenAIProvider",
                                     "[T321] Responses usage block: $usage"
                                 )
-                                send(LLMStreamChunk.Usage(parseResponsesAPIUsage(usage)))
+                                sendChunk(LLMStreamChunk.Usage(parseResponsesAPIUsage(usage)))
                             }
                         }
                         type == "response.output_text.done" -> {
@@ -1318,7 +1386,7 @@ class OpenAIProvider private constructor(
                                         "Chat Completions: first reasoning_content delta arrived on ${model.id} — streaming Thinking content"
                                     )
                                 }
-                                send(LLMStreamChunk.ThinkingDelta(rc))
+                                sendChunk(LLMStreamChunk.ThinkingDelta(rc))
                             }
                         }
 
@@ -1336,9 +1404,9 @@ class OpenAIProvider private constructor(
                                 val out = thinkParser.feed(text)
                                 if (out.thinking.isNotEmpty()) {
                                     reasoningAccum.append(out.thinking)
-                                    send(LLMStreamChunk.ThinkingDelta(out.thinking))
+                                    sendChunk(LLMStreamChunk.ThinkingDelta(out.thinking))
                                 }
-                                if (out.visible.isNotEmpty()) send(LLMStreamChunk.Text(out.visible))
+                                if (out.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(out.visible))
                             }
                         }
 
@@ -1360,12 +1428,12 @@ class OpenAIProvider private constructor(
                                 if (!acc.started && acc.id.isNotEmpty() && acc.name.isNotEmpty()) {
                                     acc.started = true
                                     android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart id=${acc.id} name=${acc.name}")
-                                    send(LLMStreamChunk.ToolUseStart(acc.id, acc.name))
+                                    sendChunk(LLMStreamChunk.ToolUseStart(acc.id, acc.name))
                                 }
                                 // Emit input delta
                                 if (acc.id.isNotEmpty() && acc.args.isNotEmpty()) {
                                     android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${acc.args.length}chars")
-                                    send(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
+                                    sendChunk(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
                                 }
                             }
                         }
@@ -1373,6 +1441,7 @@ class OpenAIProvider private constructor(
                         // Finish reason
                         choice.safeOptString("finish_reason", "").let {
                             if (it.isNotEmpty()) {
+                                progressWatchdog.markProgress()
                                 finishReason = it
                                 if (!sawFinishReason) {
                                     sawFinishReason = true
@@ -1391,7 +1460,7 @@ class OpenAIProvider private constructor(
                             "OpenAIProvider",
                             "[T321] usage block: $usage"
                         )
-                        send(LLMStreamChunk.Usage(parseChatCompletionsUsage(usage)))
+                        sendChunk(LLMStreamChunk.Usage(parseChatCompletionsUsage(usage)))
                     }
                 }
             }
@@ -1402,9 +1471,9 @@ class OpenAIProvider private constructor(
             thinkParser.finishTurn().let { fin ->
                 if (fin.thinking.isNotEmpty()) {
                     reasoningAccum.append(fin.thinking)
-                    send(LLMStreamChunk.ThinkingDelta(fin.thinking))
+                    sendChunk(LLMStreamChunk.ThinkingDelta(fin.thinking))
                 }
-                if (fin.visible.isNotEmpty()) send(LLMStreamChunk.Text(fin.visible))
+                if (fin.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(fin.visible))
             }
 
             // Emit ToolCallComplete for all accumulated tool calls
@@ -1412,7 +1481,7 @@ class OpenAIProvider private constructor(
                 if (acc.id.isNotEmpty() && acc.name.isNotEmpty()) {
                     val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
                     android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${args.toString().take(300)}")
-                    send(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, args))
+                    sendChunk(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, args))
                 }
             }
             // Drain Responses-API tool accumulators that didn't get an output_item.done
@@ -1429,7 +1498,7 @@ class OpenAIProvider private constructor(
                         "OpenAIProvider",
                         "Stream ended mid-tool-call id=$combined name=${acc.name} argsLen=${acc.args.length} — flushing as ToolCallComplete (T248)",
                     )
-                    send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
+                    sendChunk(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                 }
             }
             responsesToolCalls.clear()
@@ -1466,14 +1535,14 @@ class OpenAIProvider private constructor(
                 thinkParser.finishTurn().let { fin ->
                     if (fin.thinking.isNotEmpty()) {
                         reasoningAccum.append(fin.thinking)
-                        send(LLMStreamChunk.ThinkingDelta(fin.thinking))
+                        sendChunk(LLMStreamChunk.ThinkingDelta(fin.thinking))
                     }
-                    if (fin.visible.isNotEmpty()) send(LLMStreamChunk.Text(fin.visible))
+                    if (fin.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(fin.visible))
                 }
                 if (sawReasoningField || reasoningAccum.isNotEmpty()) {
-                    send(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
+                    sendChunk(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
                 }
-                send(LLMStreamChunk.Finished(finishReason))
+                sendChunk(LLMStreamChunk.Finished(finishReason))
                 sentFinished = true
                 com.openminis.app.logging.AppLogger.info(
                     "OpenAIProvider",
@@ -1495,6 +1564,13 @@ class OpenAIProvider private constructor(
                         "reasoningLen=$reasoningLen toolCallEvents=$toolCallEventCount sawUsage=$sawUsageBlock"
                 )
             }
+        } catch (e: CancellationException) {
+            val timeout = progressWatchdog.timeoutException
+            if (timeout == null) throw e
+            cancel(
+                "SSE stream idle timeout",
+                com.openminis.app.data.model.LLMError.NetworkError(timeout),
+            )
         } catch (e: Exception) {
             // T321: never silently swallow — log message + top-3 stack frames.
             val frames = e.stackTrace.take(3).joinToString(" | ") { "${it.className}.${it.methodName}:${it.lineNumber}" }
@@ -1503,21 +1579,20 @@ class OpenAIProvider private constructor(
                 "[T321] stream parse exception: ${e.javaClass.simpleName}: ${e.message} @ $frames " +
                     "(events=$sseEventCount contentLen=$contentLen reasoningLen=$reasoningLen)"
             )
-            cancel("Stream error", mapError(e))
+            val timeout = progressWatchdog.timeoutException
+            cancel(
+                if (timeout == null) "Stream error" else "SSE stream idle timeout",
+                if (timeout == null) mapError(e)
+                else com.openminis.app.data.model.LLMError.NetworkError(timeout),
+            )
         } finally {
             reader.close()
-            response.close()
+            cleanupCall()
         }
         channel.close()
-        // T171: when the coroutine is cancelled (user tapped stop), the
-        // reader loop above is suspended inside the OkHttp source — only
-        // call.cancel() will tear the socket down promptly. response.close()
-        // is also explicit so connection-pool leaks are impossible if cancel
-        // races with the finally block.
-        awaitClose {
-            try { call.cancel() } catch (_: Exception) {}
-            try { response.close() } catch (_: Exception) {}
-        }
+        // The cancellation handler was registered before execute(); this
+        // block only closes the response and stops the per-call watchdog.
+        awaitClose { cleanupCall() }
     }
 
     // MARK: - Raw Passthrough [T-android-model-use-passthrough-mode]
@@ -2718,6 +2793,7 @@ class OpenAIProvider private constructor(
     private suspend fun handleCodexImageStream(
         reader: BufferedReader,
         emit: (LLMStreamChunk) -> Unit,
+        onProgress: () -> Unit,
     ) {
         var b64Result: String? = null
         var revisedPrompt: String? = null
@@ -2763,14 +2839,22 @@ class OpenAIProvider private constructor(
             val event = try { JSONObject(payload) } catch (e: Exception) { continue }
             when (event.optString("type")) {
                 "response.output_item.done" -> {
+                    onProgress()
                     event.optJSONObject("item")?.let { scanItem(it) }
                 }
                 "response.output_text.done", "response.output_text.delta" -> {
-                    event.optString("text").takeIf { it.isNotEmpty() }?.let { refusalText = it }
+                    event.optString("text").takeIf { it.isNotEmpty() }?.let {
+                        onProgress()
+                        refusalText = it
+                    }
                         ?: event.optString("delta").takeIf { it.isNotEmpty() }
-                            ?.let { refusalText = (refusalText ?: "") + it }
+                            ?.let {
+                                onProgress()
+                                refusalText = (refusalText ?: "") + it
+                            }
                 }
                 "response.completed" -> {
+                    onProgress()
                     if (b64Result == null) {
                         val output = event.optJSONObject("response")?.optJSONArray("output")
                         if (output != null) {

@@ -1644,8 +1644,8 @@
     <string name="import_zip_summary">已匯入 %2$d 個檔案中的 %1$d 個</string>
     <string name="image_budget_compressed">傳送前已壓縮 %1$d 張圖片</string>
     <string name="image_budget_dropped">已略過 %1$d 個超大圖片 URL（&gt;5MB）</string>
-    <string name="image_budget_total_exceeded">圖片總大小超過 25MB，已捨棄後續圖片</string>
-    <string name="image_budget_request_elided">為配合 25MB 請求額度，已省略 %1$d 張歷史圖片</string>
+    <string name="image_budget_total_exceeded">圖片總大小超過 100MiB，部分圖片暫不傳送，原圖已保留</string>
+    <string name="image_budget_request_elided">為配合 100MiB 請求額度，已省略 %1$d 張歷史圖片</string>
     <string name="composer_swipe_release_to_send">放開以發送</string>
     <string name="composer_swipe_release_to_queue">放開以加入佇列</string>
     <string name="chat_message_large_collapsed_title">大型內容（%1$s）</string>

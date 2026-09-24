@@ -2285,7 +2285,7 @@ fun ChatScreen(
     }
 
     // T-request-imgsize: surface request-level image-budget elisions
-    // (older images compacted into text placeholders to fit the 25MB
+    // (older images compacted into text placeholders to fit the image
     // request cap). Independent flow from the composer-side budget so
     // both can fire on the same turn without racing.
     LaunchedEffect(Unit) {
