@@ -33,8 +33,9 @@ import com.openminis.app.data.model.ProviderConfig
 import com.openminis.app.data.model.ThinkingLevel
 import kotlin.math.roundToInt
 
-internal fun thinkingSliderLevels(available: List<ThinkingLevel>): List<ThinkingLevel> =
-    (listOf(ThinkingLevel.OFF) + available).distinct().sortedBy { it.rank }
+internal fun thinkingSliderLevels(available: List<ThinkingLevel>, allowOff: Boolean = true): List<ThinkingLevel> =
+    (if (allowOff) listOf(ThinkingLevel.OFF) + available else available.filter { it.isEnabled })
+        .distinct().sortedBy { it.rank }.ifEmpty { listOf(if (allowOff) ThinkingLevel.OFF else ThinkingLevel.HIGH) }
 
 internal fun thinkingSliderIndex(current: ThinkingLevel, levels: List<ThinkingLevel>): Int =
     levels.indexOfLast { it.rank <= current.rank }.coerceAtLeast(0)
@@ -57,10 +58,11 @@ internal fun ComposerModelControls(
     onSelectGroup: (String) -> Unit,
     onSelectThinking: (ThinkingLevel) -> Unit,
     onMoreModels: () -> Unit,
+    allowThinkingOff: Boolean = true,
 ) {
     var openMenu by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
-    val levels = thinkingSliderLevels(availableLevels)
+    val levels = thinkingSliderLevels(availableLevels, allowThinkingOff)
     val displayedLevel = levels[thinkingSliderIndex(currentThinking, levels)]
     val menuWidth = (LocalConfiguration.current.screenWidthDp - 40).coerceIn(200, 340).dp
     val modelLabel = modelName.ifBlank { stringResource(R.string.model_picker_title) }
@@ -148,7 +150,7 @@ internal fun ComposerModelControls(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ) {
                     Column(Modifier.width(menuWidth).padding(16.dp)) {
-                        ThinkingLevelSlider(currentThinking, availableLevels, onSelectThinking)
+                        ThinkingLevelSlider(currentThinking, availableLevels, onSelectThinking, allowThinkingOff)
                     }
                 }
             }
@@ -192,9 +194,9 @@ private fun ComposerModelRow(title: String, subtitle: String, selected: Boolean,
 }
 
 @Composable
-internal fun ThinkingLevelSlider(current: ThinkingLevel, availableLevels: List<ThinkingLevel>, onSelect: (ThinkingLevel) -> Unit) {
+internal fun ThinkingLevelSlider(current: ThinkingLevel, availableLevels: List<ThinkingLevel>, onSelect: (ThinkingLevel) -> Unit, allowOff: Boolean = true) {
     val context = LocalContext.current
-    val levels = remember(availableLevels) { thinkingSliderLevels(availableLevels) }
+    val levels = remember(availableLevels, allowOff) { thinkingSliderLevels(availableLevels, allowOff) }
     var position by remember(current, levels) { mutableFloatStateOf(thinkingSliderIndex(current, levels).toFloat()) }
     val selected = levels[position.roundToInt().coerceIn(0, levels.lastIndex)]
     val title = stringResource(R.string.thinking_level_sheet_title)

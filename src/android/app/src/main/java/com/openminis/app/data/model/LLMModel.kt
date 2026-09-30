@@ -55,6 +55,9 @@ data class LLMModel(
     val outputModalities: List<String>? = if (isGPTImage25Id(id)) listOf("image") else null,
 ) {
     val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
+    val isGPT61Sol: Boolean get() = matchesModelId(id, "gpt-6.1-sol")
+    fun normalizeThinkingLevel(level: ThinkingLevel): ThinkingLevel =
+        if (isGPT61Sol && !level.isEnabled) ThinkingLevel.HIGH else level
     val isGPT6: Boolean get() = isGPT6Id(id)
     val isGPT6SolOrLuna: Boolean get() = isGPT6SolOrLunaId(id)
     val isGPTImage25: Boolean get() = isGPTImage25Id(id)
@@ -93,7 +96,8 @@ data class LLMModel(
         }
 
         fun isGPT6AstraId(id: String): Boolean = matchesModelId(id, "gpt-6-astra")
-        fun isGPT6SolOrLunaId(id: String): Boolean = matchesModelId(id, "gpt-6-sol") || matchesModelId(id, "gpt-6-luna")
+        fun isGPT6SolOrLunaId(id: String): Boolean = matchesModelId(id, "gpt-6-sol") ||
+            matchesModelId(id, "gpt-6.1-sol") || matchesModelId(id, "gpt-6-luna")
         fun isGPT6Id(id: String): Boolean = isGPT6AstraId(id) || isGPT6SolOrLunaId(id)
         fun isGPTImage25Id(id: String): Boolean =
             matchesModelId(id, "gpt-image-2.5-flare") || matchesModelId(id, "gpt-image-2.5-sunburst")
@@ -153,6 +157,8 @@ data class LLMModel(
         // assumption (T119).
         val gpt6Astra = LLMModel("gpt-6-astra", "GPT-6 Astra", "OpenAI")
         val gpt6Sol = LLMModel("gpt-6-sol", "GPT-6 Sol", "OpenAI")
+        // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+        val gpt61Sol = LLMModel("gpt-6.1-sol", "GPT-6.1 Sol", "OpenAI")
         val gpt6Luna = LLMModel("gpt-6-luna", "GPT-6 Luna", "OpenAI")
         val gptImage25Flare = LLMModel("gpt-image-2.5-flare", "GPT Image 2.5 Flare", "OpenAI")
         val gptImage25Sunburst = LLMModel("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst", "OpenAI")
@@ -167,7 +173,7 @@ data class LLMModel(
         val o4Mini = LLMModel("o4-mini", "o4 Mini", "OpenAI", supportsReasoning = true)
         val codexMini = LLMModel("codex-mini-latest", "Codex Mini", "OpenAI", supportsReasoning = true)
 
-        val allOpenAI = listOf(gpt6Astra, gpt6Sol, gpt6Luna, gptImage25Flare, gptImage25Sunburst, gpt55, gpt53Codex, gpt52Codex, gpt51CodexMax, gpt52, gpt4o, gpt4oMini, o3, o4Mini, codexMini)
+        val allOpenAI = listOf(gpt6Astra, gpt61Sol, gpt6Sol, gpt6Luna, gptImage25Flare, gptImage25Sunburst, gpt55, gpt53Codex, gpt52Codex, gpt51CodexMax, gpt52, gpt4o, gpt4oMini, o3, o4Mini, codexMini)
 
         // OpenRouter (matching iOS built-in set)
         val orClaudeSonnet4 = LLMModel("anthropic/claude-sonnet-4", "Claude Sonnet 4", "OpenRouter")

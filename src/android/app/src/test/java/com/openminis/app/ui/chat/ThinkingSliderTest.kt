@@ -5,6 +5,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ThinkingSliderTest {
+    @Test fun mandatoryReasoningNeverOffersOff() {
+        val levels = thinkingSliderLevels(listOf(ThinkingLevel.OFF, ThinkingLevel.LOW, ThinkingLevel.MEDIUM,
+            ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX), allowOff = false)
+        assertEquals(listOf(ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX), levels)
+        assertEquals(ThinkingLevel.HIGH, levels[thinkingSliderIndex(ThinkingLevel.HIGH, levels)])
+    }
+
     @Test fun astraExposesOffThroughUltra() {
         assertEquals(ThinkingLevel.entries, thinkingSliderLevels(ThinkingLevel.entries.filter { it != ThinkingLevel.OFF }))
     }

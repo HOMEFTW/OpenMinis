@@ -1482,7 +1482,13 @@ class ChatViewModel(
     private var currentProvider: LLMProvider? = null
     // Capabilities are read directly by Compose; changes must invalidate those reads
     // even when the display name and selected entry id stay the same.
-    private var currentModel: LLMModel? by mutableStateOf(null)
+    private var currentModelState: LLMModel? by mutableStateOf(null)
+    private var currentModel: LLMModel?
+        get() = currentModelState
+        set(value) {
+            currentModelState = value
+            value?.let { _thinkingLevel.value = it.normalizeThinkingLevel(_thinkingLevel.value) }
+        }
 
     /**
      * Does the CURRENTLY RESOLVED main model natively consume image pixels?
@@ -1985,7 +1991,10 @@ class ChatViewModel(
         }
 
     fun thinkingLevelForDisplay(level: ThinkingLevel): ThinkingLevel =
-        if (currentModel?.isDeepSeekFlash == true) LLMModel.deepSeekFlashThinkingLevel(level) else level
+        if (currentModel?.isDeepSeekFlash == true) LLMModel.deepSeekFlashThinkingLevel(level)
+        else currentModel?.normalizeThinkingLevel(level) ?: level
+
+    val canDisableThinking: Boolean get() = currentModel?.isGPT61Sol != true
 
     // [T-anthropic-context-window] Token Usage sheet's context-window row.
     // Route through contextWindowTokens (heuristic-backed) so models without an
@@ -2232,7 +2241,7 @@ class ChatViewModel(
             )
             return
         }
-        val newLevel = if (_thinkingLevel.value.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
+        val newLevel = thinkingLevelForDisplay(if (_thinkingLevel.value.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM)
         _thinkingLevel.value = newLevel
         persistThinkingOverride(newLevel)
         appendSystemInfo(
@@ -2253,7 +2262,7 @@ class ChatViewModel(
         // caller — cap to the current model's ceiling so a stale/over-range
         // request can't persist a level the model can't reach.
         val ceiling = currentModelMaxThinkingLevel
-        val clamped = if (level.rank > ceiling.rank) ceiling else level
+        val clamped = thinkingLevelForDisplay(if (level.rank > ceiling.rank) ceiling else level)
         if (_thinkingLevel.value == clamped) return
         _thinkingLevel.value = clamped
         persistThinkingOverride(clamped)
@@ -5267,7 +5276,7 @@ class ChatViewModel(
      */
     private fun applyGroupSessionDefaults(groupId: String) {
         val group = providerRepository.group(groupId) ?: return
-        val level = group.defaultThinkingLevel ?: return
+        val level = thinkingLevelForDisplay(group.defaultThinkingLevel ?: return)
         if (_thinkingLevel.value == level) return
         _thinkingLevel.value = level
         persistThinkingOverride(level)

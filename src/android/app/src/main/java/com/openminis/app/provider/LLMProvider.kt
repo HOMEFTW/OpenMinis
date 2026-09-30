@@ -368,7 +368,7 @@ interface LLMProvider {
      */
     fun clampThinkingLevel(level: ThinkingLevel): ThinkingLevel {
         val ceiling = model.catalogMaxThinkingLevel
-        return if (level.rank > ceiling.rank) ceiling else level
+        return model.normalizeThinkingLevel(if (level.rank > ceiling.rank) ceiling else level)
     }
 }
 

@@ -30,6 +30,7 @@ object OpenAIModelsApi {
     // pill in chat is disabled and the user can't pick low/medium/high.
     fun fetchModelsOAuth(): List<LLMModel> = listOf(
         LLMModel.gpt6Astra,
+        LLMModel.gpt61Sol,
         LLMModel.gpt6Sol,
         LLMModel.gpt6Luna,
         // [T-android-thinking-level-arch] GPT-5.6 family — Codex OAuth only

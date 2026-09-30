@@ -386,7 +386,8 @@ class OpenAIProvider private constructor(
      * Responses API is used for Codex OAuth, explicit opt-in, and GPT-6
      * (tool calling with reasoning requires Responses).
      */
-    private val usesChatCompletionsAPI: Boolean get() = forceChatCompletions || (!isOAuth && !useResponsesAPI && !model.isGPT6)
+    private val usesChatCompletionsAPI: Boolean get() = !model.isGPT61Sol &&
+        (forceChatCompletions || (!isOAuth && !useResponsesAPI && !model.isGPT6))
 
     /**
      * [T-android-tool-splits-reply-fix] Chat Completions streams ONE
@@ -577,6 +578,7 @@ class OpenAIProvider private constructor(
      * unsupported on o1/o3), so an explicit value risks a 400.
      */
     private fun explicitOffEffort(): String? {
+        if (model.isGPT61Sol) return "high"
         if (model.isGPT6SolOrLuna && !isOpenRouter && !usesUnifiedReasoningEffort) return "none"
         if (isAzure) return null
         val base = basePath.lowercase()
@@ -2043,7 +2045,7 @@ class OpenAIProvider private constructor(
         // OpenAI-compatible relay would 400 on the unknown key.
         resolvedServiceTier()?.let { body.put("service_tier", it) }
 
-        if (temperature != null && !model.isGPT6Astra && !(model.isGPT6SolOrLuna && thinkingLevel.isEnabled)) {
+        if (temperature != null && !model.isGPT6Astra && !model.isGPT61Sol && !(model.isGPT6SolOrLuna && thinkingLevel.isEnabled)) {
             body.put("temperature", temperature)
         }
 
@@ -2652,7 +2654,7 @@ class OpenAIProvider private constructor(
             // only an affirmative declaration may suppress the field.
             declaresNoEffortTiers = model.declaresNoEffortTiers == true,
             // Astra always reasons; the legacy OFF setting uses its lowest valid tier.
-            level = if (model.isGPT6Astra && !level.isEnabled) ThinkingLevel.LOW else level,
+            level = if (model.isGPT6Astra && !level.isEnabled) ThinkingLevel.LOW else model.normalizeThinkingLevel(level),
             maxTokens = maxTokens,
             isOpenRouter = isOpenRouter,
             usesUnifiedReasoningEffort = usesUnifiedReasoningEffort,
@@ -3073,7 +3075,7 @@ class OpenAIProvider private constructor(
             val level = if (model.isDeepSeekFlash && !isOpenRouter && !usesUnifiedReasoningEffort)
                 LLMModel.deepSeekFlashThinkingLevel(thinkingLevel) else thinkingLevel
             mapThinkingLevelToResponsesEffort(level)?.let { clampEffortForModel(it) }
-        } else if (model.isGPT6Astra) "low" else if (model.isGPT6SolOrLuna) "none" else null
+        } else if (model.isGPT61Sol) "high" else if (model.isGPT6Astra) "low" else if (model.isGPT6SolOrLuna) "none" else null
         when {
             // [T-android-mistral-reasoning-422] Mistral rejects the reasoning
             // request parameter outright (`422 extra_forbidden body.reasoning`,

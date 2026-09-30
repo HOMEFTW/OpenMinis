@@ -967,6 +967,7 @@ internal fun ThinkingLevelPicker(
     current: ThinkingLevel,
     availableLevels: List<ThinkingLevel>,
     onSelect: (ThinkingLevel) -> Unit,
+    allowOff: Boolean = true,
 ) {
-    ThinkingLevelSlider(current, availableLevels, onSelect)
+    ThinkingLevelSlider(current, availableLevels, onSelect, allowOff)
 }

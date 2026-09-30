@@ -1,6 +1,7 @@
 package com.openminis.app.provider
 
 import com.openminis.app.data.model.LLMMessage
+import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ModelOverrides
@@ -15,11 +16,50 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class Gpt6SolLunaTest {
-    private val ids = listOf("gpt-6-sol", "gpt-6-luna")
+    private val ids = listOf("gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol")
     private val levels = listOf(ThinkingLevel.OFF, ThinkingLevel.LOW, ThinkingLevel.MEDIUM,
         ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX)
     private val efforts = listOf("none", "low", "medium", "high", "xhigh", "max")
     private val messages = listOf(LLMMessage(LLMMessage.Role.USER, "Hello"))
+
+    @Test fun sol61DefaultsToHighAndPreservesValidChoices() {
+        for (id in listOf("gpt-6.1-sol", "openai/gpt-6.1-sol-2026-09-30")) {
+            val model = LLMModel(id, id, "Custom")
+            assertEquals(ThinkingLevel.HIGH, model.normalizeThinkingLevel(ThinkingLevel.OFF))
+            val provider = OpenAIProvider("test", model)
+            assertEquals(ThinkingLevel.HIGH, provider.clampThinkingLevel(ThinkingLevel.OFF))
+            for (level in levels.drop(1)) {
+                assertEquals(level, model.normalizeThinkingLevel(level))
+                assertEquals(level, provider.clampThinkingLevel(level))
+            }
+            assertEquals("high", provider.buildResponsesAPIBody(messages, null, 1024, true)
+                .getJSONObject("reasoning").getString("effort"))
+        }
+        assertEquals(ThinkingLevel.OFF, LLMModel.gpt6Sol.normalizeThinkingLevel(ThinkingLevel.OFF))
+    }
+
+    @Test fun sol61DefaultToolRequestsUseResponsesIncludingCompatibleOAuth() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val base = server.url("/").toString().trimEnd('/')
+            val model = LLMModel.gpt61Sol
+            val tool = AgentToolDefinition("test_tool", "Test tool", emptyMap())
+            for (provider in listOf(OpenAIProvider("test", model, base),
+                OpenAIProvider.oauthOpenAICompat({ "test" }, model, base))) {
+                server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
+                ))
+                assertEquals("ok", provider.sendMessage(messages, null, 1024, tools = listOf(tool)).text)
+                val request = server.takeRequest()
+                assertEquals("/responses", request.path)
+                val body = JSONObject(request.body.readUtf8())
+                assertEquals("high", body.getJSONObject("reasoning").getString("effort"))
+                assertEquals("test_tool", body.getJSONArray("tools").getJSONObject(0).getString("name"))
+            }
+        } finally { server.shutdown() }
+    }
 
     @Test fun staleNegativeCapabilityMetadataDoesNotHideKnownModelThinking() {
         for (id in ids + "deepseek-flash") {
@@ -71,19 +111,22 @@ class Gpt6SolLunaTest {
             }
             assertNull(LLMModel("gpt-6-sol-fake", "fake", "Custom").supportsReasoning)
             assertNull(LLMModel("gpt-6-luna-fake", "fake", "Custom").reasoningEffortValues)
+            assertNull(LLMModel("gpt-6.1-sol-fake", "fake", "Custom").supportsReasoning)
+            assertFalse(LLMModel.isGPT6Id("gpt-6.1-luna"))
         } finally { server.shutdown() }
     }
 
-    @Test fun allEffortsReachBothRequestFormatsAndOffIsNoneEvenWithOAuth() {
+    @Test fun allEffortsReachBothRequestFormatsWithModelSpecificOffFallback() {
         for (id in ids) {
             val model = LLMModel(id, id, "OpenAI")
             for (provider in listOf(OpenAIProvider("test", model), OpenAIProvider(oauthTokenProvider = { "test" }, model = model))) {
                 for ((level, effort) in (levels + ThinkingLevel.ULTRA).zip(efforts + "max")) {
+                    val expected = if (model.isGPT61Sol && level == ThinkingLevel.OFF) "high" else effort
                     val chat = provider.buildRequestBody(messages, null, 1024, true, 0.7, emptyList(), thinkingLevel = level)
-                    assertEquals(effort, chat.getString("reasoning_effort"))
-                    assertEquals(level == ThinkingLevel.OFF, chat.has("temperature"))
+                    assertEquals(expected, chat.getString("reasoning_effort"))
+                    assertEquals(level == ThinkingLevel.OFF && !model.isGPT61Sol, chat.has("temperature"))
                     val responses = provider.buildResponsesAPIBody(messages, null, 1024, true, emptyList(), thinkingLevel = level)
-                    assertEquals(effort, responses.getJSONObject("reasoning").getString("effort"))
+                    assertEquals(expected, responses.getJSONObject("reasoning").getString("effort"))
                 }
             }
         }
