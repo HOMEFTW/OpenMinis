@@ -6,7 +6,11 @@ sealed class LLMStreamChunk {
     data object Started : LLMStreamChunk()
     data class Text(val text: String) : LLMStreamChunk()
     data class Usage(val usage: LLMUsage) : LLMStreamChunk()
-    data class Finished(val stopReason: String?) : LLMStreamChunk()
+    data class Finished(
+        val stopReason: String?,
+        /** Remove this turn's streamed tool previews when the provider rejects truncated calls. */
+        val discardToolCalls: Boolean = false,
+    ) : LLMStreamChunk()
 
     /** Thinking/reasoning streaming event */
     data class ThinkingDelta(val text: String) : LLMStreamChunk()
@@ -14,7 +18,7 @@ sealed class LLMStreamChunk {
     /** Opaque accumulated reasoning content (DeepSeek/Kimi/QwQ `reasoning_content` field).
      *  Unlike ThinkingDelta (real-time increments), this is the full accumulated blob
      *  echoed back on subsequent turns to preserve the model's chain of thought. */
-    data class ReasoningContent(val content: String) : LLMStreamChunk()
+    data class ReasoningContent(val content: String, val deepSeekReplay: String? = null) : LLMStreamChunk()
 
     /** Tool use streaming events */
     data class ToolUseStart(val id: String, val name: String) : LLMStreamChunk()

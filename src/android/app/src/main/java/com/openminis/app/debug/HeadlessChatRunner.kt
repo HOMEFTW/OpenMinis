@@ -2,6 +2,7 @@ package com.openminis.app.debug
 
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import com.openminis.app.MinisApp
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.ui.chat.ChatViewModel
@@ -24,23 +25,51 @@ import kotlinx.coroutines.withTimeoutOrNull
  *  - The runner caches one VM per sessionId so a follow-up `chat.prompt` on
  *    the same id reuses the same `viewModelScope` (no double-starts).
  *
- * Concurrency: [ChatViewModel.sendMessage] auto-enqueues while another run is
- * active. Each RPC invocation receives its own run id, so a second `wait=true`
- * call on the same session observes only its own terminal state.
+ * Concurrency: [ChatViewModel.sendMessage] auto-enqueues if `_isStreaming` is
+ * true, but we still serialize per-session via the cache: a second `wait=true`
+ * on the same session can collect the same `isStreaming` Flow.
  */
 internal object HeadlessChatRunner {
 
-    /** sessionId → ViewModelProvider that owns its single ChatViewModel. */
-    private val providers = mutableMapOf<String, ViewModelProvider>()
+    /**
+     * A cached provider together with the store it was built on, so the cache
+     * can be checked against [ChatViewModelStore] before being trusted.
+     */
+    private class Cached(val store: ViewModelStore, val provider: ViewModelProvider)
+
+    /** sessionId → provider that owns its single ChatViewModel. */
+    private val providers = mutableMapOf<String, Cached>()
 
     private fun app(context: Context): MinisApp =
         context.applicationContext as? MinisApp
             ?: throw RPCException(-32000, "MinisApp not initialized")
 
+    /**
+     * [T-android-vm-evict-orphan] The cached provider for [sessionId], only
+     * while its store is still the one [ChatViewModelStore] holds.
+     *
+     * Eviction (LRU trim, memory pressure) clears a store without telling
+     * this runner — only session delete calls [forget]. A provider kept past
+     * that point would build a fresh ChatViewModel inside the cleared store,
+     * which the shared cache no longer tracks: never evicted, and a second
+     * instance beside the one ChatScreen binds to. Drop the entry instead so
+     * the next lookup goes back through `ownerFor` and shares the live store.
+     */
     @Synchronized
-    private fun providerFor(context: Context, sessionId: String): ViewModelProvider {
-        val cached = providers[sessionId]
-        if (cached != null) return cached
+    private fun liveCached(sessionId: String): Cached? {
+        val cached = providers[sessionId] ?: return null
+        if (ChatViewModelStore.isLiveStore(sessionId, cached.store)) return cached
+        providers.remove(sessionId)
+        return null
+    }
+
+    @Synchronized
+    private fun providerFor(
+        context: Context,
+        sessionId: String,
+        kind: ChatViewModelStore.PoolKind = ChatViewModelStore.PoolKind.NORMAL,
+    ): ViewModelProvider {
+        liveCached(sessionId)?.let { return it.provider }
         val app = app(context)
         // Share the process-wide ChatViewModelStore so the in-flight VM (with
         // its live streamJob + _isStreaming) is the same instance the UI's
@@ -48,7 +77,7 @@ internal object HeadlessChatRunner {
         // private ViewModelStore here split headless and UI into two VMs, so
         // "run now" started streaming on the headless VM while the UI's VM
         // saw only a static snapshot — no thinking indicator, no live text.
-        val owner = ChatViewModelStore.ownerFor(sessionId)
+        val owner = ChatViewModelStore.ownerFor(sessionId, kind)
         val provider = ViewModelProvider(
             owner,
             ChatViewModel.factory(
@@ -61,12 +90,47 @@ internal object HeadlessChatRunner {
                 mcpRepository = app.mcpRepository,
             ),
         )
-        providers[sessionId] = provider
+        providers[sessionId] = Cached(owner.viewModelStore, provider)
         return provider
     }
 
-    private fun viewModel(context: Context, sessionId: String): ChatViewModel =
-        providerFor(context, sessionId)[ChatViewModel::class.java]
+    private fun viewModel(
+        context: Context,
+        sessionId: String,
+        kind: ChatViewModelStore.PoolKind = ChatViewModelStore.PoolKind.NORMAL,
+    ): ChatViewModel = providerFor(context, sessionId, kind)[ChatViewModel::class.java]
+
+    /** [T-p1-delegate-task] The process-wide ViewModel for [sessionId] — the
+     *  same instance ChatScreen binds to. Used by the helper runner (child
+     *  vm) and the helper sheet (read-only mirror). */
+    /**
+     * [T-android-vm-store-dual-pool] [kind] classifies the session's cache pool
+     * on FIRST creation only (ChatViewModelStore.poolKinds is sticky).
+     *
+     * It defaults to NORMAL because this object is NOT child-only: `prompt()`
+     * drives ordinary sessions for the debug RPCs, and ScheduledAgentRunner
+     * acquires a PARENT session's view model through here. Only the two call
+     * sites that actually construct a sub agent pass CHILD. Tagging inside this
+     * function instead was measured to misclassify all 14 plain sessions of the
+     * multi_session baseline scenario as CHILD.
+     */
+    fun viewModelFor(
+        context: Context,
+        sessionId: String,
+        kind: ChatViewModelStore.PoolKind = ChatViewModelStore.PoolKind.NORMAL,
+    ): ChatViewModel = viewModel(context, sessionId, kind)
+
+    /**
+     * [T-sub-agents-v1] The live view model for [sessionId], or null.
+     *
+     * Read-only counterpart to [viewModelFor] for callers that must not CREATE
+     * one: ViewModelProvider is not thread-safe, and constructing off the main
+     * thread can hand back a second instance for the same session, splitting
+     * its state. Callers that only want to observe a run that is already going
+     * use this.
+     */
+    fun existingViewModel(sessionId: String): ChatViewModel? =
+        com.openminis.app.ui.chat.ChatViewModelStore.existing(sessionId)
 
     /**
      * Ensure a session exists in the DB before binding a ViewModel. Mirrors
@@ -153,7 +217,7 @@ internal object HeadlessChatRunner {
         defer: () -> Unit,
         claim: suspend () -> String?,
     ): SessionMailRun? =
-        withContext(Dispatchers.Main) {
+        ChatViewModelStore.holdingForSend(sessionId) { withContext(Dispatchers.Main) {
             val vm = viewModel(context, sessionId)
             if (!vm.canAcceptSessionMail()) return@withContext null
             // Let the existing provider resolver settle after loading a cold session.
@@ -167,7 +231,7 @@ internal object HeadlessChatRunner {
             val runId = vm.allocateRunId()
             vm.startSessionMailForRun(text, runId)
             SessionMailRun(vm, runId)
-        }
+        } }
 
     suspend fun awaitSessionMail(context: Context, sessionId: String, run: SessionMailRun): PromptResult =
         withContext(Dispatchers.Main) {
@@ -191,7 +255,8 @@ internal object HeadlessChatRunner {
         thinkingLevel: ThinkingLevel? = null,
         wait: Boolean,
         timeoutMs: Long,
-    ): PromptResult = withContext(Dispatchers.Main) {
+        programmatic: Boolean = false,
+    ): PromptResult = ChatViewModelStore.holdingForSend(sessionId) { withContext(Dispatchers.Main) {
         val vm = viewModel(context, sessionId)
         val runId = vm.allocateRunId()
         if (thinkingLevel != null) {
@@ -213,9 +278,9 @@ internal object HeadlessChatRunner {
             )
         }
         for (att in attachments) vm.addAttachment(att)
-        vm.startPromptForRun(text, runId)
+        vm.startPromptForRun(text, runId, programmatic = programmatic)
         awaitResult(vm, runId, wait, timeoutMs)
-    }
+    } }
 
     suspend fun retry(
         context: Context,
@@ -223,7 +288,7 @@ internal object HeadlessChatRunner {
         messageId: String?,
         wait: Boolean,
         timeoutMs: Long,
-    ): PromptResult = withContext(Dispatchers.Main) {
+    ): PromptResult = ChatViewModelStore.holdingForSend(sessionId) { withContext(Dispatchers.Main) {
         val app = app(context)
         val vm = viewModel(context, sessionId)
         val runId = vm.allocateRunId()
@@ -266,7 +331,7 @@ internal object HeadlessChatRunner {
             deletedMessageCount = deletedCount,
             retriedMessageId = targetMsgId,
         )
-    }
+    } }
 
     /**
      * [T-android-rerun-from-tool-block-position] Drive
@@ -284,7 +349,7 @@ internal object HeadlessChatRunner {
         blockId: String,
         wait: Boolean,
         timeoutMs: Long,
-    ): PromptResult = withContext(Dispatchers.Main) {
+    ): PromptResult = ChatViewModelStore.holdingForSend(sessionId) { withContext(Dispatchers.Main) {
         val app = app(context)
         val vm = viewModel(context, sessionId)
         val runId = vm.allocateRunId()
@@ -331,7 +396,7 @@ internal object HeadlessChatRunner {
         )
         val deletedCount = (before - app.chatRepository.dao.loadMessages(sessionId).size).coerceAtLeast(0)
         result.copy(deletedMessageCount = deletedCount)
-    }
+    } }
 
     private suspend fun awaitResult(
         vm: ChatViewModel,
@@ -503,8 +568,8 @@ internal object HeadlessChatRunner {
     }
 
     suspend fun cancel(context: Context, sessionId: String): Boolean = withContext(Dispatchers.Main) {
-        val cached = providers[sessionId] ?: return@withContext false
-        val vm = cached[ChatViewModel::class.java]
+        val cached = liveCached(sessionId) ?: return@withContext false
+        val vm = cached.provider[ChatViewModel::class.java]
         val wasRunning = vm.isStreaming.value
         if (wasRunning) vm.cancelStream()
         wasRunning

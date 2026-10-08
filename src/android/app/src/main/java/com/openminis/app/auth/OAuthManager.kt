@@ -25,6 +25,14 @@ abstract class OAuthManager(
     companion object {
         private const val TAG = "OAuthManager"
         private const val KEY_MANUAL_BEARER = "manual_bearer_token"
+        private val credentialLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        private val refreshLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+        /** OAuth `error` codes that mean the refresh token itself is dead. */
+        val DEFAULT_FATAL_REFRESH_CODES = setOf(
+            "invalid_grant", "invalid_token", "invalid_request",
+            "unauthorized_client", "refresh_token_reused",
+        )
 
         /** Shared OkHttp client for all OAuth HTTP requests (respects system proxy). */
         internal val httpClient = OkHttpClient.Builder()
@@ -35,7 +43,8 @@ abstract class OAuthManager(
         /**
          * [T-android-oauth-log-redaction] Make an HTTP body safe to log:
          * masks the VALUES of known credential fields (access_token,
-         * refresh_token, id_token, api_key/key, client_secret, device_code)
+         * refresh_token, id_token, api_key/key, client_secret, device_code,
+         * user_code, code_verifier)
          * and truncates to a diagnostic-sized prefix. OAuth failure bodies
          * are usually just {"error":"invalid_grant"} — but some IdPs echo
          * request material, and a malformed SUCCESS body reaching an error
@@ -44,7 +53,8 @@ abstract class OAuthManager(
          */
         fun sanitizeBody(body: String, maxLen: Int = 300): String {
             val masked = Regex(
-                "\"(access_token|refresh_token|id_token|api_key|key|client_secret|device_code)\"\\s*:\\s*\"[^\"]*\"",
+                // [T-android-oauth-log-redact] + user_code / code_verifier (not bare "code": error bodies use it for error codes).
+                "\"(access_token|refresh_token|id_token|api_key|key|client_secret|device_code|user_code|code_verifier)\"\\s*:\\s*\"[^\"]*\"",
             ).replace(body) { m -> "\"${m.groupValues[1]}\":\"***\"" }
             return if (masked.length <= maxLen) masked else masked.take(maxLen) + "…(${masked.length} chars)"
         }
@@ -72,6 +82,52 @@ abstract class OAuthManager(
             return !prefs.getString("oauth_${KEY_MANUAL_BEARER}_$instanceId", null).isNullOrEmpty()
         }
 
+        /**
+         * [T-oauth-keep-credentials] Whether this instance's stored OAuth token
+         * bundle is the one a refresh was rejected with. Automatic paths never
+         * delete credentials any more; they set this mark instead, the UI shows
+         * the instance red, and routing treats it as uncredentialed. Only an
+         * explicit Sign Out deletes the bundle.
+         *
+         * The mark is a SHA-256 fingerprint of the rejected bundle, never the
+         * credential, and it only applies while that exact bundle is stored, so
+         * a new login (or a restored backup) lapses it with no explicit clear.
+         * A stored manual bearer overrides it: that credential is still usable.
+         * Static for the same reason as [hasStoredCredential].
+         */
+        fun needsReauth(context: Context, instanceId: String): Boolean {
+            val prefs = com.openminis.app.util.EncryptedPrefsFactory
+                .safeCreate(context, "oauth_prefs")
+            return needsReauth(prefs, instanceId)
+        }
+
+        private fun needsReauth(prefs: android.content.SharedPreferences, instanceId: String): Boolean {
+            val mark = prefs.getString(needsReauthKey(instanceId), null) ?: return false
+            val blob = prefs.getString("oauth_tokens_$instanceId", null) ?: return false
+            if (tokenFingerprint(blob) != mark) return false
+            // A manual bearer never refreshes and stands in for the bundle.
+            return prefs.getString("oauth_${KEY_MANUAL_BEARER}_$instanceId", null).isNullOrEmpty()
+        }
+
+        private fun needsReauthKey(instanceId: String) = "oauth_needs_reauth_$instanceId"
+
+        private fun tokenFingerprint(blob: String): String =
+            MessageDigest.getInstance("SHA-256").digest(blob.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+
+        /**
+         * [T-oauth-keep-credentials] Structured "the token endpoint rejected
+         * this refresh token" test, iOS `OAuthRefreshErrorClassifier` parity:
+         * an auth-rejection status, or an exact OAuth `error` code from the
+         * JSON body. No substring matching — a body that merely mentions
+         * `refresh_token` (e.g. `refresh_token_expiry_ms`) is not a rejection.
+         */
+        fun isRefreshRejected(status: Int, body: String, fatalErrorCodes: Set<String>): Boolean {
+            if (status == 400 || status == 401 || status == 403) return true
+            val code = try { JSONObject(body).optString("error", "") } catch (_: Exception) { "" }
+            return code.lowercase() in fatalErrorCodes
+        }
+
         /** Create the appropriate OAuthManager for a provider instance. */
         fun forInstance(context: Context, instance: com.openminis.app.data.model.ProviderInstance): OAuthManager? {
             return when (instance.providerType) {
@@ -79,6 +135,7 @@ abstract class OAuthManager(
                 com.openminis.app.data.model.ProviderType.openAI -> OpenAIOAuthManager(context, instance.id)
                 com.openminis.app.data.model.ProviderType.xAI -> XAIOAuthManager(context, instance.id)
                 com.openminis.app.data.model.ProviderType.kimiCode -> KimiOAuthManager(context, instance.id)
+                com.openminis.app.data.model.ProviderType.githubCopilot -> CopilotOAuthManager(context, instance.id)
                 else -> null
             }
         }
@@ -169,6 +226,7 @@ abstract class OAuthManager(
                 return@OAuthCallbackServer
             }
             kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                OAuthForegroundGate.awaitForeground(TAG)
                 val success = exchangeCode(code)
                 withContext(Dispatchers.Main) { onComplete(success) }
             }
@@ -249,6 +307,9 @@ abstract class OAuthManager(
 
             if (responseCode !in 200..299) {
                 Log.e(TAG, "Token refresh failed: $responseCode")
+                if (isRefreshRejected(responseCode, responseBody, DEFAULT_FATAL_REFRESH_CODES)) {
+                    markNeedsReauth(refreshToken)
+                }
                 return@withContext false
             }
 
@@ -257,8 +318,7 @@ abstract class OAuthManager(
             if (!json.has("refresh_token")) {
                 json.put("refresh_token", refreshToken)
             }
-            saveTokens(json)
-            true
+            saveRefreshedTokens(refreshToken, json)
         } catch (e: Exception) {
             Log.e(TAG, "Token refresh error", e)
             false
@@ -266,9 +326,16 @@ abstract class OAuthManager(
     }
 
     open suspend fun validAccessToken(): String? {
+        val lock = refreshLocks.getOrPut(instanceId) { kotlinx.coroutines.sync.Mutex() }
+        lock.lock()
+        try { return validAccessTokenLocked() } finally { lock.unlock() }
+    }
+
+    private suspend fun validAccessTokenLocked(): String? {
         // Manual bearer token takes precedence — user wants a static token,
         // no refresh attempted. Mirrors iOS behavior for custom proxy providers.
         loadManualBearerToken()?.takeIf { it.isNotEmpty() }?.let { return it }
+        if (needsReauth()) return null
 
         val stored = loadStoredTokens() ?: return null
         val token = stored.optString("access_token", "").ifEmpty { return null }
@@ -277,40 +344,79 @@ abstract class OAuthManager(
 
         // Refresh if expires within 4 hours
         if (expireAt > 0 && (expireAt - now) < 4 * 3600 * 1000) {
-            if (refreshToken()) {
-                return loadStoredTokens()?.optString("access_token")
-            }
-            // Refresh failed — if token is already expired, clear credentials
-            if (expireAt > 0 && now >= expireAt) {
-                Log.w(TAG, "Token expired and refresh failed — clearing credentials")
-                logout()
-                return null
-            }
+            // Refresh failed and the token is already expired: nothing usable
+            // to return. [T-oauth-keep-credentials] Credentials are kept — a
+            // rejected refresh was marked inside refreshToken(); a transient
+            // failure (network, 5xx) must never cost the user their login.
+            refreshToken()
+            return currentUsableAccessToken()
         }
         return token
     }
 
-    fun isAuthenticated(): Boolean {
+    /** Whether this instance has stored credentials, including those requiring re-login. */
+    open fun isAuthenticated(): Boolean {
         if (loadManualBearerToken()?.isNotEmpty() == true) return true
         val stored = loadStoredTokens() ?: return false
         return stored.optString("access_token", "").isNotEmpty()
     }
 
-    fun logout() {
+    protected val credentialLock: Any get() = credentialLocks.getOrPut(instanceId) { Any() }
+
+    protected fun currentUsableAccessToken(): String? = synchronized(credentialLock) {
+        loadManualBearerToken()?.takeIf { it.isNotBlank() }?.let { return@synchronized it }
+        if (needsReauth()) return@synchronized null
+        val current = loadStoredTokens() ?: return@synchronized null
+        val expiry = current.optLong("expire_at", 0)
+        if (expiry > 0 && System.currentTimeMillis() >= expiry) return@synchronized null
+        current.optString("access_token", "").takeIf { it.isNotBlank() }
+    }
+
+    open fun logout() = synchronized(credentialLock) {
         getEncryptedPrefs().edit()
             .remove("oauth_tokens_$instanceId")
             .remove("oauth_${KEY_MANUAL_BEARER}_$instanceId")
+            .remove(needsReauthKey(instanceId))
             .apply()
     }
 
+    /** See the companion [needsReauth]. */
+    fun needsReauth(): Boolean = needsReauth(getEncryptedPrefs(), instanceId)
+
+    /**
+     * [T-oauth-keep-credentials] Called instead of [logout] when the token
+     * endpoint rejects [staleRefreshToken]. Compare-before-mark: when the
+     * stored bundle no longer carries that refresh token, a concurrent refresh
+     * already rotated it and this rejection is stale — marking would flag a
+     * perfectly good fresh login.
+     */
+    protected fun markNeedsReauth(staleRefreshToken: String): Unit = synchronized(credentialLock) {
+        val blob = loadOAuthString("tokens") ?: return
+        val current = try { JSONObject(blob).optString("refresh_token", "") } catch (_: Exception) { "" }
+        if (current != staleRefreshToken) {
+            Log.w(TAG, "Stale refresh rejection ignored — token already rotated; not marking")
+            return
+        }
+        getEncryptedPrefs().edit()
+            .putString(needsReauthKey(instanceId), tokenFingerprint(blob))
+            .apply()
+        Log.w(TAG, "Refresh token rejected — marked for re-login, credentials kept")
+        Unit
+    }
+
+    private fun clearNeedsReauth() {
+        getEncryptedPrefs().edit().remove(needsReauthKey(instanceId)).apply()
+    }
+
     // Token storage
-    private fun saveTokens(json: JSONObject) {
+    private fun saveTokens(json: JSONObject) = synchronized(credentialLock) {
         val expiresIn = json.optLong("expires_in", 0)
         if (expiresIn > 0) {
             json.put("expire_at", System.currentTimeMillis() + expiresIn * 1000)
         }
         getEncryptedPrefs().edit()
             .putString("oauth_tokens_$instanceId", json.toString())
+            .remove(needsReauthKey(instanceId))
             .apply()
     }
 
@@ -319,12 +425,23 @@ abstract class OAuthManager(
         return try { JSONObject(str) } catch (_: Exception) { null }
     }
 
-    protected fun saveOAuthString(key: String, value: String) {
+    protected fun saveOAuthString(key: String, value: String) = synchronized(credentialLock) {
         getEncryptedPrefs().edit().putString("oauth_${key}_$instanceId", value).apply()
+        // A new token bundle supersedes any needs-re-login mark.
+        if (key == "tokens") clearNeedsReauth()
     }
 
     protected fun loadOAuthString(key: String): String? {
         return getEncryptedPrefs().getString("oauth_${key}_$instanceId", null)
+    }
+
+    /** A refresh that lost a race to sign-in, sign-out or another refresh must not overwrite it. */
+    protected fun saveRefreshedTokens(expectedRefreshToken: String, json: JSONObject): Boolean = synchronized(credentialLock) {
+        val current = loadStoredTokens() ?: return@synchronized false
+        if (current.optString("refresh_token", "") != expectedRefreshToken) return@synchronized false
+        if (json.optString("access_token", "").isBlank()) return@synchronized false
+        saveTokens(json)
+        true
     }
 
     /**
@@ -357,17 +474,18 @@ abstract class OAuthManager(
 
     /** The structured OAuth-login token blob as a JSON string, or null if the
      *  instance never completed an OAuth login. */
-    fun exportStoredTokensJson(): String? = loadStoredTokens()?.toString()
+    open fun exportStoredTokensJson(): String? = loadStoredTokens()?.toString()
 
     /** Restore a structured OAuth-login token blob from [json] (as produced by
      *  [exportStoredTokensJson]). Written verbatim so the absolute `expire_at`
      *  is preserved — unlike [saveTokens] this does NOT recompute expiry from a
      *  relative `expires_in`, which would be wrong at import time. */
-    fun importStoredTokensJson(json: String) {
+    open fun importStoredTokensJson(json: String) = synchronized(credentialLock) {
         val obj = try { JSONObject(json) } catch (_: Exception) { return }
         val normalized = normalizeCamelToSnake(obj)
         getEncryptedPrefs().edit()
             .putString("oauth_tokens_$instanceId", normalized.toString())
+            .remove(needsReauthKey(instanceId))
             .apply()
     }
 
@@ -417,7 +535,7 @@ abstract class OAuthManager(
     // factory; Samsung One UI / Android 16 can invalidate the master
     // key under the user, and OAuth callers can't afford a crash here
     // since some of them run in the background refresh path.
-    private fun getEncryptedPrefs() =
+    protected open fun getEncryptedPrefs(): android.content.SharedPreferences =
         com.openminis.app.util.EncryptedPrefsFactory.safeCreate(context, "oauth_prefs")
 
     protected open suspend fun onTokensReceived(json: JSONObject) {}

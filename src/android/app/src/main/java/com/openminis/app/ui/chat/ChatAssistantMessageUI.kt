@@ -95,6 +95,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
@@ -640,7 +641,10 @@ internal fun ToolCallPill(
     val isCancelled = block.toolStatus == ToolBlockStatus.CANCELLED
 
     val toolAccent = toolAccentColor(block.toolName)
-    val toolIcon = toolIconFor(block.toolName)
+    val controlSummary = if (com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(block.toolName)) {
+        helperControlSummary(block)
+    } else null
+    val toolIcon = if (controlSummary != null) Icons.Default.Tune else toolIconFor(block.toolName)
 
     // Icon color: tool color when running/done, error/cancel colors on failure
     val iconTint = when {
@@ -755,7 +759,7 @@ internal fun ToolCallPill(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = block.toolTitle.ifEmpty { block.toolName },
+                    text = controlSummary ?: block.toolTitle.ifEmpty { block.toolName },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,

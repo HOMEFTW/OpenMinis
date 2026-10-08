@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -106,7 +106,7 @@ fun ScheduledTaskRunsScreen(
             modifier = Modifier.fillMaxSize().padding(padding),
             contentPadding = PaddingValues(vertical = 8.dp),
         ) {
-            items(runs, key = { it.firedAt }) { run ->
+            itemsIndexed(runs, key = { index, run -> run.executionId ?: "${run.firedAt}:$index" }) { _, run ->
                 RunRow(run = run, onOpenSession = onOpenSession)
             }
         }

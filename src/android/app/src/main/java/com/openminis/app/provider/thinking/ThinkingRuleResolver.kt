@@ -42,6 +42,7 @@ data class ThinkingResolveContext(
     val usesUnifiedReasoningEffort: Boolean,
     val isMistral: Boolean,
     val isDashScope: Boolean,
+    val isCerebras: Boolean = false,
     /**
      * [OpenMinis#163] Endpoint is xAI's own API (api.x.ai), not a relay that
      * merely serves grok-named models. Scopes the empty-tier skip to the vendor
@@ -156,6 +157,16 @@ object ThinkingRuleResolver {
             )
         }
 
+        if (ctx.isCerebras) {
+            add(ThinkingRule(
+                kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
+                scope = ThinkingRule.Scope.AllModels,
+                wireFormat = ThinkingWireFormat.ReasoningEffort(ctx.offEffort),
+                reasoningEcho = ReasoningEchoPolicy("reasoning_content", ReasoningEchoPolicy.Timing.NEVER),
+                label = "cerebras-official",
+            ))
+        }
+
         // OpenRouter — nested `reasoning:{effort}`, OMIT when off so forced-reasoning
         // backends don't reject `effort:"none"`.
         if (ctx.isOpenRouter) {
@@ -203,6 +214,15 @@ object ThinkingRuleResolver {
             ThinkingRule(
                 kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
                 scope = ThinkingRule.Scope.ModelPattern("gpt-5*"),
+                wireFormat = ThinkingWireFormat.ReasoningEffort(ctx.offEffort),
+                label = "openai-native",
+            ),
+        )
+
+        add(
+            ThinkingRule(
+                kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
+                scope = ThinkingRule.Scope.ModelPattern("gpt-6*"),
                 wireFormat = ThinkingWireFormat.ReasoningEffort(ctx.offEffort),
                 label = "openai-native",
             ),
@@ -333,6 +353,23 @@ object ThinkingRuleResolver {
      * branch of the pre-refactor chain exactly — including its guards, which are the part
      * that carries the field evidence.
      */
+    private val RESERVED_ROOT_KEYS = setOf(
+        "messages", "model", "stream", "stream_options", "tools", "tool_choice",
+        "n", "functions", "function_call", "response_format",
+    )
+
+    /** A thinking rule may write a vendor knob, never replace the request envelope. */
+    private fun setValueAtPath(body: JSONObject, path: String, value: Any): Boolean {
+        val parts = path.split(".").map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.isEmpty() || parts.first().lowercase() in RESERVED_ROOT_KEYS) return false
+        var cursor = body
+        for (segment in parts.dropLast(1)) {
+            cursor = cursor.optJSONObject(segment) ?: JSONObject().also { cursor.put(segment, it) }
+        }
+        cursor.put(parts.last(), value)
+        return true
+    }
+
     private fun emit(
         format: ThinkingWireFormat,
         ctx: ThinkingResolveContext,
@@ -356,6 +393,10 @@ object ThinkingRuleResolver {
             }
 
             is ThinkingWireFormat.ReasoningEffort -> {
+                if (ctx.isXAI && !ctx.usesUnifiedReasoningEffort &&
+                    ctx.declaresNoEffortTiers && ctx.declaredEffortValues.isNullOrEmpty()) {
+                    return null to null
+                }
                 val isOpenAINative = lid.startsWith("o") || lid.startsWith("gpt-5") || LLMModel.isGPT6Id(lid)
                 if (!ctx.level.isEnabled) {
                     // OFF is a separate dispatch on Android, reproduced verbatim from the
@@ -506,6 +547,24 @@ object ThinkingRuleResolver {
                     },
                 )
                 null to null
+            }
+
+            is ThinkingWireFormat.CustomPath -> {
+                val value = if (ctx.level.isEnabled) {
+                    format.values[ctx.level] ?: format.values[ThinkingLevel.HIGH]
+                } else format.offValue
+                if (value == null || !setValueAtPath(body, format.path, value)) return null to null
+                value to value
+            }
+
+            is ThinkingWireFormat.BooleanToggle -> {
+                if (!setValueAtPath(body, format.path, ctx.level.isEnabled)) return null to null
+                ctx.level.isEnabled.toString() to ctx.level.isEnabled.toString()
+            }
+
+            is ThinkingWireFormat.ExtraBodyToggle -> {
+                if (!setValueAtPath(body, format.path, ctx.level.isEnabled)) return null to null
+                ctx.level.isEnabled.toString() to ctx.level.isEnabled.toString()
             }
 
             else -> {

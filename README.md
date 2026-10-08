@@ -3,30 +3,53 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Android](https://img.shields.io/badge/Platform-Android-green.svg)](https://github.com/HOMEFTW/OpenMinis/releases)
 
-基于 [OpenMinis/OpenMinis](https://github.com/OpenMinis/OpenMinis) 的个人 fork，专注 **Android 模型接入、图片生成、上下文管理、会话通信和任务可靠性**。
+基于 [OpenMinis/OpenMinis](https://github.com/OpenMinis/OpenMinis) 的个人 fork，专注 **Android 模型接入、上下文管理、子代理、会话通信与个性化聊天界面**。
 
 OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手机上使用 Linux 沙箱、文件工作区、浏览器、技能和记忆。本 fork 保留原项目架构，仅增加 Android 端改动；它不是上游官方发行版。
 
-**[下载 Android 1.14 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.14/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.14) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+**[下载 Android 1.15 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.15/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.15) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
 
-当前安装包更新于 **2026-09-18**，对应源码提交 [`070e507`](https://github.com/HOMEFTW/OpenMinis/tree/070e5071fffcb0e4fd63d3b2761c64843df3f6f4)，包含会话通信和菜单图标更新。`1.14` 标签仍保留首发提交，查看当前 APK 的源码请使用此提交链接。
+**1.15 · 2026-10-08**：新增 DeepSeek 官方 API Key 独立接入和随模型切换的 AI 背景，整合此前 Android 子代理、定时任务、浏览器及备份更新。源码以 [1.15 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.15) 为准。
+
+## AI 对话背景
+
+DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型或自动回退时同步切换。图片在输入框上方完整缩放显示，避免人物脚部被遮挡。
+
+<table>
+  <tr><th>DeepSeek</th><th>GPT</th><th>Claude</th></tr>
+  <tr>
+    <td><img src="src/android/app/src/main/res/drawable-nodpi/chat_wallpaper_deepseek.webp" width="220" alt="DeepSeek 鲸鱼娘背景素材"></td>
+    <td><img src="src/android/app/src/main/res/drawable-nodpi/chat_wallpaper_gpt.webp" width="220" alt="GPT 白发龙娘背景素材"></td>
+    <td><img src="src/android/app/src/main/res/drawable-nodpi/chat_wallpaper_claude.webp" width="220" alt="Claude 橙发书卷娘背景素材"></td>
+  </tr>
+</table>
+
+上图为背景素材预览。背景默认开启，默认透明度 **75%**（0% 完全显示，100% 完全透明）。
+
+- **设置 → 外观 → AI 对话背景**：调整默认透明度。
+- **对话右上角菜单 → 对话背景 / 背景透明度**：开关当前背景、单独调整透明度或恢复默认。
+- 未识别的模型使用纯色背景；按实际模型 ID 识别，不按兼容接口或服务商昵称猜测。
+
+[素材来源与授权说明](src/android/app/src/main/assets/chat_wallpapers/SOURCES.txt)
 
 ## 本 fork 做了什么
 
 | 方面 | 改动 |
 | --- | --- |
-| 模型接入 | 增加 `gpt-6-astra`、`gpt-image-2.5-flare` 和 `gpt-image-2.5-sunburst` 的目录与请求适配。Astra 使用 Responses API，思考参数按模型支持范围发送。 |
+| 模型接入 | 支持 GPT-6 Astra / Sol / Luna、GPT-6.1 Sol 及 Image 2.5；思考参数按模型支持范围发送，GPT-6.1 Sol 默认 high。 |
+| DeepSeek 直连 | 独立 DeepSeek 服务商与 API Key 入口，依据官方 Harness 接口实现请求、思考回放、工具调用和流式处理，不经过 OpenAIProvider 或 AnthropicProvider。 |
+| 子代理与调度 | 子代理定义、模型选择、父子会话、后台进度、引导/停止/恢复及结果回调；定时任务支持即时执行、倒计时和忙碌会话投递。 |
 | 输入区 | 模型与思考强度入口移入输入框，使用可搜索模型列表和分档滑块；保留模型分组、当前项勾选及详细选择器。 |
 | 上下文管理 | 独立设置页提供 64K / 105K / 272K / 1M 预设及 8K–1M 自定义上限；结合全局、模型与模型组限制，按服务端输入用量校准预算，计入 Anthropic 缓存 Token。 |
 | 会话通信 | 支持手动文本转发及 AI 主动请求，提供接收授权、持久化排队、关联回复和防循环保护；不自动合并两边历史。 |
 | 生图结果 | 修复已返回图片却只保存提示词的问题。JSON 输出包含 `media_files` 清单，多图全部保存；无图片、下载失败及写入失败明确报错。 |
-| 图片预算 | 单张图片 5 MB、单次请求 25 MB；压缩或移除超限图片，防止旧图片字段回退绕过限制。 |
+| 图片预算 | 单图 5 MiB、单次请求图片预算 100 MiB；校验编码与 MIME，按需加载历史图片，超预算时保留原附件。服务商自身限制仍适用。 |
 | 会话隔离 | 输入 JSON、系统文件、参考图及输出按调用会话解析，避免并行任务读写其他会话目录。 |
 | 任务结果 | 区分本次运行的成功、失败、取消、超时和预算停止；排队批次分别记录，定时任务失败也写入历史。 |
 | 凭据与日志 | 加密存储失败时保留原数据，使用有提示的进程内临时存储；日志和分享副本脱敏。 |
 | 终端显示 | 修复回车覆盖、ANSI 和 OSC 序列处理，保留合法 `null`、空白和文本。 |
 | 启动与草稿 | 修复重复会话列表，恢复最后查看的对话；持久保存草稿并提供草稿箱。 |
-| 上游精选 | 加入 WebView 故障处理、启动闹钟重注册、卸载读回保护、本地备份保存/分享、MCP 测试、免密保存及用量筛选。详见 [审查记录](docs/android-upstream-pr-review.md)。 |
+| 上游同步 | 同步公开 Android 源码中的模型刷新、浏览器生命周期、语音重试、子会话备份、存储清理及 PRoot 沙箱更新，保留本 fork 的上下文、图片预算与会话通信能力。详见 [同步记录](docs/superpowers/plans/2026-10-08-remaining-sync.md)。 |
 | 日常使用 | 新增任务中心、跨会话作品库、保留原历史的编辑分支、分类错误建议、Markdown 导出和备份预览。 |
 | 任务工具 | 新增任务成果列表、轮数预算、上限及重试提醒，以及服务商实际调用自检。 |
 
@@ -34,8 +57,10 @@ OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手�
 
 1. 从 [Releases](https://github.com/HOMEFTW/OpenMinis/releases) 下载 APK。当前构建面向 **Android 8.0+、ARM64**，使用调试签名；不是上游官方发行版，尚未完成真机验收。
 2. 在服务商设置中填写自己的接口地址和凭据，刷新模型列表。可用模型取决于服务商和账号权限；项目不附带 API Key 或模型额度。
-3. 输入框内点击模型名切换模型，点击思考强度打开滑块。滑块只提供当前模型允许的档位；Astra 当前映射为 `low / medium / high / xhigh / max`，旧 `ultra` 偏好兼容映射为 `max`，“关闭”映射为 `low`。
+3. 输入框内点击模型名切换模型，点击思考强度打开滑块。滑块只提供当前模型允许的档位；服务商自定义模型能力也会参与判断。
 4. 图片模型通常作为 Agent 工具使用：在模型分组设置中开放给 Agent，再让文本模型调用 `minis-model-use`。
+
+DeepSeek 官方 Key：添加服务商时选择 **DeepSeek** 并填写密钥。旧兼容服务商配置保持不变，不会自动迁移。此入口使用官方 Harness 同款 `https://api.deepseek.com/anthropic/v1/messages` 与 `x-api-key`，由独立 DeepSeek 实现处理；不是另造私有协议。详见 [接入与验证记录](docs/superpowers/plans/2026-10-08-deepseek-native.md)。
 
 新增入口：
 
@@ -88,13 +113,9 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
-2026-09-18 的本机 Android 验证：通过项目构建脚本运行 **153 个测试类、1385 项 JVM 单元测试**，0 失败、0 错误、0 跳过，包含 11 项新增会话通信测试；最终菜单图标调整后再次构建 debug APK 成功，差异格式检查通过。
+2026-10-08 本机验证：通过项目构建脚本运行 **2304 项 JVM 单元测试**，2302 通过、0 失败、0 错误、2 跳过。跳过项为 Windows 不支持的 POSIX 目录权限测试；背景功能的 24 项测试通过。APK 构建及 v2 签名校验通过。
 
-当前 Release 附件的 SHA-256 已与本地构建核对一致：
-
-```text
-E28A1FF508AF3057145BE4F533B677DE20C549C68C4D28B6A8DEDD7A56EB8F08
-```
+安装包 SHA-256 见 [1.15 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.15) 附带的校验文件。
 
 历史设备测试记录：分支功能的设备测试曾单独编译通过；整套既有设备测试曾因过期的 `mountedSessionId` 引用无法编译，本轮未重新验证该问题。
 

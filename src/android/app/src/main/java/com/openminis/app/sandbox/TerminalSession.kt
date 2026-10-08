@@ -139,7 +139,7 @@ class TerminalSession(private val context: Context) {
                     }
                 }
 
-                val cmdList = buildInteractiveCommand()
+                val cmdList = buildInteractiveCommand(sessionId)
                 val cmd = cmdList.first()
                 val argv = cmdList.toTypedArray()
 
@@ -188,6 +188,14 @@ class TerminalSession(private val context: Context) {
                 if (sessionId != null) {
                     kotlinx.coroutines.delay(300)
                     writeInput("cd /var/minis && clear\n".toByteArray())
+                }
+                // [T-android-session-private-mounts] Say which files this
+                // terminal sees. Written to the screen, not typed into the
+                // shell, so it never lands in history. Delayed past the
+                // `clear` above so it is not wiped.
+                scope.launch {
+                    kotlinx.coroutines.delay(if (sessionId != null) 600 else 300)
+                    _outputBytes.emit(banner(sessionId).toByteArray())
                 }
 
                 readerJob = scope.launch { readLoop() }
@@ -397,7 +405,23 @@ class TerminalSession(private val context: Context) {
         }
     }
 
-    private fun buildInteractiveCommand(): List<String> {
+    /**
+     * One-line notice of what `/var/minis` means in this terminal. A chat's
+     * terminal shares that chat's workspace with its agent; the global one
+     * belongs to no chat, and saying so up front prevents "I saved it in the
+     * terminal and the agent can't see it".
+     */
+    private fun banner(sessionId: String?): String =
+        if (sessionId != null) {
+            "\u001b[2m[Minis] /var/minis/{workspace,attachments,offloads,browser} are this chat's " +
+                "(session ${sessionId.take(8)}) — the agent in that chat sees the same files.\u001b[0m\r\n"
+        } else {
+            "\u001b[2m[Minis] Global terminal — not tied to any chat. /var/minis/workspace here is NOT " +
+                "any chat's workspace; open the terminal from a chat's menu to work in its files. " +
+                "Shared: /var/minis/{shared,memory,skills}.\u001b[0m\r\n"
+        }
+
+    private fun buildInteractiveCommand(sessionId: String?): List<String> {
         check(PRootKernel.isBooted) { "PRootKernel must be booted" }
         val rootfsManager = RootfsManager.getInstance(context)
         val cmd = mutableListOf<String>()
@@ -406,15 +430,20 @@ class TerminalSession(private val context: Context) {
         // T141: see PRootKernel.buildProotCommand for rationale — translates
         // hardlinks to symlinks so apk install of binutils/gcc works.
         cmd.add("--link2symlink")
+        cmd.add("--fake-netlink")
         cmd.add("-r"); cmd.add(rootfsManager.rootfsDir.absolutePath)
         cmd.add("-b"); cmd.add("/dev")
         cmd.add("-b"); cmd.add("/proc")
         cmd.add("-b"); cmd.add("/sys")
         cmd.add("-w"); cmd.add("/root")
 
-        for ((linuxPath, hostPath) in PRootKernel.bindMounts) {
-            cmd.add("-b"); cmd.add("$hostPath:$linuxPath")
-        }
+        // [T-android-session-private-mounts] The same mount set the agent's
+        // shell for [sessionId] gets (SessionMounts is the single builder), so
+        // a file saved here is the file the agent sees. This used to replay
+        // the global PRootKernel.bindMounts, whose per-session entries were
+        // whichever chat last built a shell — a random chat's workspace.
+        // No session (global entry): global dirs and external mounts only.
+        cmd.addAll(SessionMounts.toProotArgs(SessionMounts.forContext(context, sessionId).mounts))
 
         val handlers = NativeOffloadServer.registeredHandlers
         if (handlers.isNotEmpty()) {

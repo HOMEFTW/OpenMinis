@@ -5,6 +5,7 @@ package com.openminis.app.sandbox
  * from terminal output. Corresponds to iOS AIChatViewModel.sanitizeTerminalOutput().
  */
 object TerminalSanitizer {
+    private const val PRE_SANITIZE_MAX_CHARS = 400_000
 
     // Matches ANSI/VT escape sequences:
     //   ESC [ ... final_byte (CSI sequences)
@@ -23,7 +24,8 @@ object TerminalSanitizer {
 
         // Escape sequences have zero display width; strip before simulating CR.
         // Preserve legitimate whitespace and null values in program output.
-        val plain = ANSI_REGEX.replace(raw, "")
+        val bounded = truncateIfNeeded(raw, PRE_SANITIZE_MAX_CHARS)
+        val plain = ANSI_REGEX.replace(bounded, "")
         return foldCarriageReturns(plain).filter { it == '\n' || it == '\t' || it.code >= 0x20 }
 
     }

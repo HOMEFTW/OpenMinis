@@ -25,6 +25,8 @@ data class ContextPolicy(
     /** Whether the "Compact now" button is offered in the UI. */
     val manualCompactAllowed: Boolean,
 ) {
+    data class Window(val tokens: Int, val isUserCap: Boolean)
+
     enum class CheckResult { OK, NEEDS_COMPACT, EXHAUSTED }
 
     /**
@@ -38,8 +40,12 @@ data class ContextPolicy(
         if (compactThreshold > 0 && estimatedTokens >= compactThreshold) {
             return CheckResult.NEEDS_COMPACT
         }
+        if (contextWindow <= 0) return CheckResult.OK
+        if (estimatedTokens >= contextWindow) {
+            return if (manualCompactAllowed) CheckResult.NEEDS_COMPACT else CheckResult.EXHAUSTED
+        }
         if (exhaustedOnly) {
-            val exhaustLine = if (offloadThreshold > 0) offloadThreshold else (contextWindow * 9 / 10)
+            val exhaustLine = if (offloadThreshold > 0) offloadThreshold else (contextWindow.toLong() * 9 / 10).toInt()
             if (estimatedTokens >= exhaustLine) return CheckResult.EXHAUSTED
         }
         return CheckResult.OK
@@ -49,7 +55,47 @@ data class ContextPolicy(
     fun shouldOffload(estimatedTokens: Int): Boolean =
         offloadThreshold > 0 && estimatedTokens >= offloadThreshold
 
+    enum class InLoopStep { PROCEED, COMPACT, SEND_WITHIN_WINDOW, SEND_UNCALIBRATED_ONCE, STOP }
+
     companion object {
+        /** Both the local global setting and the group limit are user caps. */
+        fun resolveWindow(modelWindow: Int?, configuredWindow: Int?, groupLimit: Int?): Window? {
+            val native = modelWindow?.takeIf { it > 0 }
+            val cap = listOfNotNull(configuredWindow, groupLimit).filter { it > 0 }.minOrNull()
+            val tokens = listOfNotNull(native, cap).minOrNull() ?: return null
+            return Window(tokens, cap != null && (native == null || cap < native))
+        }
+
+        /** A compact line is advisory; a user-chosen cap is never bypassed by a probe. */
+        fun inLoopStep(
+            verdict: CheckResult,
+            measured: Int,
+            rawTokens: Int,
+            window: Int,
+            canCompact: Boolean,
+            ratio: Double,
+            uncalibratedSendUsed: Boolean,
+            isUserCap: Boolean = false,
+        ): InLoopStep = when {
+            window <= 0 -> InLoopStep.PROCEED
+            verdict == CheckResult.OK -> InLoopStep.PROCEED
+            verdict == CheckResult.EXHAUSTED -> InLoopStep.STOP
+            canCompact -> InLoopStep.COMPACT
+            measured < window -> InLoopStep.SEND_WITHIN_WINDOW
+            !isUserCap && !uncalibratedSendUsed && ratio > 1.0 && rawTokens < window ->
+                InLoopStep.SEND_UNCALIBRATED_ONCE
+            else -> InLoopStep.STOP
+        }
+
+        /** User caps keep compaction available even below the native-window tiers. */
+        fun forUserCap(contextWindow: Int): ContextPolicy = ContextPolicy(
+            offloadThreshold = (contextWindow * 0.70).toInt().coerceAtLeast(1),
+            offloadTarget = (contextWindow * 0.55).toInt(),
+            compactThreshold = (contextWindow * 0.85).toInt().coerceAtLeast(1),
+            exhaustedOnly = false,
+            manualCompactAllowed = true,
+        )
+
         /**
          * Produce the policy for a given context window size. Four tiers:
          *   - `<32K`   → offload/compact disabled; UI tells user to start a new chat.

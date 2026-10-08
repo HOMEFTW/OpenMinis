@@ -248,7 +248,7 @@ class KimiOAuthManager(
                     // Carry the device identity + stamp last_refresh.
                     json.put("device_id", stored.optString("device_id", UUID.randomUUID().toString()))
                     json.put("last_refresh", System.currentTimeMillis())
-                    saveOAuthString("tokens", json.toString())
+                    if (!saveRefreshedTokens(refreshTokenValue, json)) return@withLock RefreshOutcome.TRANSIENT
                     Log.i(TAG, "Token refresh successful (expires in ${expiresIn}s)")
                     return@withLock RefreshOutcome.SUCCESS
                 }
@@ -271,8 +271,8 @@ class KimiOAuthManager(
                         Log.w(TAG, "Stale invalid_grant ignored — refresh token was rotated concurrently; keeping new credentials")
                         return@withLock RefreshOutcome.SUCCESS
                     }
-                    Log.e(TAG, "Refresh token invalid — clearing credentials")
-                    logout()
+                    Log.e(TAG, "Refresh token rejected; credentials retained")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 Log.w(TAG, "Token refresh transient failure — keeping token")
@@ -286,7 +286,8 @@ class KimiOAuthManager(
 
     /** 5-minute-buffered valid token (Claude parity, overrides the 4h base). */
     override suspend fun validAccessToken(): String? = withContext(Dispatchers.IO) {
-        loadManualBearerToken()?.takeIf { it.isNotEmpty() }?.let { return@withContext it }
+        loadManualBearerToken()?.takeIf { it.isNotBlank() }?.let { return@withContext it }
+        if (needsReauth()) return@withContext null
         val stored = loadStoredTokens() ?: return@withContext null
         val token = stored.optString("access_token", "").ifEmpty { return@withContext null }
         val expireAt = stored.optLong("expire_at", 0)
@@ -296,13 +297,7 @@ class KimiOAuthManager(
             expireAt > 0 && (expireAt - now) <= REFRESH_BUFFER_MS
         if (!needsRefresh) return@withContext token
 
-        when (refreshTokenClassified()) {
-            RefreshOutcome.SUCCESS ->
-                loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
-            RefreshOutcome.INVALID_GRANT -> null // logout() already ran
-            RefreshOutcome.TRANSIENT ->
-                if (expireAt in 1..now) null else token
-            RefreshOutcome.NO_TOKEN -> null
-        }
+        refreshTokenClassified()
+        currentUsableAccessToken()
     }
 }

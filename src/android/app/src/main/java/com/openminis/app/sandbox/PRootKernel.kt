@@ -8,6 +8,7 @@ import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.util.Log
+import kotlinx.coroutines.sync.withLock
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.MountedFoldersStore
 import java.io.File
@@ -41,11 +42,54 @@ object PRootKernel {
 
     private lateinit var rootfsManager: RootfsManager
 
+    /**
+     * [T-android-env-first-turn] Guards [boot]. See the comment there: the
+     * `isBooted` flag alone is a check-then-act race because it flips only
+     * after the slow install work has finished.
+     */
+    private val bootMutex = kotlinx.coroutines.sync.Mutex()
+
     /** Custom environment variables injected into every proot command. */
     val customEnvironment: MutableMap<String, String> = mutableMapOf()
 
-    /** Bind mounts: Linux path -> host filesystem path. */
+    /**
+     * Bind mounts: Linux path -> host filesystem path. GLOBAL mounts only —
+     * `memory`, `skills`, `shared`, `mcp-servers` and `mounts/<name>`.
+     *
+     * [T-android-session-private-mounts] Per-session directories (workspace,
+     * attachments, offloads, browser) must never be in here: this map is
+     * process-wide, so a session dir written into it is whichever session
+     * wrote last. Those mounts live in each shell's own argv
+     * ([SessionMounts]); [addBindMount] refuses them.
+     */
     val bindMounts: MutableMap<String, String> = linkedMapOf()
+
+    /**
+     * [T-android-session-private-mounts] LEGACY fallback for readers that
+     * resolve a per-session `/var/minis/...` path with no session id through
+     * [resolveHostPath]. It reproduces exactly what they got before (the
+     * session that most recently built a shell), but as an explicit, logged
+     * hint instead of a side effect on the mount table. Session-aware callers
+     * use [resolveSessionHostPath] and never read it.
+     */
+    @Volatile
+    private var legacySessionId: String? = null
+
+    @Volatile
+    private var legacyFilesDir: File? = null
+
+    fun noteLegacySession(context: Context, sessionId: String) = noteLegacySession(context.filesDir, sessionId)
+
+    internal fun noteLegacySession(filesDir: File, sessionId: String) {
+        legacyFilesDir = filesDir
+        legacySessionId = sessionId
+    }
+
+    /** How many times the legacy fallback answered (diagnostics / tests). */
+    @Volatile
+    var legacyResolveCount: Long = 0
+        private set
+
 
     /**
      * Initialize the PRoot environment: install rootfs and proot binary.
@@ -55,7 +99,25 @@ object PRootKernel {
             Log.d(TAG, "Already booted")
             return
         }
+        // [T-android-env-first-turn] Serialize boot. `isBooted` is only set at
+        // the END of this function, so a bare check-then-act let a second
+        // caller walk straight past it while the first was still suspended
+        // inside installIfNeeded(). Both then raced on, and whoever spawned a
+        // shell first did it with nativeLibDir/prootLoaderPath still empty —
+        // proot then bare-execve'd the rootfs busybox and SELinux killed it
+        // with `execve("/bin/sh"): Permission denied`.
+        bootMutex.withLock {
+            // Re-check under the lock: the caller we queued behind may have
+            // completed the boot while we waited.
+            if (isBooted) {
+                Log.d(TAG, "Already booted (post-lock)")
+                return@withLock
+            }
+            bootLocked(context)
+        }
+    }
 
+    private suspend fun bootLocked(context: Context) {
         rootfsManager = RootfsManager.getInstance(context)
         rootfsManager.installIfNeeded()
         rootfsManager.installProotIfNeeded()
@@ -179,7 +241,19 @@ object PRootKernel {
     }
 
     fun addBindMount(linuxPath: String, hostPath: String) {
+        if (isPerSessionPath(linuxPath)) {
+            // Would reintroduce last-writer-wins for every global reader.
+            Log.e(TAG, "refusing per-session bind mount in the global table: $linuxPath -> $hostPath")
+            return
+        }
         bindMounts[linuxPath] = hostPath
+    }
+
+    /** True for `/var/minis/<attachments|offloads|workspace|browser>` and below. */
+    fun isPerSessionPath(linuxPath: String): Boolean {
+        if (!linuxPath.startsWith("/var/minis/")) return false
+        val sub = linuxPath.removePrefix("/var/minis/").substringBefore('/')
+        return sub in perSessionSubdirs
     }
 
     /**
@@ -615,6 +689,8 @@ object PRootKernel {
         // install fails with "Permission denied". Symlinks are functionally
         // equivalent for the apk consumer.
         cmd.add("--link2symlink")
+        // Requires the pinned OpenMinis PRoot fork with rtnetlink emulation.
+        cmd.add("--fake-netlink")
 
         // Set rootfs
         cmd.add("-r")
@@ -661,7 +737,7 @@ object PRootKernel {
     }
 
     /** Subdirs that live under `minis-sessions/<sessionId>/` rather than the global pool. */
-    private val perSessionSubdirs = setOf("attachments", "offloads", "workspace", "browser")
+    private val perSessionSubdirs = SessionMounts.SESSION_SUBDIRS.toSet()
 
     /**
      * Resolve a `/var/minis/...` Linux path directly against a specific session's
@@ -679,9 +755,7 @@ object PRootKernel {
         val slash = rest.indexOf('/')
         val subdir = if (slash < 0) rest else rest.substring(0, slash)
         if (subdir !in perSessionSubdirs) return resolveHostPath(linuxPath)
-        val sessionBase = File(context.filesDir, "minis-sessions/$sessionId/$subdir")
-        val tail = if (slash < 0) "" else rest.substring(slash + 1)
-        return if (tail.isEmpty()) sessionBase else File(sessionBase, tail)
+        return SessionPathResolver.resolve(context.filesDir, linuxPath, sessionId)
     }
 
     /**
@@ -700,6 +774,20 @@ object PRootKernel {
                 } else {
                     File(hostBase, relativePath)
                 }
+            }
+        }
+
+        // [T-android-session-private-mounts] Per-session path with no session
+        // context: the legacy "most recent session" answer (see
+        // [legacySessionId]). Logged so the remaining callers stay findable.
+        if (isPerSessionPath(linuxPath)) {
+            val sid = legacySessionId
+            val filesDir = legacyFilesDir
+            if (sid != null && filesDir != null) {
+                legacyResolveCount++
+                val rest = linuxPath.removePrefix("/var/minis/")
+                Log.d(TAG, "legacy session resolve $linuxPath -> session $sid")
+                return File(filesDir, "minis-sessions/$sid/$rest")
             }
         }
 

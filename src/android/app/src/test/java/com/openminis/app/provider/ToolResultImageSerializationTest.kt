@@ -64,6 +64,9 @@ class ToolResultImageSerializationTest {
     /** A history shaped like read_image's: assistant tool_use → tool result with pixels. */
     private fun historyWithToolResultImage(mime: String = "image/jpeg") = listOf(
         LLMMessage(LLMMessage.Role.USER, "look at the chart"),
+        LLMMessage(LLMMessage.Role.ASSISTANT, "", contentParts = listOf(
+            AgentContentPart.ToolUse("call_abc123", "read_image", JSONObject().put("path", "/var/minis/chart.png")),
+        )),
         LLMMessage(
             role = LLMMessage.Role.USER,
             content = "",

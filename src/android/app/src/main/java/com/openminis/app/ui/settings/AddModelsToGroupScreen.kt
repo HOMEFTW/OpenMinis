@@ -46,7 +46,7 @@ fun AddModelsToGroupScreen(
         return
     }
 
-    val existingIds = group.memberEntryIds.toSet()
+    val existingIds = remember(group.memberEntryIds) { group.memberEntryIds.toSet() }
     // [T-android-provider-voice] Voice-scoped picker: when the target group is
     // bound as the Voice Input/Output group, scope the shared picker by
     // modality (ASR = audio-in, TTS = audio-out). Modality filtering + System
@@ -59,8 +59,8 @@ fun AddModelsToGroupScreen(
         config.visionGroupId -> PickerModalityFilter.IMAGE_INPUT
         else -> null
     }
-    val availableEntries = config.modelEntries.filter {
-        !it.isHidden && it.id !in existingIds
+    val availableEntries = remember(config.modelEntries, existingIds) {
+        config.modelEntries.filter { !it.isHidden && it.id !in existingIds }
     }
 
     val searchQuery = remember { mutableStateOf("") }
@@ -114,6 +114,14 @@ fun AddModelsToGroupScreen(
         // Resolved here (Composable context) — LazyListScope below can't call
         // stringResource. Localizes the injected System provider section label.
         val systemProviderLabel = stringResource(R.string.voice_provider_system)
+        val searchSections = com.openminis.app.ui.components.rememberModelEntryPickerSections(
+            instances = config.instances,
+            availableEntries = availableEntries,
+            searchQuery = searchQuery.value,
+            modalityFilter = modalityFilter,
+            excludeIds = existingIds,
+            systemProviderLabel = systemProviderLabel,
+        )
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -137,6 +145,7 @@ fun AddModelsToGroupScreen(
                 modalityFilter = modalityFilter,
                 excludeIds = existingIds,
                 systemProviderLabel = systemProviderLabel,
+                sections = searchSections,
             )
         }
     }

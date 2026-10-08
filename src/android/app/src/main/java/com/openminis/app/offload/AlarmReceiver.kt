@@ -22,8 +22,8 @@ class AlarmReceiver : BroadcastReceiver() {
         // BOOT_COMPLETED arrives with no extras; it just keeps the receiver
         // resident so the AlarmManager re-fires the persisted alarms after
         // a reboot. Nothing to clean up in that branch.
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            AppLogger.info(TAG, "BOOT_COMPLETED — alarm receiver resident")
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            AppLogger.info(TAG, "${intent.action} — re-registering scheduled task alarms")
             // [T-android-scheduled-tasks-design] Re-register every enabled
             // ScheduledTask with AlarmManager. The OS drops all pending
             // alarms on reboot, so persisted tasks would silently stop

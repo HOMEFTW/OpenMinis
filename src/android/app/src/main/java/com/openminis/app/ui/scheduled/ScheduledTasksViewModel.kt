@@ -149,7 +149,7 @@ class ScheduledTasksViewModel(private val appContext: Context) : ViewModel() {
 
     suspend fun upsert(task: ScheduledTask, isNew: Boolean): ScheduledTask =
         withContext(Dispatchers.IO) {
-            if (isNew) manager.create(task) else manager.update(task)
+            if (manager.get(task.id) == null) manager.create(task) else manager.update(task)
         }
 
     /**
@@ -165,9 +165,11 @@ class ScheduledTasksViewModel(private val appContext: Context) : ViewModel() {
      * user can jump straight into the (now-running) chat.
      */
     fun runNow(task: ScheduledTask) {
+        if (_runNowState.value?.status == RunStatus.RUNNING) return
+        _runNowState.value = RunNowState(taskId = task.id, status = RunStatus.RUNNING)
         viewModelScope.launch(Dispatchers.IO) {
-            _runNowState.value = RunNowState(taskId = task.id, status = RunStatus.RUNNING)
             val sid = runCatching {
+                if (manager.get(task.id) == null) manager.create(task.copy(enabled = false))
                 com.openminis.app.scheduled.ScheduledAgentRunner.run(
                     appContext, task, waitForCompletion = false,
                 )

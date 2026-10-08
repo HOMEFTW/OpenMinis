@@ -265,16 +265,20 @@ class ModelUseOffloadHandler(
 
         // Build provider + call — runBlocking is acceptable here: this handler
         // is invoked off the main thread by the offload server.
+        val instance = providerRepository.instance(entry.providerInstanceId)
+            ?: return NativeOffloadResult(2, "minis-model-use run: provider instance not found\n")
         val apiKey = providerRepository.loadApiKey(entry.providerInstanceId)
-            ?: return NativeOffloadResult(
+            ?: if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth &&
+                providerRepository.hasAnyCredential(instance)) "" else return NativeOffloadResult(
                 2,
                 JSONObject().put("error", "missing_api_key")
                     .put("message", "No API key configured for provider ${entry.model.provider}.")
                     .toString() + "\n",
             )
-        val instance = providerRepository.instance(entry.providerInstanceId)
-            ?: return NativeOffloadResult(2, "minis-model-use run: provider instance not found\n")
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, context)
+        val provider = ProviderFactory.create(
+            instance, apiKey, entry.model, context,
+            sessionId = request.sessionId, overrides = entry.overrides,
+        )
 
         // [GH#67] input_audio serialization is implemented for the OpenAI
         // chat/completions + responses paths only. Other provider types would
@@ -408,6 +412,7 @@ class ModelUseOffloadHandler(
                 outputPath = outputPath,
                 outputExt = outputExt,
                 resolveFile = { path -> sessionScopedHostFile(path, request.sessionId) ?: PRootKernel.resolveHostPath(path) },
+                requireMedia = "image" in outputs && "text" !in outputs,
                 mimeToExt = ::mimeToExt,
                 logWrite = { path, file -> logModelUseWrite(path, file, request.sessionId) },
             ),
@@ -1225,7 +1230,7 @@ class ModelUseOffloadHandler(
             """.trimIndent()
             // xAI (Grok) / Kimi Coding have no image-output models in the
             // current catalog — fall through to empty hint like Anthropic.
-            ProviderType.anthropic, ProviderType.xAI, ProviderType.kimiCode,
+            ProviderType.anthropic, ProviderType.xAI, ProviderType.kimiCode, ProviderType.githubCopilot, ProviderType.deepSeek,
             // [T-android-provider-type-parity] No image-param hint for types
             // this build cannot drive.
             ProviderType.antigravity, ProviderType.unsupported, null -> ""

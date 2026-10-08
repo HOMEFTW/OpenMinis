@@ -34,6 +34,12 @@ if (!$GradlePath) {
     }
 }
 
+$prootPath = Join-Path $androidRoot 'app/src/main/jniLibs/arm64-v8a/libproot.so'
+$prootStrings = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($prootPath))
+if (!$prootStrings.Contains('--fake-netlink')) {
+    throw 'PRoot is outdated. Run scripts/build_proot_windows.ps1 before building the APK.'
+}
+
 $gradleArgs = @('--no-daemon')
 $git = Get-Command git -ErrorAction SilentlyContinue
 if ($git) {

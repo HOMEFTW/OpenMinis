@@ -2,6 +2,13 @@ package com.openminis.app.data.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonObject
 import java.util.UUID
 
 @Serializable
@@ -15,6 +22,8 @@ enum class ProviderType(val displayName: String) {
     // OpenAI-compatible upstream at api.kimi.com/coding/v1. DB round-trip is
     // name-based (ProviderCredential.valueOf), so appending is migration-safe.
     kimiCode("Kimi Code"),
+
+    githubCopilot("GitHub Copilot"),
 
     // [T-android-provider-type-parity] The cases below exist on iOS but were
     // missing here. They are declared so a cross-platform restore or sync can
@@ -53,7 +62,10 @@ enum class ProviderType(val displayName: String) {
      * Never write this back as an instance's type where the original string is
      * still available; it is a read-side fallback, not a real provider.
      */
-    unsupported("Unsupported");
+    unsupported("Unsupported"),
+
+    /** Native DeepSeek Messages API; persisted by name without migrating existing endpoints. */
+    deepSeek("DeepSeek");
 
     /**
      * [T-android-provider-type-parity] True for types this build can decode and
@@ -65,7 +77,8 @@ enum class ProviderType(val displayName: String) {
         get() = when (this) {
             // openAIResponses included: it routes through the OpenAI provider
             // with the Responses endpoint forced on.
-            anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses -> true
+            anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses,
+            githubCopilot, deepSeek -> true
             antigravity, unsupported -> false
         }
 
@@ -77,9 +90,10 @@ enum class ProviderType(val displayName: String) {
             openRouter -> LLMModel.allOpenRouter
             xAI -> LLMModel.allXAI
             kimiCode -> LLMModel.allKimi
+            deepSeek -> DeepSeekModels.all
             // No built-in catalog for the decode-only types; models restored
             // alongside the instance still appear as custom entries.
-            openAIResponses, antigravity, unsupported -> emptyList()
+            githubCopilot, openAIResponses, antigravity, unsupported -> emptyList()
         }
 
     companion object {
@@ -102,7 +116,7 @@ enum class ProviderCredential {
     oauth,
 }
 
-@Serializable
+@Serializable(with = ThinkingLevelSerializer::class)
 enum class ThinkingLevel {
     // [T-android-thinking-level-arch] New cases MUST be appended at the end.
     // Kotlinx Serialization encodes enums by NAME string ("OFF"/"LOW"/...),
@@ -138,9 +152,22 @@ enum class ThinkingLevel {
          * letting the caller handle an exception or drop the whole config. Use
          * this for every "read from persisted data" path.
          */
-        fun decoded(raw: String): ThinkingLevel =
-            runCatching { valueOf(raw) }.getOrElse { XHIGH }
+        fun decoded(raw: String): ThinkingLevel = parseOrNull(raw) ?: XHIGH
+
+        /** Accept both Android enum names and iOS lowercase wire values. */
+        fun parseOrNull(raw: String): ThinkingLevel? =
+            entries.firstOrNull { it.name.equals(raw.trim(), ignoreCase = true) }
     }
+}
+
+/** Preserve Android's write format while accepting levels in iOS backups. */
+object ThinkingLevelSerializer : KSerializer<ThinkingLevel> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("com.openminis.app.data.model.ThinkingLevel", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: ThinkingLevel) = encoder.encodeString(value.name)
+
+    override fun deserialize(decoder: Decoder): ThinkingLevel = ThinkingLevel.decoded(decoder.decodeString())
 }
 
 @Serializable
@@ -219,7 +246,7 @@ data class ProviderInstance(
     @Serializable(with = com.openminis.app.backup.Iso8601MillisSerializer::class)
     val createdAt: Long = System.currentTimeMillis(),
     var customBaseURL: String? = null,
-    var appendV1Suffix: Boolean = true,
+    var appendV1Suffix: Boolean = providerType != ProviderType.deepSeek,
     // [T-provider-custom-user-agent] Optional per-provider User-Agent
     // override. Some relay gateways only accept requests whose UA looks like
     // an official client (e.g. Claude Code); Minis' default UA gets rejected.
@@ -234,6 +261,8 @@ data class ProviderInstance(
     // but modeled here as a switch on the instance so an existing OpenAI
     // provider can be re-pointed without changing its type.
     var useResponsesAPI: Boolean = false,
+    /** null keeps the existing first-header and stream-idle defaults. */
+    var responseTimeoutSeconds: Int? = null,
     // [T-android-image-endpoint-mode] User-selected image-generation routing
     // for OpenAI-compatible providers (see ImageEndpointMode). Defaults keep
     // old persisted JSON (which lacks both keys) round-tripping cleanly:
@@ -257,6 +286,8 @@ data class ProviderInstance(
     /** Returns the effective API base URL, applying v1 suffix if configured. */
     val effectiveBaseURL: String?
         get() {
+            // The native provider joins /v1/messages and normalizes the official root to /anthropic.
+            if (providerType == ProviderType.deepSeek) return DeepSeekModels.normalizeBaseURL(customBaseURL)
             val base = customBaseURL?.trimEnd('/') ?: return null
             return if (appendV1Suffix && !base.endsWith("/v1")) "$base/v1" else base
         }
@@ -317,7 +348,7 @@ data class ProviderInstance(
      */
     val supportsCustomThinkingRules: Boolean
         get() = when (providerType) {
-            ProviderType.anthropic, ProviderType.gemini -> false
+            ProviderType.anthropic, ProviderType.gemini, ProviderType.deepSeek -> false
             else -> {
                 val codexOAuth = credentialType == ProviderCredential.oauth &&
                     customBaseURL.isNullOrBlank()
@@ -347,6 +378,10 @@ data class ModelOverrides(
     // of older JSON (unlike adding an enum case) — old configs simply lack the
     // key and it defaults to null.
     val maxThinkingLevel: ThinkingLevel? = null,
+    val temperature: Double? = null,
+    val topP: Double? = null,
+    val customHeaders: Map<String, String>? = null,
+    val extraBodyParams: JsonObject? = null,
 ) {
     val isEmpty: Boolean
         get() = displayName == null
@@ -356,6 +391,10 @@ data class ModelOverrides(
             && inputModalities == null
             && outputModalities == null
             && maxThinkingLevel == null
+            && temperature == null
+            && topP == null
+            && customHeaders == null
+            && extraBodyParams == null
 }
 
 @Serializable
@@ -371,20 +410,25 @@ data class ModelEntry(
      *  `ModelEntry.userModifiedAt` is a `Date?` decoded with `.iso8601`. */
     @Serializable(with = com.openminis.app.backup.Iso8601MillisNullableSerializer::class)
     val userModifiedAt: Long? = null,
+    @Serializable(with = com.openminis.app.backup.Iso8601MillisNullableSerializer::class)
+    val absentSince: Long? = null,
 ) {
     val id: String get() = uuid
+    val isUnavailableFromProvider: Boolean get() = absentSince != null
 
     /** Effective model as seen by the rest of the app: baseModel with overrides applied. */
     val model: LLMModel
         get() {
             val base = baseModel.withKnownCapabilityDefaults()
-            return if (overrides.isEmpty) base else base.copy(
+            val input = base.effectiveInputModalities
+            val output = base.effectiveOutputModalities
+            return if (overrides.isEmpty && input == base.inputModalities && output == base.outputModalities) base else base.copy(
                 displayName = overrides.displayName ?: base.displayName,
                 maxOutputTokens = overrides.maxOutputTokens ?: base.maxOutputTokens,
                 contextWindow = overrides.contextWindow ?: base.contextWindow,
                 supportsReasoning = overrides.supportsReasoning ?: base.supportsReasoning,
-                inputModalities = overrides.inputModalities ?: base.inputModalities,
-                outputModalities = overrides.outputModalities ?: base.outputModalities,
+                inputModalities = (overrides.inputModalities ?: input)?.map { it.normalizeModalityName() }?.distinct(),
+                outputModalities = (overrides.outputModalities ?: output)?.map { it.normalizeModalityName() }?.distinct(),
             )
         }
 
@@ -413,6 +457,8 @@ data class ProviderConfig(
     // voiceInputGroupId (meta KV row, not synced CRDT member maps). Absent in
     // old persisted JSON → deserializes to null (ignoreUnknownKeys + default).
     var visionGroupId: String? = null,
+    // Persisted with the provider config; absent in older payloads means built-in only.
+    val subAgents: MutableList<SubAgentDefinition> = mutableListOf(),
     // Models and groups exposed to the agent loop (minis-model-use terminal
     // command) — mirrors iOS agentLoopModelEntryIds / agentLoopGroupIds.
     val agentLoopModelEntryIds: MutableList<String> = mutableListOf(),

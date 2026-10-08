@@ -1,0 +1,16 @@
+AI 聊天背景素材来源
+
+来自用户指定的 Codex 对话：01a11ac7-cd32-7982-850c-70cb19c203b5
+原始文件：deepseek-1080x2400.png、gpt-1080x2400.png、claude-1080x2400.png
+应用内版本：1080×2400 WebP，仅压缩转换，未重新绘制。
+
+以下为原始素材附带的参考来源说明：
+https://mzh.moegirl.org.cn/DeepSeek娘
+https://github.com/shuaizenge/ai-girls
+https://www.pixiv.net/artworks/148186519
+
+DeepSeek原型：上善无形「溟月」；女仆设计：ZipZipPipe；Q版发展：这个刀子真甜。
+GPT和Claude设计参考：ZipZipPipe。
+本次为根据外观文字描述生成的新图，不是原图或参考图输入编辑。DeepSeek采用小个子Q版。
+DeepSeek词条标注原型授权为CC BY-NC-SA 4.0；相关二创遵循署名、非商用、相同方式共享要求。
+原参考图权利归各自创作者。

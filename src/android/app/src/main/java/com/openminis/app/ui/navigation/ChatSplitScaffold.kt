@@ -951,6 +951,9 @@ fun ChatSplitScaffoldRoute(
                 onOpenTerminal = {
                     navController.safeNavigate(Routes.terminal(sessionId = sessionId))
                 },
+                onOpenAgentTranscript = { childId ->
+                    navController.safeNavigate(Routes.agentTranscript(childId))
+                },
                 onOpenTerminalWithCommand = { command ->
                     navController.safeNavigate(
                         Routes.terminal(initCommand = command, sessionId = sessionId),
@@ -970,6 +973,9 @@ fun ChatSplitScaffoldRoute(
                     navController.safeNavigate(Routes.FILE_PREVIEW)
                 },
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
+                onEditProviderClick = { instanceId ->
+                    navController.safeNavigate(Routes.providerDetail(instanceId))
+                },
             )
         },
     )

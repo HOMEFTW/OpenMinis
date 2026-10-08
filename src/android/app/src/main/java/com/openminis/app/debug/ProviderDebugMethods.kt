@@ -60,7 +60,7 @@ internal object ProviderDebugMethods {
         // iOS LLMProviderFactory.makeAnthropicProvider has always allowed
         // this — Android was the only platform reporting the field as
         // unsupported via RPC `provider.types`.
-        val customBaseSupported = type == ProviderType.openAI || type == ProviderType.anthropic
+        val customBaseSupported = type == ProviderType.openAI || type == ProviderType.anthropic || type == ProviderType.deepSeek
         return JSONObject().apply {
             put("id", type.name)
             put("displayName", type.displayName)
@@ -72,18 +72,20 @@ internal object ProviderDebugMethods {
             })
             put("defaultBaseURL", defaultBaseURL(type))
             put("customBaseURLSupported", customBaseSupported)
-            put("appendV1SuffixConfigurable", customBaseSupported)
+            put("appendV1SuffixConfigurable", customBaseSupported && type != ProviderType.deepSeek)
             put("builtInModelIds", builtInIds)
         }
     }
 
     private fun defaultBaseURL(type: ProviderType): String = when (type) {
+        ProviderType.deepSeek -> com.openminis.app.data.model.DeepSeekModels.DEFAULT_BASE_URL
         ProviderType.anthropic -> "https://api.anthropic.com"
         ProviderType.gemini -> "https://generativelanguage.googleapis.com"
         ProviderType.openAI -> "https://api.openai.com"
         ProviderType.openRouter -> "https://openrouter.ai/api/v1"
         ProviderType.xAI -> "https://api.x.ai/v1"
         ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+        ProviderType.githubCopilot -> com.openminis.app.auth.CopilotDeviceFlow.API_BASE
         // [T-android-provider-type-parity] Responses API shares the OpenAI
         // host; undrivable types have no canonical base to report.
         ProviderType.openAIResponses -> "https://api.openai.com"

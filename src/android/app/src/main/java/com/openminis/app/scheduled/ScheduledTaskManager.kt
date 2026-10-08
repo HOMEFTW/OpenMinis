@@ -35,23 +35,47 @@ class ScheduledTaskManager(private val context: Context) {
     fun get(taskId: String): ScheduledTask? = store.get(taskId)
 
     fun create(task: ScheduledTask): ScheduledTask {
-        store.upsert(task)
-        if (task.enabled) registerAlarm(task)
-        return task
+        val armed = if (task.usesAnchor && task.anchorMs == null) {
+            task.copy(anchorMs = System.currentTimeMillis())
+        } else task
+        store.upsert(armed)
+        if (armed.triggerKind == ScheduledTriggerKind.ON_COMPLETION) ScheduledCompletionTriggers.ensureListening(context)
+        if (armed.enabled) registerAlarm(armed)
+        return armed
     }
 
     fun update(task: ScheduledTask): ScheduledTask {
         cancelAlarm(task.id)
-        store.upsert(task)
-        if (task.enabled) registerAlarm(task)
-        return task
+        val merged = store.update(task.id) { previous ->
+            val incoming = mergeBookkeeping(task, previous)
+            if (incoming.enabled && !previous.enabled && incoming.usesAnchor) {
+                incoming.copy(anchorMs = System.currentTimeMillis(), triggeredCount = 0)
+            } else if (incoming.enabled && !previous.enabled && incoming.triggerKind == ScheduledTriggerKind.ON_COMPLETION) {
+                incoming.copy(triggeredCount = 0)
+            } else incoming
+        }
+            ?: create(task)
+        if (merged.enabled) registerAlarm(merged)
+        return merged
     }
 
     fun setEnabled(taskId: String, enabled: Boolean) {
-        val t = store.get(taskId) ?: return
-        val updated = t.copy(enabled = enabled)
-        store.upsert(updated)
+        val updated = store.update(taskId) { t ->
+            when {
+                enabled && !t.enabled && t.usesAnchor ->
+                    t.copy(enabled = true, anchorMs = System.currentTimeMillis(), triggeredCount = 0)
+                enabled && !t.enabled && t.triggerKind == ScheduledTriggerKind.ON_COMPLETION ->
+                    t.copy(enabled = true, triggeredCount = 0)
+                else -> t.copy(enabled = enabled)
+            }
+        } ?: return
         if (enabled) registerAlarm(updated) else cancelAlarm(taskId)
+        if (enabled && updated.triggerKind == ScheduledTriggerKind.ON_COMPLETION) ScheduledCompletionTriggers.ensureListening(context)
+    }
+
+    fun claimOneShotFire(taskId: String): ScheduledTask? = store.update(taskId) { t ->
+        if (!t.enabled || t.triggerKind != ScheduledTriggerKind.ON_COMPLETION || (t.triggeredCount ?: 0) >= 1) null
+        else t.copy(enabled = false, triggeredCount = 1)
     }
 
     fun delete(taskId: String) {
@@ -65,7 +89,9 @@ class ScheduledTaskManager(private val context: Context) {
      * so persisted tasks survive a device reboot.
      */
     fun rescheduleAll() {
+        ScheduledAgentRunner.recoverPending(context)
         val tasks = store.all()
+        if (tasks.any { it.enabled && it.triggerKind == ScheduledTriggerKind.ON_COMPLETION }) ScheduledCompletionTriggers.ensureListening(context)
         if (tasks.isEmpty()) {
             AppLogger.info(TAG, "rescheduleAll: no tasks")
             return
@@ -84,15 +110,24 @@ class ScheduledTaskManager(private val context: Context) {
      * the next occurrence. ONCE tasks get disabled in-place (enabled=false)
      * so they linger in the list with their lastResult* metadata visible.
      */
-    fun rescheduleNext(taskId: String) {
-        val t = store.get(taskId) ?: return
-        if (t.repeatMode == ScheduledRepeatMode.ONCE) {
-            // Mark fired ONCE task as disabled — keep row so the user can
-            // see its last result, re-enable if they want to re-run.
-            store.upsert(t.copy(enabled = false))
-            return
+    fun rescheduleNext(taskId: String): Boolean {
+        val now = System.currentTimeMillis()
+        val claimed = store.update(taskId) { t ->
+            if (!t.enabled || t.triggerKind == ScheduledTriggerKind.ON_COMPLETION) return@update null
+            if (!t.isCalendar) {
+                if (!relativeAlarmDue(t, now)) return@update null
+                afterAlarmFire(t, now)?.first
+            } else if (t.repeatMode == ScheduledRepeatMode.ONCE) {
+                t.copy(enabled = false, triggeredCount = 1)
+            } else {
+                // Repeated deliveries within the same slot must not launch two runs.
+                if (t.anchorMs?.let { now - it in 0 until 60_000 } == true) return@update null
+                t.copy(anchorMs = now, triggeredCount = (t.triggeredCount ?: 0) + 1)
+            }
         }
-        registerAlarm(t)
+        val current = claimed ?: store.get(taskId)
+        if (current?.enabled == true) registerAlarm(current, now + 1_000)
+        return claimed != null
     }
 
     fun markFired(
@@ -101,14 +136,14 @@ class ScheduledTaskManager(private val context: Context) {
         resultPreview: String?,
         ok: Boolean = true,
         executionId: String? = null,
-    ) {
-        synchronized(runHistoryLock) {
-            val t = store.get(taskId) ?: return
+        firedAt: Long = System.currentTimeMillis(),
+    ): Boolean {
+        return store.update(taskId) { t ->
             // Receiver handoff failures can be observed both by the runner and by
             // the receiver catch block. Persisted execution ids make that one
             // trigger produce one history row even across manager instances.
-            if (executionId != null && t.runHistory.any { it.executionId == executionId }) return
-            val now = System.currentTimeMillis()
+            if (executionId != null && t.runHistory.any { it.executionId == executionId }) return@update null
+            val now = firedAt
             // [T-android-scheduled-tasks-run-records] Prepend a run record
             // (newest-first), capped at MAX_RUN_HISTORY. lastResult* are kept in
             // sync for back-compat but are no longer surfaced in the list UI.
@@ -119,20 +154,22 @@ class ScheduledTaskManager(private val context: Context) {
                 ok = ok,
                 executionId = executionId,
             )
-            val history = (listOf(run) + t.runHistory).take(ScheduledTask.MAX_RUN_HISTORY)
-            store.upsert(
-                t.copy(
-                    lastFiredAt = now,
-                    lastResultPreview = resultPreview,
-                    lastResultSessionId = sessionId,
-                    runHistory = history,
-                ),
+            val history = (listOf(run) + t.runHistory).sortedByDescending { it.firedAt }
+                .take(ScheduledTask.MAX_RUN_HISTORY)
+            val latest = history.first()
+            t.copy(
+                lastFiredAt = latest.firedAt,
+                lastResultPreview = latest.preview,
+                lastResultSessionId = latest.sessionId,
+                runHistory = history,
+                fireCount = t.firesSoFar + 1,
             )
-        }
+        } != null
     }
 
-    private fun registerAlarm(task: ScheduledTask) {
-        val triggerAt = task.nextTriggerMs() ?: run {
+    private fun registerAlarm(task: ScheduledTask, now: Long = System.currentTimeMillis()) {
+        if (task.triggerKind == ScheduledTriggerKind.ON_COMPLETION) return
+        val triggerAt = task.nextTriggerMs(now) ?: run {
             AppLogger.warning(TAG, "task ${task.id} has no next trigger — skipping register")
             return
         }
@@ -190,8 +227,40 @@ class ScheduledTaskManager(private val context: Context) {
     }
 
     companion object {
-        private val runHistoryLock = Any()
         private const val TAG = "ScheduledTaskManager"
+        private const val ALARM_EARLY_SLACK_MS = 5_000L
+
+        internal fun relativeAlarmDue(t: ScheduledTask, now: Long): Boolean {
+            val anchor = t.anchorMs ?: t.createdAt
+            return when (t.triggerKind) {
+                ScheduledTriggerKind.AFTER -> t.delaySec?.let {
+                    it > 0 && (t.triggeredCount ?: 0) < 1 && anchor + it * 1000 <= now + ALARM_EARLY_SLACK_MS
+                } == true
+                ScheduledTriggerKind.INTERVAL -> t.intervalSec?.let {
+                    it >= 60 && t.remainingFires != 0 && anchor + it * 1000 <= now + ALARM_EARLY_SLACK_MS
+                } == true
+                ScheduledTriggerKind.CALENDAR, ScheduledTriggerKind.ON_COMPLETION -> false
+            }
+        }
+
+        internal fun afterAlarmFire(t: ScheduledTask, now: Long): Pair<ScheduledTask, Boolean>? = when (t.triggerKind) {
+            ScheduledTriggerKind.AFTER -> t.copy(enabled = false, triggeredCount = 1) to false
+            ScheduledTriggerKind.INTERVAL -> {
+                val next = t.copy(triggeredCount = (t.triggeredCount ?: 0) + 1, anchorMs = now)
+                if (next.remainingFires == 0) next.copy(enabled = false) to false else next to true
+            }
+            ScheduledTriggerKind.CALENDAR, ScheduledTriggerKind.ON_COMPLETION -> null
+        }
+
+        internal fun mergeBookkeeping(incoming: ScheduledTask, previous: ScheduledTask): ScheduledTask = incoming.copy(
+            runHistory = previous.runHistory,
+            fireCount = previous.fireCount,
+            anchorMs = previous.anchorMs,
+            triggeredCount = previous.triggeredCount,
+            lastFiredAt = previous.lastFiredAt,
+            lastResultPreview = previous.lastResultPreview,
+            lastResultSessionId = previous.lastResultSessionId,
+        )
         const val ACTION_FIRE = "com.openminis.app.scheduled.FIRE"
         const val EXTRA_TASK_ID = "task_id"
         const val CHANNEL_ID = "minis_scheduled_tasks"

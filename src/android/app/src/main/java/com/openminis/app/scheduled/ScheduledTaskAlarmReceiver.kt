@@ -63,7 +63,8 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
                     }
                     // Schedule the next occurrence FIRST so a long-running
                     // prompt doesn't block tomorrow's fire even if we crash.
-                    manager.rescheduleNext(taskId)
+                    if (!manager.rescheduleNext(taskId)) return@withTimeout
+                    val firedTask = manager.get(taskId) ?: return@withTimeout
 
                     // [GH#197] waitForCompletion=false is load-bearing, not a
                     // tweak. With the default (true) this call suspends until
@@ -85,9 +86,10 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
                     // receiver.
                     ScheduledAgentRunner.run(
                         appContext,
-                        task,
+                        firedTask,
                         waitForCompletion = false,
                         executionId = executionId,
+                        scheduledFire = true,
                     )
                 }
             } catch (t: Throwable) {

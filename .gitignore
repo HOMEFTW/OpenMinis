@@ -148,3 +148,7 @@ deps/lame-3.100/**/.deps/
 # built alongside (deps/build_rclone_ios.sh).
 src/android/app/libs/rclone.aar
 src/android/app/libs/rclone-sources.jar
+
+# Local Python test/interpreter caches are not source assets.
+__pycache__/
+*.py[cod]

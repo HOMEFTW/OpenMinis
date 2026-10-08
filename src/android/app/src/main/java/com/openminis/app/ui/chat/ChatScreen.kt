@@ -46,6 +46,9 @@ import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.Article
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import com.openminis.app.agent.jobs.AgentJobRegistry
+import com.openminis.app.agent.jobs.HelperRunner
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
@@ -94,6 +97,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.Compress
+import androidx.compose.material.icons.outlined.DataUsage
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -178,6 +194,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
@@ -222,6 +239,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBars
@@ -480,7 +498,7 @@ private data class ScrollFollowKey(
     val blockSig: Long,
 )
 
-@OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
+@OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
     sessionId: String,
@@ -520,6 +538,7 @@ fun ChatScreen(
      *  (no trailing newline — the user reviews and presses Enter manually).
      *  Wired to the top-right Terminal button on a shell_execute ToolDetailSheet. */
     onOpenTerminalWithCommand: (command: String) -> Unit = {},
+    onOpenAgentTranscript: (childSessionId: String) -> Unit = {},
     /** "Move to…" capsule (T51): called when the user picks a target session
      *  from MoveToSessionSheet after a share-injected turn. The caller is
      *  responsible for navigating; this screen has already stashed the
@@ -532,6 +551,7 @@ fun ChatScreen(
      *  management screen — wired to the "Edit" button on the model picker's
      *  Model Groups section header. */
     onModelGroupsClick: () -> Unit = {},
+    onEditProviderClick: ((instanceId: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -576,12 +596,30 @@ fun ChatScreen(
     )
 
     val canResume by viewModel.canResume.collectAsState()
+    val contextUsage by viewModel.contextUsage.collectAsState()
+    val contextUsageHint by viewModel.contextUsageHint.collectAsState()
+    val pendingUserQuestion by viewModel.pendingUserQuestion.collectAsState()
+    val agentWorkParents by AgentJobRegistry.parentsWithAgentWork.collectAsState()
+    val sessionBusy = isStreaming || viewModel.currentSessionId in agentWorkParents
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()
     val error by viewModel.error.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
-    val sessionTitle by viewModel.sessionTitle.collectAsState()
-    val sessionCategory by viewModel.sessionCategory.collectAsState()
+    val viewModelTitle by viewModel.sessionTitle.collectAsState()
+    val viewModelCategory by viewModel.sessionCategory.collectAsState()
+    val titleSessionId = ChatViewModelStore.rememberPersistedId(sessionId)
+    val wallpaperRepository = (context.applicationContext as com.openminis.app.MinisApp).chatWallpaperRepository
+    val wallpaperState by wallpaperRepository.state.collectAsState()
+    val sessionWallpaper = wallpaperState.forSession(titleSessionId)
+    val wallpaperTransparency = sessionWallpaper.effectiveTransparency(wallpaperState.defaultTransparency)
+    val modelWallpaper = com.openminis.app.data.model.resolveChatWallpaper(viewModel.currentModelId)
+    val storedSession by remember(chatRepository, titleSessionId) {
+        chatRepository.observeSessions().map { sessions ->
+            sessions.firstOrNull { it.id == titleSessionId }
+        }.distinctUntilChanged()
+    }.collectAsState(initial = null)
+    val sessionTitle = storedSession?.title ?: viewModelTitle
+    val sessionCategory = if (storedSession != null) storedSession?.category else viewModelCategory
     val attachments by viewModel.attachments.collectAsState()
     // [T-android-paste-placeholder] Folded pastes, rendered as chips above the
     // attachment row.
@@ -637,6 +675,13 @@ fun ChatScreen(
     // across forward navigation (file preview, env vars, etc.); see
     // ChatViewModel.listState for the why.
     val listState = viewModel.listState
+    val voiceScreenItems = remember(sessionId) { VoiceScreenItemsHolder() }
+    DisposableEffect(sessionId) {
+        onDispose {
+            com.openminis.app.ui.chat.voice.VoiceSendGate.bumpGeneration()
+            com.openminis.app.ui.chat.voice.VoiceSendGate.transcript = ""
+        }
+    }
     // T325: draft persists on the VM so navigation (e.g. push EnvVars and
     // pop back) doesn't wipe what the user has typed. Mirrors iOS
     // `AIChatView` which binds the composer against `vm.inputText`.
@@ -735,7 +780,7 @@ fun ChatScreen(
         com.openminis.app.diagnostics.PerfLongCtx.step(sessionId, "chatScreen.mount")
         onDispose {
             println("[T-HANG-DIAG] ChatScreen UNMOUNT session=$sessionId")
-            ChatViewModelStore.setActiveSession(null)
+            ChatViewModelStore.clearActiveSession(sessionId)
             // T-android-new-chat-empty-residue: drop sessions materialised by
             // a settings toggle (ensureSession via /memory, /thinking, etc.)
             // but never sent a real message. VM guards on streaming + DB count
@@ -793,6 +838,8 @@ fun ChatScreen(
     // their pending candidate back through onValueChange even after we
     // cleared inputText. Drop those late commits during a short window.
     var lastSendTimeMs by remember { mutableStateOf(0L) }
+    var followLastDistPx by remember(sessionId) { mutableStateOf(0f) }
+    var followLastGrowMs by remember(sessionId) { mutableStateOf(0L) }
     // [T-voice-mode-memory-refine-android] True when a voice recording started
     // since the composer was last cleared. The SEND is what commits the mode:
     // mic-start no longer writes "voice" (an accidental mic tap with no send
@@ -898,6 +945,7 @@ fun ChatScreen(
     }
     var showAttachMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
+    var showWallpaperSettings by remember(sessionId) { mutableStateOf(false) }
     var showSkillsSheet by remember { mutableStateOf(false) }
     // [T-mcp-integration-android] MCPs-in-Session sheet visibility.
     var showMcpsSheet by remember { mutableStateOf(false) }
@@ -918,6 +966,26 @@ fun ChatScreen(
     // current session is still streaming — stopping the running task needs
     // an explicit confirm; idle sessions skip the dialog entirely.
     var showNewChatStopDialog by remember { mutableStateOf(false) }
+    var pendingStop by remember(sessionId) { mutableStateOf<(() -> Unit)?>(null) }
+    var steerJobId by remember(sessionId) { mutableStateOf<String?>(null) }
+    var callbackDetailBlock by remember(sessionId) { mutableStateOf<AssistantBlock?>(null) }
+    if (pendingStop != null) {
+        StopChatConfirmation(
+            onDismiss = { pendingStop = null },
+            onConfirm = {
+                val action = pendingStop
+                pendingStop = null
+                action?.invoke()
+            },
+        )
+    }
+    steerJobId?.let { id ->
+        AgentSteerDialog(
+            jobId = id,
+            onDismiss = { steerJobId = null },
+            onSteer = { AgentJobRegistry.steer(id, it) },
+        )
+    }
     // [T-android-enhanced-cache] First-enable confirmation dialog visibility.
     var showEnhancedCacheDialog by remember { mutableStateOf(false) }
 
@@ -1405,7 +1473,7 @@ fun ChatScreen(
         if (visible.isEmpty()) return@scrollToPreviousUserTurn
         // Ordered oldest → newest list of user-message ids, matching the order
         // the user reads the conversation in.
-        val userIds = messages.filter { it.role == "user" }.map { it.id }
+        val userIds = messages.filter { it.rendersAsUserBubble() }.map { it.id }
         if (userIds.isEmpty()) {
             // No user turns (rare) — fall back to the oldest item (the HIGHEST
             // index; see the orientation note below) so the button is never a
@@ -1457,7 +1525,7 @@ fun ChatScreen(
             ?: 0
         // The current turn's anchor = nearest user message AT OR ABOVE the top
         // row (searching backwards through the conversation).
-        val currentAnchor = messages.take(topMsgIdx + 1).lastOrNull { it.role == "user" }?.id
+        val currentAnchor = messages.take(topMsgIdx + 1).lastOrNull { it.rendersAsUserBubble() }?.id
             ?: userIds.first()
         // Decide the target — the rule from iOS `scrollToPreviousUserTurn`: if
         // the viewport is already at the anchor we last jumped to (the user has
@@ -1663,11 +1731,7 @@ fun ChatScreen(
     // updates live when a Bluetooth keyboard connects or a cover folds shut,
     // and it recomposes the caller for free. Verified on a Mate Pad, which
     // reports `keysexposed-qwerty` with its keyboard attached.
-    val configuration = LocalConfiguration.current
-    val hasHardwareKeyboard = configuration.keyboard ==
-        android.content.res.Configuration.KEYBOARD_QWERTY &&
-        configuration.hardKeyboardHidden ==
-        android.content.res.Configuration.HARDKEYBOARDHIDDEN_NO
+    val hasHardwareKeyboard = com.openminis.app.ui.components.rememberHasHardwareKeyboard()
 
     /**
      * [T-android-hwkeyboard-keep-focus] Release the composer after a send —
@@ -1683,7 +1747,7 @@ fun ChatScreen(
         }
     }
 
-    val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
+    val performSendOrEnqueueNow: (String) -> Unit = handler@{ rawText ->
         if (viewModel.tryExecuteInputAsSlashCommand(rawText)) {
             viewModel.setInputText("")
             releaseComposerAfterSend()
@@ -1704,6 +1768,7 @@ fun ChatScreen(
         // proper terminal exit: nothing is left to restore. The dismiss and
         // command-row paths keep their own restore behaviour untouched.
         viewModel.endSlashSessionForSend()
+        com.openminis.app.ui.chat.voice.VoiceSendGate.bumpGeneration()
         viewModel.setInputText("")
         releaseComposerAfterSend()
         viewModel.sendMessage(rawText)
@@ -1714,6 +1779,18 @@ fun ChatScreen(
             kotlinx.coroutines.delay(100)
             tracedScrollToItem("SEND-PATH/settle", 0, 0)
         }
+    }
+    val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
+        if (com.openminis.app.ui.chat.voice.VoiceSendGate.deferSendIfOwed(coroutineScope, context) {
+                val transcript = com.openminis.app.ui.chat.voice.VoiceSendGate.transcript
+                viewModel.setInputText(transcript)
+                viewModel.updateSlashMenuState(transcript)
+                if (transcript.isNotBlank() || viewModel.attachments.value.isNotEmpty()) {
+                    performSendOrEnqueueNow(transcript)
+                }
+            }
+        ) return@handler
+        performSendOrEnqueueNow(rawText)
     }
     // T196: timestamp of the last drag-stop. The streaming auto-follow LE
     // below has three stages (initial scroll → re-pin after frame → settle
@@ -1952,6 +2029,14 @@ fun ChatScreen(
                         tracedScrollToItem("LE(streaming-content)cold", 0, 0)
                         return@collect
                     }
+                    val distNow = listState.firstVisibleItemIndex * avgItemSize.value.toFloat() +
+                        listState.firstVisibleItemScrollOffset
+                    val nowMs = System.currentTimeMillis()
+                    if (StreamFollowDeadband.shouldSuppress(distNow, followLastDistPx, nowMs - followLastGrowMs)) {
+                        return@collect
+                    }
+                    if (distNow > followLastDistPx) followLastGrowMs = nowMs
+                    followLastDistPx = distNow
                     // [T-android-stream-grow-anim] Ease-out frame-driven glide
                     // to the bottom. Each frame moves a fraction of the
                     // estimated remaining distance so the motion decelerates as
@@ -2103,8 +2188,13 @@ fun ChatScreen(
                 // isStreaming is the real discriminator. The streaming-content LE
                 // (gated by lastInterruptMs + isScrollInProgress) handles the
                 // follow itself; this is just the post-drag settle for it.
-                if (!inProgress && !userScrolledAway && isNearBottom.value &&
-                    viewModel.isStreaming.value
+                if (SettleAfterInteractionGate.shouldSettle(
+                        scrollInProgress = inProgress,
+                        userScrolledAway = userScrolledAway,
+                        nearBottom = isNearBottom.value,
+                        streaming = viewModel.isStreaming.value,
+                        msSinceDrag = System.currentTimeMillis() - lastInterruptMs,
+                    )
                 ) {
                     tracedScrollToItem("settle-after-interaction", 0, 0)
                 }
@@ -2559,9 +2649,10 @@ fun ChatScreen(
                         )
                         // Fallback pulse animation (iOS: 3× red pulse on model switch)
                         val fallbackTrigger by viewModel.fallbackTrigger.collectAsState()
-                        val fallbackPulseAlpha = remember { androidx.compose.animation.core.Animatable(0f) }
-                        LaunchedEffect(fallbackTrigger) {
-                            if (fallbackTrigger == 0) return@LaunchedEffect
+                        val fallbackPulseAlpha = remember(viewModel) { androidx.compose.animation.core.Animatable(0f) }
+                        val fallbackPulseBaseline = remember(viewModel) { viewModel.fallbackTrigger.value }
+                        LaunchedEffect(viewModel, fallbackTrigger) {
+                            if (!shouldPulse(fallbackTrigger, fallbackPulseBaseline)) return@LaunchedEffect
                             repeat(3) {
                                 fallbackPulseAlpha.animateTo(1f, animationSpec = androidx.compose.animation.core.tween(350))
                                 fallbackPulseAlpha.animateTo(0f, animationSpec = androidx.compose.animation.core.tween(350))
@@ -2690,14 +2781,14 @@ fun ChatScreen(
                                 text = { Text(stringResource(R.string.chat_menu_new_chat)) },
                                 onClick = {
                                     showChatMenu = false
-                                    if (isStreaming) {
+                                    if (sessionBusy) {
                                         showNewChatStopDialog = true
                                     } else {
                                         onNewChat()
                                     }
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Outlined.Forum, contentDescription = null)
+                                    com.openminis.app.ui.components.MenuItemIcon(com.openminis.app.ui.components.MinisIcons.SquareAndPencil)
                                 },
                             )
                             MinisMenuDivider()
@@ -2709,8 +2800,23 @@ fun ChatScreen(
                                     showClearChatDialog = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Delete, tint = MaterialTheme.colorScheme.error)
                                 },
+                            )
+                            MinisMenuDivider()
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_wallpaper_enabled)) },
+                                onClick = {
+                                    wallpaperRepository.setSessionEnabled(titleSessionId, !sessionWallpaper.enabled)
+                                    showChatMenu = false
+                                },
+                                leadingIcon = { com.openminis.app.ui.components.MenuItemIcon(Icons.Default.Image) },
+                                trailingIcon = { Switch(checked = sessionWallpaper.enabled, onCheckedChange = null) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_wallpaper_transparency_value, wallpaperTransparency)) },
+                                onClick = { showChatMenu = false; showWallpaperSettings = true },
+                                leadingIcon = { com.openminis.app.ui.components.MenuItemIcon(Icons.Default.Image) },
                             )
                             MinisMenuDivider()
                             // Open Terminal (iOS parity) — session-bound, starts in /var/minis
@@ -2721,7 +2827,7 @@ fun ChatScreen(
                                     onOpenTerminal()
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Terminal, contentDescription = null)
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Terminal)
                                 },
                             )
                             // Open Browser (iOS parity)
@@ -2732,18 +2838,18 @@ fun ChatScreen(
                                     viewModel.toggleBrowserSheet()
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Language, contentDescription = null)
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Language)
                                 },
                             )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.task_artifacts_title)) },
                                 onClick = { showChatMenu = false; showTaskArtifacts = true },
-                                leadingIcon = { Icon(Icons.Default.Description, contentDescription = null) },
+                                leadingIcon = { com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Description) },
                             )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.task_budget_title)) },
                                 onClick = { showChatMenu = false; showTaskBudget = true },
-                                leadingIcon = { Icon(Icons.Default.Speed, contentDescription = null) },
+                                leadingIcon = { com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Speed) },
                             )
                             // Browse Chat Files (iOS parity) — opens file browser at /var/minis
                             DropdownMenuItem(
@@ -2753,7 +2859,7 @@ fun ChatScreen(
                                     onBrowseChatFiles()
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Description, contentDescription = null)
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Description)
                                 },
                             )
                             MinisMenuDivider()
@@ -2766,7 +2872,7 @@ fun ChatScreen(
                                         showSkillsSheet = true
                                     },
                                     leadingIcon = {
-                                        Icon(Icons.Default.Build, contentDescription = null)
+                                        com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Build)
                                     },
                                 )
                             }
@@ -2779,7 +2885,7 @@ fun ChatScreen(
                                         showMcpsSheet = true
                                     },
                                     leadingIcon = {
-                                        Icon(Icons.Default.Extension, contentDescription = null)
+                                        com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Extension)
                                     },
                                 )
                             }
@@ -2792,7 +2898,7 @@ fun ChatScreen(
                                         viewModel.toggleMemorySheet()
                                     },
                                     leadingIcon = {
-                                        Icon(Icons.Default.Psychology, contentDescription = null)
+                                        com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Psychology)
                                     },
                                 )
                             }
@@ -2801,7 +2907,7 @@ fun ChatScreen(
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.session_mail_title)) },
                                 onClick = { showChatMenu = false; showSessionCommunication = true },
-                                leadingIcon = { Icon(Icons.Default.SwapHoriz, contentDescription = null) },
+                                leadingIcon = { com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.SwapHoriz) },
                             )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.settings_token_usage)) },
@@ -2810,7 +2916,7 @@ fun ChatScreen(
                                     showTokenUsageSheet = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.DataUsage, contentDescription = null)
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.DataUsage)
                                 },
                             )
                             // Enhanced Cache (iOS parity, commit 57aaf122):
@@ -2835,7 +2941,7 @@ fun ChatScreen(
                                         }
                                     },
                                     leadingIcon = {
-                                        Icon(Icons.Default.Bolt, contentDescription = null)
+                                        com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Bolt)
                                     },
                                     trailingIcon = {
                                         SettingsSwitch(
@@ -2871,7 +2977,7 @@ fun ChatScreen(
                                     text = { Text(stringResource(R.string.chat_menu_fast_mode)) },
                                     onClick = { viewModel.setFastModeEnabled(!fastModeOn) },
                                     leadingIcon = {
-                                        Icon(Icons.Default.Bolt, contentDescription = null)
+                                        com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Bolt)
                                     },
                                     trailingIcon = {
                                         SettingsSwitch(
@@ -2892,7 +2998,7 @@ fun ChatScreen(
                                 text = { Text(stringResource(R.string.chat_menu_auto_compact)) },
                                 onClick = { viewModel.setAutoCompactEnabled(!autoCompactOn) },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Compress, contentDescription = null)
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Outlined.Compress)
                                 },
                                 trailingIcon = {
                                     SettingsSwitch(
@@ -2922,9 +3028,8 @@ fun ChatScreen(
                                         )
                                     },
                                     leadingIcon = {
-                                        Icon(
-                                            Icons.Default.BugReport,
-                                            contentDescription = null,
+                                        com.openminis.app.ui.components.MenuItemIcon(
+                                            Icons.Outlined.BugReport,
                                             tint = MaterialTheme.colorScheme.error,
                                         )
                                     },
@@ -2985,7 +3090,13 @@ fun ChatScreen(
             }
 
             // Messages + scroll-to-bottom button
-            Box(modifier = Modifier.weight(1f)) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                // Fit the full artwork above the composer, including when its height changes.
+                ChatWallpaperLayer(
+                    wallpaper = modelWallpaper.takeIf { sessionWallpaper.enabled },
+                    transparency = wallpaperTransparency,
+                    modifier = Modifier.matchParentSize(),
+                )
                 var toolBarHeightPx by remember { mutableStateOf(0) }
                 val density = LocalDensity.current
                 val toolBarHeightDp = with(density) { toolBarHeightPx.toDp() }
@@ -3133,9 +3244,16 @@ fun ChatScreen(
                 // frame's list while the next one computes. Keyed on `sessionId` so a
                 // chat-switch resets the cache; LaunchedEffect(messages) reruns the
                 // computation on every new emission.
-                var flatItems by remember(sessionId) {
+                var rawFlatItems by remember(sessionId) {
                     mutableStateOf<List<FlatChatItem>>(emptyList())
                 }
+                var expandedToolGroups by rememberSaveable(sessionId) {
+                    mutableStateOf(setOf<String>())
+                }
+                val flatItems = remember(rawFlatItems, expandedToolGroups) {
+                    groupCompletedTools(rawFlatItems, expandedToolGroups)
+                }
+                SideEffect { voiceScreenItems.items = flatItems }
                 // [T-android-coldload-offmain-parse] Composition-snapshot
                 // prewarmer (captures the markdown palette) used by the
                 // flatten effect below to warm the parse caches for the
@@ -3220,7 +3338,7 @@ fun ChatScreen(
                             val frozenReused = splitIdx == frozenSplitIdx
                             if (!frozenReused) {
                                 val tBuildStart = System.nanoTime()
-                                val wasEmptyPre = flatItems.isEmpty()
+                                val wasEmptyPre = rawFlatItems.isEmpty()
                                 // [T-android-perf-logging] Mark the start of a
                                 // full (first / non-streaming) build so the
                                 // gap to buildFlatChatItems.firstBuild bounds
@@ -3323,7 +3441,7 @@ fun ChatScreen(
                                     buildFlatChatItems(merged, null, fromIndex = splitIdx, seedKeys = frozenKeys)
                                 }
                             }
-                            flatItems = if (liveRows.isEmpty()) frozenRows else frozenRows + liveRows
+                            rawFlatItems = if (liveRows.isEmpty()) frozenRows else frozenRows + liveRows
                             com.openminis.app.diagnostics.StreamPerfMonitor.tick(
                                 flattenNanos = System.nanoTime() - tickStartNs,
                                 frozenReused = frozenReused,
@@ -3429,6 +3547,9 @@ fun ChatScreen(
                 fun originalMessageId(id: String): String =
                     id.substringBefore('#')
                 fun FlatChatItem.isCompacted(): Boolean = when (this) {
+                    is FlatChatItem.AgentCallbackCard -> grayedMap[originalMessageId(message.id)] == true
+                    is FlatChatItem.ScheduledTaskCardItem -> grayedMap[originalMessageId(message.id)] == true
+                    is FlatChatItem.CompletedTools -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.UserBubble -> grayedMap[originalMessageId(message.id)] == true
                     is FlatChatItem.AssistantHeader -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantText -> grayedMap[originalMessageId(messageId)] == true
@@ -3474,6 +3595,14 @@ fun ChatScreen(
                 // scrolling back in re-registers the shard and the highlight
                 // redraws automatically.
                 val selectionController = remember { SelectionController() }
+                val selectionRowOrder = remember(flatItems) {
+                    flatItems.mapIndexed { index, row -> row.key to index }.toMap()
+                }
+                val latestSelectionRowOrder by rememberUpdatedState(selectionRowOrder)
+                DisposableEffect(selectionController) {
+                    selectionController.documentOrder = chatDocumentOrder { latestSelectionRowOrder }
+                    onDispose { selectionController.documentOrder = null }
+                }
                 // [T-android-selection-readaloud] Player backing the selection
                 // toolbar's "Read Aloud". Screen-scoped and independent of the
                 // voice panel's own player (that one only exists while voice
@@ -3689,6 +3818,13 @@ fun ChatScreen(
                                 progress = progress,
                                 onCancel = { viewModel.cancelCompact() },
                             )
+                        }
+                    }
+                    pendingUserQuestion?.let { request ->
+                        item(key = "question:${request.id}", contentType = "question") {
+                            UserQuestionCard(request) { answers ->
+                                viewModel.answerUserQuestion(request.id, answers)
+                            }
                         }
                     }
                     if (canResume && !isStreaming && error == null && !lastAssistantHasError) {
@@ -3972,7 +4108,73 @@ fun ChatScreen(
                                     )
                                 }
                             }
-                            is FlatChatItem.AssistantToolUse -> ToolCallPill(
+                            is FlatChatItem.CompletedTools -> CompletedToolGroup(
+                                count = item.count,
+                                expanded = item.expanded,
+                                onToggle = {
+                                    expandedToolGroups = if (item.key in expandedToolGroups) {
+                                        expandedToolGroups - item.key
+                                    } else expandedToolGroups + item.key
+                                },
+                            )
+                            is FlatChatItem.AgentCallbackCard -> AgentCallbackCard(
+                                callback = item.callback,
+                                onTap = { callbackDetailBlock = item.callback.syntheticBlock() },
+                            )
+                            is FlatChatItem.ScheduledTaskCardItem -> ScheduledTaskCard(
+                                marker = item.marker,
+                                hostSessionId = viewModel.currentSessionId,
+                            )
+                            is FlatChatItem.AssistantToolUse -> if (
+                                HelperRunner.isSubAgentToolName(item.block.toolName) &&
+                                helperControlSummary(item.block) == null
+                            ) {
+                                HelperToolBlock(
+                                    block = item.block,
+                                    onOpenDetail = { viewModel.openToolDetail(it) },
+                                    onSteer = {
+                                        val childId = HelperRunner.childSessionIdFrom(item.block.content)
+                                        val job = childId?.let { AgentJobRegistry.jobForSession(it) }
+                                        if (job?.isActive == true) steerJobId = job.id
+                                    },
+                                    onStop = {
+                                        pendingStop = {
+                                            val childId = HelperRunner.childSessionIdFrom(item.block.content)
+                                            val job = childId?.let { AgentJobRegistry.jobForSession(it) }
+                                            if (job?.isActive == true && childId != null) {
+                                                AgentJobRegistry.cancelSiblings(childId, "user-stop-block")
+                                            } else if (childId != null) {
+                                                helperViewModelFor(context, childId).cancelStream()
+                                            } else {
+                                                AgentJobRegistry.dropQueuedDelegations(viewModel.currentSessionId, "user-stop-block")
+                                                AgentJobRegistry.cancelAll(viewModel.currentSessionId, "user-stop-block")
+                                            }
+                                        }
+                                    },
+                                    onStart = {
+                                        if (!viewModel.startNeverStartedDelegation(item.block)) {
+                                            android.widget.Toast.makeText(
+                                                context, context.getString(R.string.helper_start_failed),
+                                                android.widget.Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
+                                    },
+                                    onResume = {
+                                        val outcome = viewModel.resumeInterruptedFromCard(item.block)
+                                        val note = when (outcome) {
+                                            ChatViewModel.CardResume.STARTED -> null
+                                            ChatViewModel.CardResume.QUEUED -> R.string.helper_resume_queued
+                                            ChatViewModel.CardResume.REFUSED -> R.string.helper_resume_failed
+                                        }
+                                        note?.let {
+                                            android.widget.Toast.makeText(
+                                                context, context.getString(it), android.widget.Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
+                                        outcome != ChatViewModel.CardResume.REFUSED
+                                    },
+                                )
+                            } else ToolCallPill(
                                 block = item.block,
                                 allToolBlocks = item.allToolBlocks,
                                 onRetry = if (item.isLastCancelled && !isStreaming && !canResume) ({ safeMutate { viewModel.retryLast() } }) else null,
@@ -3981,7 +4183,7 @@ fun ChatScreen(
                                 // when the block is RUNNING/STREAMING — see
                                 // ToolCallPill `isRunning && onStop != null`
                                 // — so passing it unconditionally is safe.
-                                onStop = { viewModel.cancelStream() },
+                                onStop = { pendingStop = { viewModel.cancelStream() } },
                                 onOpenTerminalWithCommand = onOpenTerminalWithCommand,
                                 // T261: route detail open through ViewModel so
                                 // the sheet is hoisted out of LazyColumn item
@@ -4231,7 +4433,7 @@ fun ChatScreen(
                             toolBlocks = lastToolBlocks,
                             // T14: per-card stop on the floating bar — same
                             // global cancel as the message-list pill button.
-                            onStop = { viewModel.cancelStream() },
+                            onStop = { pendingStop = { viewModel.cancelStream() } },
                             onOpenTerminalWithCommand = onOpenTerminalWithCommand,
                             // T261: route detail open through the same VM
                             // state as in-list pills so both surfaces share
@@ -4303,6 +4505,22 @@ fun ChatScreen(
                         onOpenBrowserForUrl = { url ->
                             viewModel.closeToolDetail()
                             viewModel.openBrowserSheetForUrl(url)
+                        },
+                        onOpenAgentTranscript = { childId ->
+                            viewModel.closeToolDetail()
+                            onOpenAgentTranscript(childId)
+                        },
+                    )
+                }
+
+                callbackDetailBlock?.let { block ->
+                    ToolDetailSheet(
+                        toolBlocks = listOf(block),
+                        initialIndex = 0,
+                        onDismiss = { callbackDetailBlock = null },
+                        onOpenAgentTranscript = { childId ->
+                            callbackDetailBlock = null
+                            onOpenAgentTranscript(childId)
                         },
                     )
                 }
@@ -4974,7 +5192,8 @@ fun ChatScreen(
                                     // is text to send; otherwise keep the
                                     // overlay hidden and defer keyboard
                                     // activation to onEnd.
-                                    val hasText = viewModel.inputText.value.isNotBlank()
+                                    val hasText = viewModel.inputText.value.isNotBlank() ||
+                                com.openminis.app.ui.chat.voice.VoiceSendGate.owesText()
                                     if (hasText) {
                                         val newProgress = (-totalDy / swipeThresholdPx).coerceIn(0f, 1f)
                                         if (newProgress >= swipeArmFraction && sendSwipeProgress < swipeArmFraction) {
@@ -5051,6 +5270,11 @@ fun ChatScreen(
                                 shadowPaint,
                             )
                         }
+                        .contextUsageGlow(
+                            tier = contextUsage?.tier ?: ContextUsage.Tier.NORMAL,
+                            cornerRadius = 20.dp,
+                            animate = !animationsDisabled(context),
+                        )
                         .padding(top = if (attachments.isNotEmpty()) 8.dp else 4.dp),
                 ) {
                     // T185: Move-to capsule lives INSIDE the composer card,
@@ -5364,10 +5588,15 @@ fun ChatScreen(
                             // FULL message list (not the windowed uiMessages) so
                             // older turns still contribute rare-term grounding;
                             // evaluated lazily at correction time.
-                            conversationContextProvider = {
+                            conversationContextProvider = { screen ->
                                 com.openminis.app.speech.correction.VoiceCorrection
-                                    .buildConversationContext(context, viewModel.messages.value)
+                                    .buildConversationContext(context, viewModel.messages.value, screen)
                             },
+                            captureScreen = {
+                                captureVoiceScreenSnapshot(listState, voiceScreenItems.items, reverseLayout = true)
+                            },
+                            contextUsageHint = contextUsageHint,
+                            onEditProvider = onEditProviderClick,
                         )
                     } else if (recIsRecording) {
                         val levels by com.openminis.app.speech.SpeechRecognitionManager
@@ -5412,10 +5641,39 @@ fun ChatScreen(
                             mutableIntStateOf(ComposerPlaceholderRotation.DEFAULT_INDEX)
                         }
                         var composerHasFocusedBefore by rememberSaveable { mutableStateOf(false) }
+                        val usageLifecycle = remember(sessionId) { ContextUsageHintLifecycle() }
+                        var shownUsageHint by remember(sessionId) { mutableStateOf<ContextUsageHint?>(null) }
+                        LaunchedEffect(contextUsageHint?.generation) {
+                            val candidate = contextUsageHint ?: return@LaunchedEffect
+                            usageLifecycle.present(candidate)
+                            usageLifecycle.onTextChanged(inputFieldValue.text)
+                            shownUsageHint = usageLifecycle.hint
+                        }
+                        LaunchedEffect(inputFieldValue.text.isEmpty()) {
+                            usageLifecycle.onTextChanged(inputFieldValue.text)
+                            shownUsageHint = usageLifecycle.hint
+                        }
                         // TalkBack pins the placeholder — see the picker's
                         // accessibility note. Read live rather than cached so
                         // enabling the screen reader mid-session takes effect.
                         val screenReaderEnabled = rememberScreenReaderEnabled()
+                        val onComposerVisit: (Boolean) -> Unit = { shouldRotate ->
+                            shownUsageHint = usageLifecycle.hint
+                            if (shouldRotate) {
+                                placeholderIndex = ComposerPlaceholderRotation.nextIndex(
+                                    current = placeholderIndex,
+                                    hasFocusedBefore = composerHasFocusedBefore,
+                                    sessionHasMessages = messages.isNotEmpty(),
+                                    screenReaderOn = screenReaderEnabled,
+                                    randomIndex = { bound -> kotlin.random.Random.nextInt(bound) },
+                                )
+                                composerHasFocusedBefore = true
+                            }
+                        }
+                        val imeVisible = WindowInsets.isImeVisible
+                        LaunchedEffect(imeVisible) {
+                            if (imeVisible) onComposerVisit(usageLifecycle.onImeShown())
+                        }
                         val mergedTextStyle = MaterialTheme.typography.bodyMedium.copy(
                             fontSize = 16.5.sp * chatInputFontScale,
                             color = MaterialTheme.colorScheme.onSurface,
@@ -5425,8 +5683,7 @@ fun ChatScreen(
                         // captured at BasicTextField construction) so a
                         // toggle in Settings reflects on the next IME
                         // commit without recomposing the chat tree.
-                        val sendOnEnter = com.openminis.app.ui.settings
-                            .returnKeySendsMessage(context)
+                        val sendOnEnter by rememberReturnKeySendsMessage(context)
                         // Shared "Enter pressed → send" body used by BOTH
                         // the hardware-keyboard onKeyEvent path AND the
                         // soft-keyboard KeyboardActions.onSend below.
@@ -5440,33 +5697,10 @@ fun ChatScreen(
                         // onSend; this lambda is the single source of
                         // truth for what "press Enter to send" means.
                         val performEnterSend: () -> Boolean = handler@{
-                            if (inputText.isBlank() && attachments.isEmpty()) return@handler false
-                            // Intercept slash commands so "/compact" et al.
-                            // run locally instead of being sent as a chat
-                            // turn. Mirrors iOS performSend().
-                            if (viewModel.tryExecuteInputAsSlashCommand(inputText)) {
-                                viewModel.setInputText("")
-                                releaseComposerAfterSend()
-                                return@handler true
-                            }
-                            // T160: snapshot → clear state + IME →
-                            // sendMessage. Same ordering as the send-
-                            // button click; finishComposingText fires
-                            // when focus drops so any IME composing
-                            // buffer is committed/dropped before the
-                            // empty inputText becomes visible.
-                            val toSend = inputText
-                            lastSendTimeMs = System.currentTimeMillis()
-                            viewModel.setInputText("")
-                            releaseComposerAfterSend()
-                            viewModel.sendMessage(toSend)
-                            noteSendForInputModePref()
-                            userScrolledAway = false
-                            coroutineScope.launch {
-                                tracedScrollToItem("SEND-PATH(keyboard-imeAction)/initial", 0, 0)
-                                kotlinx.coroutines.delay(100)
-                                tracedScrollToItem("SEND-PATH(keyboard-imeAction)/settle", 0, 0)
-                            }
+                            if (inputText.isBlank() && attachments.isEmpty() &&
+                                !com.openminis.app.ui.chat.voice.VoiceSendGate.owesText()
+                            ) return@handler false
+                            performSendOrEnqueue(viewModel.inputText.value)
                             true
                         }
                         BasicTextField(
@@ -5624,14 +5858,7 @@ fun ChatScreen(
                                     // those would swap the hint while the user
                                     // is typing or dismissing the keyboard.
                                     if (it.isFocused && !inputFocused) {
-                                        placeholderIndex = ComposerPlaceholderRotation.nextIndex(
-                                            current = placeholderIndex,
-                                            hasFocusedBefore = composerHasFocusedBefore,
-                                            sessionHasMessages = messages.isNotEmpty(),
-                                            screenReaderOn = screenReaderEnabled,
-                                            randomIndex = { bound -> kotlin.random.Random.nextInt(bound) },
-                                        )
-                                        composerHasFocusedBefore = true
+                                        if (hasHardwareKeyboard) onComposerVisit(usageLifecycle.onFocusGained())
                                     }
                                     inputFocused = it.isFocused
                                 }
@@ -5795,12 +6022,13 @@ fun ChatScreen(
                                         // Reduce Motion branch.
                                         val fadeMs = if (animationsDisabled(context)) 0 else 220
                                         Crossfade(
-                                            targetState = placeholderIndex,
+                                            targetState = shownUsageHint?.let { -it.generation - 1 } ?: placeholderIndex,
                                             animationSpec = tween(durationMillis = fadeMs),
                                             label = "composerPlaceholder",
                                         ) { idx ->
                                             Text(
-                                                composerPlaceholderText(idx, soulName.name),
+                                                if (idx < 0 && shownUsageHint != null) contextUsageAnnotatedText(shownUsageHint!!)
+                                                else androidx.compose.ui.text.AnnotatedString(composerPlaceholderText(idx.coerceAtLeast(0), soulName.name)),
                                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                                                 fontSize = 16.5.sp * chatInputFontScale,
                                                 maxLines = 1,
@@ -6402,15 +6630,16 @@ fun ChatScreen(
                         // satisfies the composer's send guard. Without this an
                         // image-only "look at this" send is impossible.
                         val hasText = inputText.isNotBlank()
-                        val hasContent = hasText || attachments.isNotEmpty()
-                        val showStop = isStreaming && !hasContent
+                        val voiceOwesText = com.openminis.app.ui.chat.voice.VoiceSendGate.owesText()
+                        val hasContent = hasText || attachments.isNotEmpty() || voiceOwesText
+                        val showStop = sessionBusy && !hasContent
                         if (showStop) {
                             Box(
                                 modifier = Modifier
                                     .size(38.dp)
                                     .background(Color(0xFFFF3B30), CircleShape)
                                     .clip(CircleShape)
-                                    .clickable { viewModel.cancelStream() },
+                                    .clickable { pendingStop = { viewModel.cancelStream() } },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Icon(
@@ -6424,38 +6653,10 @@ fun ChatScreen(
                             // Streaming with content → Send-into-queue; Idle with content → Send.
                             // Idle without text or attachments → disabled.
                             val canActivate = hasContent
-                            Box(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .background(
-                                        if (canActivate) ChatColors.sendButton
-                                        else ChatColors.sendButtonDisabled,
-                                        CircleShape,
-                                    )
-                                    .clip(CircleShape)
-                                    .clickable(enabled = canActivate) {
-                                        // T-drag-send-queue: route through the
-                                        // shared send-or-enqueue handler. Same
-                                        // semantics as before: slash short-
-                                        // circuit, snapshot text, clear input
-                                        // + focus, then sendMessage (which
-                                        // routes to enqueuePrompt when
-                                        // _isStreaming is true), then re-pin
-                                        // the list to index 0 with a 100ms
-                                        // re-pin to catch the late-mounting
-                                        // "thinking" indicator.
-                                        performSendOrEnqueue(inputText)
-                                    },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    Icons.Default.ArrowUpward,
-                                    contentDescription = "Send",
-                                    tint = if (canActivate) ChatColors.background
-                                    else ChatColors.primaryText.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
+                            ComposerSendButton(
+                                canActivate = canActivate,
+                                onSend = { performSendOrEnqueue(viewModel.inputText.value) },
+                            )
                         }
                     }
                 }
@@ -6625,6 +6826,17 @@ fun ChatScreen(
         }
     }
 
+    if (showWallpaperSettings) {
+        ChatWallpaperSheet(
+            wallpaper = modelWallpaper,
+            transparency = wallpaperTransparency,
+            followsDefault = sessionWallpaper.transparencyOverride == null,
+            onTransparencyChange = { wallpaperRepository.setSessionTransparency(titleSessionId, it) },
+            onReset = { wallpaperRepository.setSessionTransparency(titleSessionId, null) },
+            onDismiss = { showWallpaperSettings = false },
+        )
+    }
+
     // Browser bottom sheet
     if (showBrowserSheet) {
         BrowserSheet(
@@ -6678,6 +6890,9 @@ fun ChatScreen(
     }
 
     // Model Picker bottom sheet
+    val reopenModelPickerOnResume = com.openminis.app.ui.components.rememberReopenOnResume {
+        showModelPicker = true
+    }
     if (showModelPicker) {
         val config by providerRepository.config.collectAsState()
         val activeEntryId by viewModel.activeEntryId.collectAsState()
@@ -6757,6 +6972,13 @@ fun ChatScreen(
             // [T-android-modelpicker-group-edit] Close the picker first, then
             // navigate — pushing the management screen on top of an open bottom
             // sheet leaves the sheet lingering behind it on back.
+            onEditProvider = onEditProviderClick?.let { open ->
+                { id: String ->
+                    showModelPicker = false
+                    reopenModelPickerOnResume()
+                    open(id)
+                }
+            },
             onEditGroups = {
                 showModelPicker = false
                 onModelGroupsClick()

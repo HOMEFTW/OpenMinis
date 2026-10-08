@@ -20,6 +20,8 @@
          policy, not an OS runtime check, and Minis ships as a sideload.
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- BackupForegroundService uses dataSync and stops when its run or time budget ends. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- T50: PARTIAL_WAKE_LOCK held by AgentForegroundService while sessions
          are streaming so Doze + OEM CPU throttling don't stall long shell
          tools after screen-off. -->
@@ -149,6 +151,9 @@
             <action android:name="android.intent.action.SENDTO" />
             <data android:scheme="mailto" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <!-- [T-android-tablet-split] enableOnBackInvokedCallback (on <application>):
@@ -186,6 +191,7 @@
              change, so nothing depends on the recreate to re-read resources. -->
         <activity
             android:name=".MainActivity"
+            android:screenOrientation="user"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
             android:exported="true"
             android:launchMode="singleTask"
@@ -460,12 +466,19 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- Keeps a backup alive while the app is in the background. -->
+        <service
+            android:name=".service.BackupForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
         <receiver
             android:name=".offload.AlarmReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

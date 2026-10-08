@@ -51,6 +51,29 @@ class ModelUseImageResultTest {
         assertEquals("answer", JSONObject(result.output).getString("text"))
     }
 
+    @Test fun imageOnlyChatRefusalFailsBeforeResolvingOrWritingFiles() {
+        val result = saveModelUseResult(
+            modelId = "image-chat", response = LLMResponse("Policy refusal", "stop", null),
+            outputPath = null, outputExt = "", requireMedia = true,
+            resolveFile = { error("A refused generation must not resolve a file") }, mimeToExt = { "png" },
+        )
+        val body = JSONObject(result.output)
+        assertEquals(1, result.exitCode)
+        assertEquals("no_media_generated", body.getString("error"))
+        assertEquals("Policy refusal", body.getString("model_text"))
+        assertFalse(body.has("output_file"))
+    }
+
+    @Test fun videoOutputWritesBytesAndKeepsAdditionalMedia() {
+        val media = images.map { it.copy(type = LLMMediaAttachment.MediaType.VIDEO, mimeType = "video/mp4") }
+        val path = "/var/minis/workspace/clip.mp4"
+        val result = saveModelUseResult("video", LLMResponse("clip", "stop", null, media), path, "mp4",
+            resolveFile = ::host, mimeToExt = { "mp4" })
+        assertEquals(0, result.exitCode)
+        assertArrayEquals(media[0].data, host(path).readBytes())
+        assertImages(JSONObject(result.output))
+    }
+
     @Test fun jsonOutputKeepsAllImagesAndWritesResultManifest() {
         val path = "/var/minis/workspace/portrait_result.json"
         val result = save(path)

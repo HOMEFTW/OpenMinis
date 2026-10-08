@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.onEach
@@ -312,7 +313,11 @@ class SessionListViewModel(
                 started.await()
                 runCatching { unsub() }
             }
-            chatRepository.observeSessions().collect {
+            chatRepository.observeSessions().collect { rows ->
+                val existingIds = rows.mapTo(hashSetOf()) { it.id }
+                // An orphan has no parent entry through which it can be reached.
+                // Keep it visible for review instead of deleting user data on startup.
+                val it = rows.filter { !it.isChild || it.parentSessionId !in existingIds }
                 _allSessions.value = it
                 if (!_isInitialLoadComplete.value) _isInitialLoadComplete.value = true
                 detectNewTopSession(it)
@@ -334,18 +339,18 @@ class SessionListViewModel(
                     isSearching.value = active && q.isNotBlank()
                 }
                 .debounce(300)
-                .collect { (q, active) ->
+                .collectLatest { (q, active) ->
                     if (active && q.isNotBlank()) {
-                        val results = chatRepository.searchSessions(q)
-                        searchResults.value = results
-                        // Compute per-session content snippets off the main
-                        // thread. Sessions whose title already matches don't
-                        // need a snippet — we only walk messages when the
-                        // title doesn't contain the query.
-                        val snips = withContext(Dispatchers.IO) {
-                            buildContentSnippets(results, q)
+                        val hits = withContext(Dispatchers.IO) {
+                            val existingIds = chatRepository.dao.listSessions().mapTo(hashSetOf()) { it.id }
+                            chatRepository.searchSessionsWithHits(q).filter {
+                                !it.session.isChild || it.session.parentSessionId !in existingIds
+                            }
                         }
-                        searchSnippets.value = snips
+                        searchResults.value = hits.map { it.session }
+                        searchSnippets.value = hits.mapNotNull { hit ->
+                            hit.snippet?.let { hit.session.id to it }
+                        }.toMap()
                     } else {
                         searchResults.value = emptyList()
                         searchSnippets.value = emptyMap()
@@ -387,12 +392,9 @@ class SessionListViewModel(
         val ids = selectedIds.value.toList()
         viewModelScope.launch {
             ids.forEach {
-                chatRepository.deleteSession(it)
-                ChatViewModelStore.release(it)
-                // [T-android-session-paused-badge] Drop badges for the
-                // deleted session so persisted PAUSED entries don't leak
-                // forever in SharedPreferences.
-                com.openminis.app.service.SessionBadgeStore.clear(it)
+                com.openminis.app.data.session.SessionDeleter.deleteTree(
+                    context, chatRepository, it, "session-list-multi",
+                )
             }
         }
         clearSelection()
@@ -400,9 +402,9 @@ class SessionListViewModel(
 
     fun deleteSession(id: String) {
         viewModelScope.launch {
-            chatRepository.deleteSession(id)
-            ChatViewModelStore.release(id)
-            com.openminis.app.service.SessionBadgeStore.clear(id)
+            com.openminis.app.data.session.SessionDeleter.deleteTree(
+                context, chatRepository, id, "session-list",
+            )
         }
     }
 
@@ -715,9 +717,9 @@ class SessionListViewModel(
         viewModelScope.launch {
             val memberIds = chatRepository.sessionIdsInFolder(folderId)
             for (id in memberIds) {
-                chatRepository.deleteSession(id)
-                ChatViewModelStore.release(id)
-                com.openminis.app.service.SessionBadgeStore.clear(id)
+                com.openminis.app.data.session.SessionDeleter.deleteTree(
+                    context, chatRepository, id, "session-group",
+                )
             }
             chatRepository.dissolveFolder(folderId)
             // Just drop the dead id — do NOT use expandOnly here. The folder no
@@ -841,71 +843,24 @@ class SessionListViewModel(
                     append(com.openminis.app.ui.chat.titleLanguageDirective())
                 }
 
-                // Build candidate list: session's model first, then all others.
-                // T334: filter out non-text-output models (tts/voiceclone/voicedesign/image/video/audio-only)
-                // and models whose id obviously names a non-chat capability — they either reject the
-                // chat/completions schema with HTTP 400 or stream nothing useful, masking the real result
-                // with a misleading "Param Incorrect" tail error.
-                val allEntries = providerRepository.allVisibleEntries()
-                val titleEligible = allEntries.filter { entry ->
-                    val outs = entry.model.outputModalities
-                    val outputsText = outs == null || outs.isEmpty() || outs.contains("text")
-                    val idLower = entry.model.id.lowercase()
-                    val nonChatId = listOf("tts", "voiceclone", "voicedesign", "embedding", "embed-", "whisper", "image", "video")
-                        .any { idLower.contains(it) }
-                    outputsText && !nonChatId
-                }
-                // [T-android-regenerate-title-submodel] Priority: dedicated
-                // title sub-model (defaultSubGroupId's first enabled member) >
-                // session's bound primary model > every other eligible model.
-                // Aligns the manual Regenerate path with the auto-title path
-                // (ChatViewModel.resolveTitleProvider) and iOS resolveSubEntry —
-                // previously the sub-model was ignored here, so users who
-                // configured a cheap/fast title model still paid for the primary.
-                // The sub-entry must pass the same T334 modality filter; when no
-                // sub-group is configured / all members disabled it's null and we
-                // fall through to the existing primary-first ordering.
-                val subEntry = providerRepository.resolveTitleSubEntry()
-                    ?.takeIf { sub -> titleEligible.any { it == sub } }
-                val primary = titleEligible.firstOrNull { it.model.id == session.modelId }
-                    ?.takeIf { it != subEntry }
-                val candidates = (listOfNotNull(subEntry, primary) +
-                    titleEligible.filter { it != subEntry && it != primary })
-
-                var lastError: Exception? = null
-                for (entry in candidates) {
-                    val instance = providerRepository.instance(entry.providerInstanceId) ?: continue
-                    // [T-android-keyless-provider-selection] usableApiKey —
-                    // see the note in runGroupSuggestion above.
-                    var apiKey = providerRepository.usableApiKey(instance) ?: continue
-
-                    // Refresh OAuth token if needed
-                    if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
-                        try {
-                            val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                            val freshToken = manager?.validAccessToken()
-                            if (freshToken != null && freshToken != apiKey) {
-                                providerRepository.saveApiKey(instance.id, freshToken)
-                                apiKey = freshToken
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "OAuth refresh failed: ${e.message}")
-                        }
-                    }
-
-                    val provider = try {
-                        ProviderFactory.create(instance, apiKey, entry.model, context)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Provider creation failed for ${entry.model.displayName}: ${e.message}")
-                        continue
-                    }
+                val candidates = com.openminis.app.ui.chat.TitleCandidates.forSession(
+                    providerRepository, id,
+                    com.openminis.app.ui.chat.TitleCandidates.PrimarySource.parse(session.modelBinding),
+                    session.modelId,
+                )
+                val written = com.openminis.app.ui.chat.TitleCandidates.walk(
+                    candidates, origin = origin,
+                    shouldStop = { chatRepository.getSession(id)?.title != session.title },
+                ) { entry ->
+                    val provider = com.openminis.app.ui.chat.TitleCandidates.providerFor(
+                        providerRepository, context, entry, id,
+                    ) ?: return@walk null
 
                     AppLogger.info(
                         "TitleGen",
                         "dispatch origin=$origin session=${id.take(8)} model=${entry.model.id}",
                     )
 
-                    try {
                         // T334: reasoning models burn the entire token budget on hidden thinking
                         // before emitting any content. With maxTokens=100 every reasoning candidate
                         // returned `finish_reason=length` with empty text, then the loop silently
@@ -939,13 +894,14 @@ class SessionListViewModel(
                         )
                         val (title, category) = parseTitleResponse(response.text)
                         if (title.isNotEmpty()) {
+                            if (chatRepository.getSession(id)?.title != session.title) return@walk false
                             chatRepository.updateSessionTitleAndCategory(id, title, category)
                             AppLogger.info(
                                 "TitleGen",
                                 "outcome=set origin=$origin session=${id.take(8)} " +
                                     "model=${entry.model.id} elapsedMs=${System.currentTimeMillis() - startedAt}",
                             )
-                            return true
+                            return@walk true
                         }
                         // T334: previously this empty-result path was silent — only the *last*
                         // failing candidate's exception got reported, masking budget exhaustion
@@ -956,20 +912,12 @@ class SessionListViewModel(
                                 "stopReason=${response.stopReason} textLen=${response.text.length} " +
                                 "maxTokens=$titleMaxTokens supportsReasoning=${entry.model.supportsReasoning}",
                         )
-                    } catch (e: Exception) {
-                        lastError = e
-                        Log.w(TAG, "Title regen via ${entry.model.displayName} failed: ${e.message}")
-                        // Continue to next candidate on rate-limit / provider error
-                        continue
-                    }
+                    null
                 }
-            AppLogger.warning(
-                "TitleGen",
-                "outcome=no-title origin=$origin session=${id.take(8)} " +
-                    "reason=all-candidates-exhausted lastError=${lastError?.javaClass?.simpleName} " +
-                    "elapsedMs=${System.currentTimeMillis() - startedAt}",
-            )
+                if (written != null) return written
+                AppLogger.warning("TitleGen", "outcome=no-title origin=$origin session=${id.take(8)} reason=all-candidates-exhausted")
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException && com.openminis.app.ui.chat.TitleCandidates.isRealCancellation(e)) throw e
             AppLogger.warning(
                 "TitleGen",
                 "outcome=exception origin=$origin session=${id.take(8)} " +

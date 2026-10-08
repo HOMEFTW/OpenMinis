@@ -40,6 +40,7 @@ object VoiceModality {
     private val asrInferencePatterns = listOf(
         "-asr", "asr-", "_asr", "asr_", "whisper", "transcrib", "speech-to-text",
         "speech2text", "stt-", "-stt", "_stt", "stt_", "voice-input", "voice_input",
+        "paraformer", "sensevoice", "fun-asr", "qwen-asr",
     )
 
     /** Substrings marking a DEDICATED text-to-speech (TTS) model. Mirrors iOS
@@ -94,6 +95,31 @@ val LLMModel.hasImageInput: Boolean
  *  behind Voice Services shadow visibility (iOS hasVoiceModels). */
 val LLMModel.hasVoiceModality: Boolean
     get() = hasAudioInput || hasAudioOutput
+
+/** OpenRouter's speech/transcription catalogs are separate from its chat catalog. */
+object VoiceRole {
+    const val TTS = "tts"
+    const val STT = "stt"
+    const val NONE = "none"
+    val OPENROUTER_CHAT_AUDIO_MODELS = setOf("openai/gpt-audio", "openai/gpt-audio-mini")
+}
+
+val LLMModel.isVoiceInputCandidate: Boolean
+    get() = when (voiceRole) {
+        null -> hasAudioInput
+        VoiceRole.STT -> true
+        else -> id in VoiceRole.OPENROUTER_CHAT_AUDIO_MODELS
+    }
+
+val LLMModel.isVoiceOutputCandidate: Boolean
+    get() = when (voiceRole) {
+        null -> hasAudioOutput
+        VoiceRole.TTS -> true
+        else -> id in VoiceRole.OPENROUTER_CHAT_AUDIO_MODELS
+    }
+
+val LLMModel.isVoiceCandidate: Boolean
+    get() = isVoiceInputCandidate || isVoiceOutputCandidate
 
 /**
  * [T-voice-seed-shape-exact] True when this model carries the exact single-flag

@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TerminalSanitizerTest {
+    @Test fun `large output is bounded before sanitizing and retains both ends`() {
+        val result = TerminalSanitizer.sanitize("start\n" + "x".repeat(1_000_000) + "\nend")
+        assertTrue(result.startsWith("start\n"))
+        assertTrue(result.endsWith("\nend"))
+        assertTrue(result.contains("characters omitted"))
+        assertTrue(result.length < 401_000)
+    }
 
     @Test fun `private and intermediate CSI sequences do not leak into text`() {
         assertEquals("hello", TerminalSanitizer.sanitize("\u001B[?25l\u001B[>0chello\u001B[0 q"))

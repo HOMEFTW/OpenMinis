@@ -17,6 +17,7 @@ internal fun saveModelUseResult(
     resolveFile: (String) -> File?,
     mimeToExt: (String) -> String,
     logWrite: (String, File) -> Unit = { _, _ -> },
+    requireMedia: Boolean = false,
 ): NativeOffloadResult {
     fun failure(message: String) = NativeOffloadResult(
         1, JSONObject().put("error", if (requireImage) "image_generation_failed" else "model_use_failed").put("message", message).toString() + "\n",
@@ -25,11 +26,18 @@ internal fun saveModelUseResult(
         return failure("Output must be an absolute Linux path, not a relative path or file URI.")
     }
     val images = response.mediaAttachments
-    if ((requireImage && images.isEmpty()) || images.any { it.data.isEmpty() }) {
-        return failure("Image endpoint returned no usable image data.")
-    }
     val outputIsMedia = outputExt in setOf("png", "jpg", "jpeg", "webp", "gif", "heic", "wav", "mp3", "m4a", "aac", "ogg", "flac", "mp4", "mov", "webm", "mkv")
-    if (outputPath != null && outputIsMedia && images.isEmpty()) return failure("Model returned no media data.")
+    if ((requireImage || requireMedia || (outputPath != null && outputIsMedia)) && images.isEmpty()) {
+        val body = JSONObject().apply {
+            put("error", "no_media_generated")
+            put("message", "The model returned no image/media. Nothing was saved. Do not reference a generated file; tell the user it failed and why.")
+            put("model", modelId)
+            put("endpoint", endpointUsed ?: "chat")
+            if (response.text.isNotBlank()) put("model_text", response.text.take(2000))
+        }
+        return NativeOffloadResult(1, body.toString(2) + "\n")
+    }
+    if (images.any { it.data.isEmpty() }) return failure("Model returned empty media data.")
     val outputFile = outputPath?.let {
         resolveFile(it) ?: return failure("Cannot resolve --output '$it'.")
     }

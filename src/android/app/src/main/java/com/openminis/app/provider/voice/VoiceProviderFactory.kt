@@ -102,10 +102,10 @@ object VoiceProviderFactory {
                 )
 
             // [T-kimi-oauth] Kimi Coding Plan serves no voice models.
-            ProviderType.kimiCode -> null
+            ProviderType.kimiCode, ProviderType.deepSeek -> null
             // [T-android-provider-type-parity] No voice support for types this
             // build cannot drive.
-            ProviderType.antigravity, ProviderType.unsupported -> null
+            ProviderType.githubCopilot, ProviderType.antigravity, ProviderType.unsupported -> null
         }
     }
 

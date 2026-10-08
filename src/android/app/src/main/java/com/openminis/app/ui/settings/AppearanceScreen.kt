@@ -230,6 +230,7 @@ private val languageOptions = listOf(
     // purpose \u2014 the resources live in values-pt-rBR and the wording is
     // Brazilian, so the tag should say so rather than claim generic "pt".
     LanguageOption("pt-BR", "\uD83C\uDDE7\uD83C\uDDF7", "Portugu\u00EAs (Brasil)"),
+    LanguageOption("hr", "\uD83C\uDDED\uD83C\uDDF7", "Hrvatski"),
 )
 
 fun getAppearancePrefs(context: Context): SharedPreferences =
@@ -314,6 +315,8 @@ fun AppearanceScreen(
                 )
             }
         }
+
+        ChatWallpaperSettingsSection()
 
         // -- Launch Session --
         // Same per-row icon treatment as the Theme section. Bolt = Auto

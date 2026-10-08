@@ -55,18 +55,13 @@ class RcloneTlsTimeoutTest {
     }
 
     @Test
-    fun `worst case wait stays within a budget a person will sit through`() {
-        // The timeout applies PER ATTEMPT, so retries multiply it. This is the
-        // property that actually matters to the user — an unreachable host must
-        // fail while they are still looking at the screen, not after rclone's
-        // default 300s x 10 retries. Guard the product, not the parts, so a
-        // future tweak to either number still has to keep the promise.
+    fun `server commit has a bounded five minute window without retry amplification`() {
+        // WebDAV may commit for over a minute after receiving the upload.
+        // Keep connection failure fast, but permit that final server response.
         val attempts = RcloneBridge.LOW_LEVEL_RETRIES * RcloneBridge.RETRIES
-        val worstCaseSeconds = RcloneBridge.IO_TIMEOUT_SECONDS * attempts
-        assertTrue(
-            "worst-case wait $worstCaseSeconds s is too long to feel like a failure",
-            worstCaseSeconds <= 120,
-        )
+        assertEquals(1, attempts)
+        assertEquals(300L, RcloneBridge.IO_TIMEOUT_SECONDS.toLong())
+        assertTrue(RcloneBridge.CONNECT_TIMEOUT_SECONDS in 1..20)
         assertTrue(
             "connect timeout should not exceed the io timeout",
             RcloneBridge.CONNECT_TIMEOUT_SECONDS <= RcloneBridge.IO_TIMEOUT_SECONDS,

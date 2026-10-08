@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,12 +37,17 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -56,6 +62,9 @@ import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTask
+import com.openminis.app.scheduled.ScheduledTriggerKind
+import com.openminis.app.scheduled.ScheduledTaskDetailModel
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -81,9 +90,27 @@ fun ScheduledTasksScreen(
         factory = ScheduledTasksViewModel.factory(context),
     )
     val tasks by vm.tasks.collectAsState()
+    val runNowState by vm.runNowState.collectAsState()
+    val snackbar = remember { SnackbarHostState() }
+    val now by produceState(System.currentTimeMillis()) {
+        while (true) { delay(1_000); value = System.currentTimeMillis() }
+    }
     var pendingDelete by remember { mutableStateOf<ScheduledTask?>(null) }
+    LaunchedEffect(runNowState) {
+        val state = runNowState ?: return@LaunchedEffect
+        if (state.status == ScheduledTasksViewModel.RunStatus.RUNNING) return@LaunchedEffect
+        val result = snackbar.showSnackbar(
+            message = if (state.status == ScheduledTasksViewModel.RunStatus.STARTED)
+                scheduledText("任务已加入投递队列", "Task queued")
+            else context.getString(R.string.scheduled_task_run_now_failed),
+            actionLabel = state.sessionId?.let { context.getString(R.string.scheduled_task_run_now_open_session) },
+        )
+        if (result == SnackbarResult.ActionPerformed) state.sessionId?.let(onOpenSession)
+        vm.clearRunNowState()
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = {
@@ -127,6 +154,9 @@ fun ScheduledTasksScreen(
                     onEdit = { onEditTask(task.id) },
                     onViewRuns = { onViewRuns(task.id) },
                     onDelete = { pendingDelete = task },
+                    onRunNow = { vm.runNow(task) },
+                    runNowEnabled = runNowState?.status != ScheduledTasksViewModel.RunStatus.RUNNING,
+                    now = now,
                 )
             }
         }
@@ -190,6 +220,9 @@ private fun ScheduledTaskRow(
     onEdit: () -> Unit,
     onViewRuns: () -> Unit,
     onDelete: () -> Unit,
+    onRunNow: () -> Unit,
+    runNowEnabled: Boolean,
+    now: Long,
 ) {
     var menuExpanded by remember(task.id) { mutableStateOf(false) }
     Box {
@@ -234,12 +267,22 @@ private fun ScheduledTaskRow(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = formatScheduleSummary(task),
+                    text = formatScheduleSummary(task, now),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                task.nextTriggerMs(now)?.let { next ->
+                    Text(
+                        text = scheduledText("倒计时 ", "In ") +
+                            ScheduledTaskDetailModel.formatDuration(((next - now).coerceAtLeast(0) + 999) / 1000),
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            IconButton(onClick = onRunNow, enabled = runNowEnabled) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = stringResource(R.string.scheduled_task_run_now))
             }
             Spacer(Modifier.width(8.dp))
             SettingsSwitch(checked = task.enabled, onCheckedChange = onToggle)
@@ -251,6 +294,12 @@ private fun ScheduledTaskRow(
             expanded = menuExpanded,
             onDismissRequest = { menuExpanded = false },
         ) {
+            androidx.compose.material3.DropdownMenuItem(
+                text = { Text(stringResource(R.string.scheduled_task_run_now)) },
+                leadingIcon = { Icon(Icons.Filled.PlayArrow, contentDescription = null) },
+                enabled = runNowEnabled,
+                onClick = { menuExpanded = false; onRunNow() },
+            )
             androidx.compose.material3.DropdownMenuItem(
                 text = { Text(stringResource(R.string.scheduled_task_menu_edit)) },
                 leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
@@ -277,7 +326,17 @@ private fun ScheduledTaskRow(
     }
 }
 
-internal fun formatScheduleSummary(task: ScheduledTask): String {
+internal fun formatScheduleSummary(task: ScheduledTask, now: Long = System.currentTimeMillis()): String {
+    when (task.triggerKind) {
+        ScheduledTriggerKind.AFTER -> return scheduledText("延迟 ", "Once after ") + ScheduledTaskDetailModel.formatDuration(task.delaySec ?: 0)
+        ScheduledTriggerKind.INTERVAL -> {
+            val every = ScheduledTaskDetailModel.formatDuration(task.intervalSec ?: 0)
+            val count = task.maxFires?.let { scheduledText(" · 剩余 ${task.remainingFires}/$it 次", " · ${task.remainingFires}/$it left") }.orEmpty()
+            return scheduledText("每 ", "Every ") + every + count
+        }
+        ScheduledTriggerKind.ON_COMPLETION -> return scheduledText("等待 ${task.onCompletionOf.orEmpty().take(8)} 完成", "After ${task.onCompletionOf.orEmpty().take(8)} finishes")
+        ScheduledTriggerKind.CALENDAR -> Unit
+    }
     val time = "%02d:%02d".format(task.timeOfDayHour, task.timeOfDayMinute)
     val repeat = when (task.repeatMode) {
         ScheduledRepeatMode.ONCE -> "Once"
@@ -288,7 +347,7 @@ internal fun formatScheduleSummary(task: ScheduledTask): String {
             if (days.isBlank()) "Custom" else days
         }
     }
-    val next = task.nextTriggerMs()?.let {
+    val next = task.nextTriggerMs(now)?.let {
         val sdf = SimpleDateFormat("MMM d HH:mm", Locale.getDefault())
         " · next ${sdf.format(Date(it))}"
     } ?: ""

@@ -237,7 +237,7 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     if (expiresIn > 0) {
                         json.put("expire_at", System.currentTimeMillis() + expiresIn * 1000)
                     }
-                    saveOAuthString("tokens", json.toString())
+                    if (!saveRefreshedTokens(refreshTokenValue, json)) return@withLock RefreshOutcome.TRANSIENT
                     Log.i(TAG, "Gemini token refresh successful. Expires in ${expiresIn}s")
                     return@withLock RefreshOutcome.SUCCESS
                 }
@@ -246,13 +246,10 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 // with `error=invalid_grant` for revoked/expired refresh tokens,
                 // and `error=invalid_token` for truly malformed tokens. Both are
                 // non-recoverable; user must re-auth.
-                val bodyLower = responseBody.lowercase()
-                val isInvalidGrant = responseCode == 400 || responseCode == 401 || responseCode == 403 ||
-                    bodyLower.contains("invalid_grant") ||
-                    bodyLower.contains("invalid_token")
+                val isInvalidGrant = isRefreshRejected(responseCode, responseBody, DEFAULT_FATAL_REFRESH_CODES)
                 if (isInvalidGrant) {
-                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — clearing credentials")
-                    logout()
+                    Log.e(TAG, "Refresh token rejected ($responseCode); credentials retained")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 Log.w(TAG, "Gemini token refresh transient failure ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — keeping token")
@@ -271,6 +268,8 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      * pre-refresh window — iOS Gemini refreshes only on hard expiry).
      */
     override suspend fun validAccessToken(): String? = withContext(Dispatchers.IO) {
+        loadManualBearerToken()?.takeIf { it.isNotBlank() }?.let { return@withContext it }
+        if (needsReauth()) return@withContext null
         val stored = loadStoredTokens() ?: return@withContext null
         val token = stored.optString("access_token", "").ifEmpty { return@withContext null }
         val expireAt = stored.optLong("expire_at", 0)
@@ -279,13 +278,7 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val needsRefresh = expireAt > 0 && (expireAt - now) <= REFRESH_BUFFER_MS
         if (!needsRefresh) return@withContext token
 
-        when (refreshTokenClassified()) {
-            RefreshOutcome.SUCCESS ->
-                loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
-            RefreshOutcome.INVALID_GRANT -> null
-            RefreshOutcome.TRANSIENT ->
-                if (expireAt > 0 && now >= expireAt) null else token
-            RefreshOutcome.NO_TOKEN -> null
-        }
+        refreshTokenClassified()
+        currentUsableAccessToken()
     }
 }

@@ -190,6 +190,7 @@ class PersistentShell(
         // T141: see PRootKernel.buildProotCommand for rationale — translates
         // hardlinks to symlinks so apk install of binutils/gcc works.
         cmd.add("--link2symlink")
+        cmd.add("--fake-netlink")
         cmd.add("-r")
         cmd.add(rootfsManager.rootfsDir.absolutePath)
         cmd.add("-b"); cmd.add("/dev")

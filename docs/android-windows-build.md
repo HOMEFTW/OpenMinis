@@ -26,6 +26,11 @@
 
 ## 后续修改 Kotlin 后重新打包
 
+本轮同步将 PRoot 固定到上游 `1b444ee1`，包含 rtnetlink 模拟及原生工具退出码修复。
+首次更新该依赖后先执行 `./scripts/build_proot_windows.ps1`，再执行下方 APK 构建脚本。
+原生构建缓存放在 `D:/Code/.tools/openminis-proot-build`；脚本校验并保留 Termux 加载器，
+生成匹配其已验证入口偏移的 PRoot，不使用不兼容的 fork 加载器。
+
 在仓库根目录打开 PowerShell：
 
 ```powershell

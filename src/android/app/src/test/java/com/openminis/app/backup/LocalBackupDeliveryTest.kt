@@ -45,6 +45,19 @@ class LocalBackupDeliveryTest {
         val source = source()
         assertTrue(runCatching { copyLocalBackup(source, source.parentFile!!) { null } }.isFailure)
     }
+    @Test fun progressIsMonotonicAndFinishesAtOneHundred() = runBlocking {
+        val source = source()
+        val progress = mutableListOf<Int>()
+        copyLocalBackup(source, source.parentFile!!, onPercent = { progress += it }) { ByteArrayOutputStream() }
+        assertEquals(100, progress.last())
+        assertTrue(progress.zipWithNext().all { (first, second) -> first < second })
+    }
+    @Test fun emptyPackageStillReportsCompletedCopy() = runBlocking {
+        val source = source().apply { writeBytes(byteArrayOf()) }
+        val progress = mutableListOf<Int>()
+        assertEquals(0L, copyLocalBackup(source, source.parentFile!!, onPercent = { progress += it }) { ByteArrayOutputStream() })
+        assertEquals(listOf(100), progress)
+    }
     @Test fun writeFailureIsPropagatedAndStreamClosed() = runBlocking {
         val source = source()
         var closed = false

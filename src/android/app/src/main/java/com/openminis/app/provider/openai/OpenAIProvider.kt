@@ -111,6 +111,14 @@ class OpenAIProvider private constructor(
      */
     var thinkingRuleInstanceId: String? = null
 
+    /** Headers derived from each outgoing request, used by Copilot. */
+    var perRequestHeaders: ((JSONObject) -> Map<String, String>)? = null
+
+    @Volatile
+    var sessionId: String? = null
+
+    var modelOverrides: com.openminis.app.data.model.ModelOverrides? = null
+
     /**
      * [T-android-xai-priority] Whether this provider speaks xAI's Priority
      * Processing extension, i.e. whether it is eligible to carry
@@ -186,7 +194,7 @@ class OpenAIProvider private constructor(
          * match the CLIProxyAPI/sub2api upstream (fixes a gpt-5.6-luna 404 seen
          * on the older client). Shared constant so future bumps touch one place.
          */
-        private const val CODEX_CLIENT_VERSION = "0.144.1"
+        const val CODEX_CLIENT_VERSION = "0.144.1"
 
         /**
          * [T-android-stale-conn-retry-hang] Streaming time-to-first-byte
@@ -235,12 +243,16 @@ class OpenAIProvider private constructor(
             oauthTokenProvider: suspend () -> String,
             model: LLMModel,
             basePath: String,
+            extraHeaders: Map<String, String> = emptyMap(),
+            customUserAgent: String? = null,
         ): OpenAIProvider = OpenAIProvider(
             apiKey = null,
             oauthTokenProvider = oauthTokenProvider,
             model = model,
             basePath = basePath,
             forceChatCompletions = true,
+            extraHeaders = extraHeaders,
+            customUserAgent = customUserAgent,
         )
     }
 
@@ -444,9 +456,11 @@ class OpenAIProvider private constructor(
     // or the server itself stopped emitting bytes. Each milestone goes
     // through AppLogger.info at the OkHttpEvents tag with the call's
     // identity hash so concurrent streams can be disambiguated.
-    private val client = OkHttpClient.Builder()
+    var responseTimeoutSeconds: Int? = null
+    private val responseWaitMs: Long get() = responseTimeoutSeconds?.coerceIn(30, 3600)?.times(1000L) ?: STREAM_TTFB_TIMEOUT_MS
+    private val client by lazy { OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(600, TimeUnit.SECONDS)
+        .readTimeout(responseTimeoutSeconds?.coerceIn(30, 3600)?.toLong() ?: 600L, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         // [T-android-stale-conn-retry-hang] Shared pool so NetworkMonitor's
         // network-transition eviction reaches THIS client's connections —
@@ -454,7 +468,7 @@ class OpenAIProvider private constructor(
         // a local proxy got reused on every retry (silent infinite hang).
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .eventListenerFactory { OkHttpNetTraceListener() }
-        .build()
+        .build() }
 
     /** Detect OpenRouter base URL. */
     private val isOpenRouter: Boolean = basePath.contains("openrouter.ai")
@@ -487,6 +501,9 @@ class OpenAIProvider private constructor(
 
     /** Detect DashScope (Alibaba Qwen) base URL. */
     private val isDashScope: Boolean = basePath.contains("dashscope")
+    private val isCerebras: Boolean = runCatching {
+        java.net.URI(basePath).host?.lowercase()?.let { it == "cerebras.ai" || it.endsWith(".cerebras.ai") }
+    }.getOrNull() == true
 
     /**
      * [T-android-mistral-reasoning-422] (GH OpenMinis#87, iOS 29065ca0)
@@ -807,13 +824,13 @@ class OpenAIProvider private constructor(
                 } else {
                     // Upload finished — tight TTFB budget measured from that point.
                     val sinceUploadMs = (nowNanos - uploadDoneAt) / 1_000_000L
-                    if (sinceUploadMs >= STREAM_TTFB_TIMEOUT_MS) { timedOutPhase = "ttfb"; break }
+                    if (sinceUploadMs >= responseWaitMs) { timedOutPhase = "ttfb"; break }
                 }
                 delay(pollMs)
             }
             if (timedOutPhase != null && !headersArrived.get()) {
                 ttfbTimedOut.set(true)
-                val budgetS = if (timedOutPhase == "ttfb") STREAM_TTFB_TIMEOUT_MS / 1000 else STREAM_UPLOAD_CAP_MS / 1000
+                val budgetS = if (timedOutPhase == "ttfb") responseWaitMs / 1000 else STREAM_UPLOAD_CAP_MS / 1000
                 com.openminis.app.logging.AppLogger.warning(
                     "OpenAIProvider",
                     "[T-android-ttfb-upload-split] no response headers ($timedOutPhase phase, ${budgetS}s) — cancelling call + evicting connection (stale pooled connection?)",
@@ -899,6 +916,8 @@ class OpenAIProvider private constructor(
 
         val producerScope = this
         val progressWatchdog = SseProgressWatchdog(
+            idleTimeoutMs = responseTimeoutSeconds?.coerceIn(30, 3600)?.times(1000L)
+                ?: com.openminis.app.provider.DEFAULT_SSE_IDLE_TIMEOUT_MS,
             onTimeout = { timeout ->
                 try { call.cancel() } finally {
                     producerScope.cancel(
@@ -1071,7 +1090,7 @@ class OpenAIProvider private constructor(
                     )
                     continue
                 }
-                android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                com.openminis.app.logging.AppLogger.trace("ToolChain") { "SSE type=${event.optString("type")} bytes=${payload.length}" }
                 sseEventCount++
 
                 // T321: per-event delta-field summary. Only counts/lengths,
@@ -1375,11 +1394,12 @@ class OpenAIProvider private constructor(
                             // counts so we can round-trip DeepSeek V4's `reasoning_content: ""`.
                             val hasRcKey = d.has("reasoning_content")
                             val hasReasoningKey = d.has("reasoning")
-                            if (hasRcKey || hasReasoningKey) {
+                            if (hasRcKey || hasReasoningKey || d.has("reasoning_text")) {
                                 sawReasoningField = true
                             }
                             val rc = d.safeOptString("reasoning_content", "")
                                 .ifEmpty { d.safeOptString("reasoning", "") }
+                                .ifEmpty { d.safeOptString("reasoning_text", "") }
                             if (rc.isNotEmpty()) {
                                 reasoningAccum.append(rc)
                                 if (!sawReasoningDelta) {
@@ -1390,6 +1410,14 @@ class OpenAIProvider private constructor(
                                     )
                                 }
                                 sendChunk(LLMStreamChunk.ThinkingDelta(rc))
+                            }
+                            ReasoningDetails.parse(d)?.let { details ->
+                                sawReasoningField = true
+                                if (details.text.isNotEmpty()) {
+                                    sawReasoningDelta = true
+                                    reasoningAccum.append(details.text)
+                                    sendChunk(LLMStreamChunk.ThinkingDelta(details.text))
+                                }
                             }
                         }
 
@@ -1435,7 +1463,7 @@ class OpenAIProvider private constructor(
                                 }
                                 // Emit input delta
                                 if (acc.id.isNotEmpty() && acc.args.isNotEmpty()) {
-                                    android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${acc.args.length}chars")
+                                    com.openminis.app.logging.AppLogger.trace("ToolChain") { "ToolInputDelta id=${acc.id} accumulated=${acc.args.length}chars" }
                                     sendChunk(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
                                 }
                             }
@@ -2404,6 +2432,7 @@ class OpenAIProvider private constructor(
         // body fields verbatim (no OpenAI→native conversion — callers own the
         // shape). User keys win over our defaults, but `model` is force-kept so a
         // stray override can't misroute. Mirrors generateImage's merge + iOS.
+        mergeModelOverridesBody(body, temperature)
         mergeChatExtraBody(body)
 
         return body
@@ -2420,6 +2449,18 @@ class OpenAIProvider private constructor(
         if (chatExtraBody.isEmpty()) return
         if (isOAuth && !forceChatCompletions) return  // Codex OAuth exemption
         for ((k, v) in chatExtraBody) body.put(k, v ?: JSONObject.NULL)
+        body.put("model", model.id)
+    }
+
+    private fun mergeModelOverridesBody(body: JSONObject, explicitTemperature: Double?) {
+        val overrides = modelOverrides ?: return
+        if (isOAuth && !forceChatCompletions) return
+        if (explicitTemperature == null) overrides.temperature?.let { body.put("temperature", it) }
+        overrides.topP?.let { body.put("top_p", it) }
+        overrides.extraBodyParams?.let { extra ->
+            val parsed = JSONObject(extra.toString())
+            for (key in parsed.keys()) body.put(key, parsed.get(key))
+        }
         body.put("model", model.id)
     }
 
@@ -2556,6 +2597,10 @@ class OpenAIProvider private constructor(
         for ((key, value) in extraHeaders) {
             builder.header(key, value)
         }
+        for ((key, value) in com.openminis.app.provider.OpenCodeSessionHeader.headersFor(requestUrl, sessionId)) {
+            builder.header(key, value)
+        }
+        modelOverrides?.customHeaders?.forEach { (key, value) -> builder.header(key, value) }
         // [T-android-model-use-passthrough-mode] Per-call chat header overrides,
         // applied AFTER the ctor extraHeaders → same-name REPLACE over any
         // default (incl. Authorization/Content-Type). Empty on normal calls.
@@ -2566,6 +2611,9 @@ class OpenAIProvider private constructor(
         // /responses (this builder serves both). Applied after extraHeaders
         // so the per-provider override wins. null/blank → default UA.
         builder.applyUserAgentOverride(customUserAgent)
+        perRequestHeaders?.invoke(JSONObject(bodyStr))?.forEach { (key, value) ->
+            builder.header(key, value)
+        }
         return builder.build()
     }
 
@@ -2660,6 +2708,7 @@ class OpenAIProvider private constructor(
             usesUnifiedReasoningEffort = usesUnifiedReasoningEffort,
             isMistral = isMistral,
             isDashScope = isDashScope,
+            isCerebras = isCerebras,
             isXAI = isXAI,
             offEffort = explicitOffEffort(),
         )
@@ -3207,6 +3256,7 @@ class OpenAIProvider private constructor(
                         }
                     }
                     LLMMessage.Role.USER -> {
+                        val toolImageMessages = mutableListOf<JSONObject>()
                         for (tr in msg.contentParts.filterIsInstance<AgentContentPart.ToolResult>()) {
                             val (callId, _) = splitResponsesAPIIds(tr.id)
                             input.put(JSONObject().apply {
@@ -3221,7 +3271,7 @@ class OpenAIProvider private constructor(
                             // user turn carrying an input_image block.
                             val trBytes = tr.imageData
                             if (trBytes != null && trBytes.isNotEmpty() && supportsImages) {
-                                input.put(JSONObject().apply {
+                                toolImageMessages.add(JSONObject().apply {
                                     put("role", "user")
                                     put("content", JSONArray().apply {
                                         put(JSONObject().apply {
@@ -3240,6 +3290,7 @@ class OpenAIProvider private constructor(
                                 })
                             }
                         }
+                        toolImageMessages.forEach { input.put(it) }
                         // T132: emit text + input_image content for the user
                         // turn so vision-capable Responses-API models actually
                         // see the bytes. Without the input_image branch the
@@ -3427,10 +3478,11 @@ class OpenAIProvider private constructor(
                 })
             }
         }
-        body.put("input", input)
+        body.put("input", ResponsesToolPairing.sanitize(input).items)
 
         // [T-android-model-use-passthrough-mode GH#72] Same verbatim merge as the
         // chat-completions builder. Skipped for Codex OAuth inside mergeChatExtraBody.
+        mergeModelOverridesBody(body, explicitTemperature = null)
         mergeChatExtraBody(body)
 
         return body
@@ -3586,11 +3638,11 @@ class OpenAIProvider private constructor(
         if (statusCode in transientCodes) {
             // 503 with permanent failure indicators → ProviderError (trigger group fallback)
             if (statusCode == 503 && (body.contains("no_available_providers") || body.contains("model_not_found"))) {
-                return LLMError.ProviderError(message)
+                return LLMError.ProviderError(message, httpStatus = statusCode)
             }
-            return LLMError.TransientError(message)
+            return LLMError.TransientError(message, httpStatus = statusCode)
         }
-        return LLMError.ProviderError(message)
+        return LLMError.ProviderError(message, httpStatus = statusCode)
     }
 
     private fun mapError(error: Throwable): LLMError {

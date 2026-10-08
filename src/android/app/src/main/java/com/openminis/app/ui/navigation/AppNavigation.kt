@@ -157,6 +157,13 @@ object Routes {
     /** Chat-files browser: opens FileBrowser rooted at /var/minis for the session. */
     const val CHAT_FILES = "chat_files/{sessionId}"
     fun chatFiles(sessionId: String) = "chat_files/$sessionId"
+    const val AGENT_TRANSCRIPT = "agent_transcript/{sessionId}"
+    fun agentTranscript(sessionId: String) = "agent_transcript/${android.net.Uri.encode(sessionId)}"
+    const val AGENTS = "agents"
+    const val SUB_AGENTS = "sub_agents"
+    const val SUB_AGENT_DETAIL = "sub_agent/{agentId}"
+    fun subAgentDetail(agentId: String) = "sub_agent/${android.net.Uri.encode(agentId)}"
+    const val AGENT_TOOLS = "agent_tools"
     const val MEMORY = "memory"
     /** [T-mcp-integration-android] MCP Integrations management screen. */
     const val MCP = "mcp"
@@ -354,7 +361,7 @@ fun AppNavigation(
             com.openminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch()
         ) 3 else rawMode
         val history = LaunchSessionHistory.read(context)
-        val sessions = chatRepository.dao.listSessions()
+        val sessions = chatRepository.dao.listSessions().filterNot { it.isChild }
         val selected = LaunchSessionHistory.candidate(history.first, history.second, sessions.map { it.id to it.updatedAt }) {
             com.openminis.app.ui.chat.ComposerDraftStore(context).has(it)
         }
@@ -596,6 +603,8 @@ fun AppNavigation(
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
+                onAgentsClick = { navController.safeNavigate(Routes.SUB_AGENTS) },
+                onAgentToolsClick = { navController.safeNavigate(Routes.AGENT_TOOLS) },
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
                 onSoulClick = { navController.safeNavigate(Routes.SOUL) },
                 onPermissionsClick = { navController.safeNavigate(Routes.PERMISSIONS) },
@@ -654,7 +663,6 @@ fun AppNavigation(
                     },
                     onRemoveWithFiles = {
                         vm.removeHistoryRecordWithFiles(id)
-                        navController.safePopBackStack()
                     },
                     onOpenDestination = { name ->
                         navController.safeNavigate(
@@ -1025,9 +1033,21 @@ fun AppNavigation(
             arguments = listOf(navArgument("sessionId") { type = NavType.StringType }),
         ) { backStackEntry ->
             val sessionId = backStackEntry.arguments?.getString("sessionId") ?: return@composable
+            val storageEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry(Routes.STORAGE) }.getOrNull()
+            }
+            val storageVm = storageEntry?.let { entry ->
+                androidx.lifecycle.viewmodel.compose.viewModel<com.openminis.app.ui.settings.StorageUsageViewModel>(
+                    viewModelStoreOwner = entry,
+                    factory = com.openminis.app.ui.settings.StorageUsageViewModel.factory(
+                        androidx.compose.ui.platform.LocalContext.current, chatRepository,
+                    ),
+                )
+            }
             SessionStorageDetailScreen(
                 sessionId = sessionId,
                 chatDao = chatRepository.dao,
+                onMeasured = { id, minis, media -> storageVm?.onSessionMeasured(id, minis, media) },
                 onBack = { navController.safePopBackStack() },
                 onBrowseFiles = { rootPath ->
                     // [T-android-copy-abs-path-fullpath] This browser is rooted at
@@ -1264,6 +1284,43 @@ fun AppNavigation(
             )
         }
 
+        composable(Routes.AGENTS) {
+            com.openminis.app.ui.settings.SubAgentsScreen(
+                onBack = { navController.safePopBackStack() },
+                onOpen = { navController.safeNavigate(Routes.subAgentDetail(it)) },
+            )
+        }
+        composable(Routes.SUB_AGENTS) {
+            com.openminis.app.ui.settings.SubAgentsScreen(
+                onBack = { navController.safePopBackStack() },
+                onOpen = { navController.safeNavigate(Routes.subAgentDetail(it)) },
+            )
+        }
+        composable(
+            route = Routes.SUB_AGENT_DETAIL,
+            arguments = listOf(navArgument("agentId") { type = NavType.StringType }),
+        ) { entry ->
+            val agentId = entry.arguments?.getString("agentId") ?: return@composable
+            com.openminis.app.ui.settings.SubAgentDetailScreen(
+                agentId = agentId,
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+        composable(Routes.AGENT_TOOLS) {
+            com.openminis.app.ui.settings.AgentToolsSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+        composable(
+            route = Routes.AGENT_TRANSCRIPT,
+            arguments = listOf(navArgument("sessionId") { type = NavType.StringType }),
+        ) { entry ->
+            val childId = entry.arguments?.getString("sessionId") ?: return@composable
+            com.openminis.app.ui.chat.AgentTranscriptScreen(
+                sessionId = childId,
+                onBack = { navController.safePopBackStack() },
+            )
+        }
         composable(Routes.MEMORY) {
             if (memoryRepository != null) {
                 MemoryManagementScreen(
@@ -1389,6 +1446,7 @@ fun AppNavigation(
             OnboardingModelSelectionScreen(
                 providerRepository = providerRepository,
                 onBack = { navController.safePopBackStack() },
+                onAddCustomModel = { id -> navController.safeNavigate(Routes.addCustomModel(id)) },
             )
         }
 

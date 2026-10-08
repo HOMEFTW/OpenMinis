@@ -2,6 +2,7 @@ package com.openminis.app.scheduled
 
 import org.json.JSONArray
 import org.json.JSONObject
+import com.openminis.app.data.model.ThinkingLevel
 import java.util.Calendar
 import java.util.UUID
 
@@ -62,6 +63,9 @@ data class ScheduledRun(
  */
 enum class ScheduledRepeatMode { ONCE, DAILY, WEEKDAYS, CUSTOM }
 
+/** Calendar schedules remain the default for tasks saved by older versions. */
+enum class ScheduledTriggerKind { CALENDAR, AFTER, INTERVAL, ON_COMPLETION }
+
 /**
  * What the task does when it fires. Mirrors the iOS App Intent set.
  *  - [NewSession]: run [ScheduledTask.prompt] in a brand-new chat.
@@ -73,11 +77,13 @@ sealed class ScheduledTargetMode {
     object NewSession : ScheduledTargetMode()
     data class AppendToSession(val sessionId: String) : ScheduledTargetMode()
     data class RerunMessage(val sessionId: String, val messageId: String) : ScheduledTargetMode()
+    data class ChildOfCurrent(val sessionId: String) : ScheduledTargetMode()
 
     fun encode(): String = when (this) {
         NewSession -> "NEW_SESSION"
         is AppendToSession -> "APPEND_TO:$sessionId"
         is RerunMessage -> "RERUN:$sessionId:$messageId"
+        is ChildOfCurrent -> "CHILD_OF:$sessionId"
     }
 
     /** Session this task targets, or null for NEW_SESSION. */
@@ -86,6 +92,7 @@ sealed class ScheduledTargetMode {
             NewSession -> null
             is AppendToSession -> sessionId
             is RerunMessage -> sessionId
+            is ChildOfCurrent -> sessionId
         }
 
     companion object {
@@ -94,6 +101,7 @@ sealed class ScheduledTargetMode {
             if (raw.startsWith("APPEND_TO:")) {
                 return AppendToSession(raw.removePrefix("APPEND_TO:"))
             }
+            if (raw.startsWith("CHILD_OF:")) return ChildOfCurrent(raw.removePrefix("CHILD_OF:"))
             if (raw.startsWith("RERUN:")) {
                 // RERUN:<sessionId>:<messageId> — split on the FIRST colon only,
                 // since ids are UUIDs (no embedded colons) but be defensive.
@@ -142,7 +150,33 @@ data class ScheduledTask(
     // "Run records" menu opens a screen backed by this. Capped at
     // MAX_RUN_HISTORY by the manager when appending.
     val runHistory: List<ScheduledRun> = emptyList(),
+    val thinkingLevel: ThinkingLevel? = null,
+    val prefillToolCall: PrefilledToolCall? = null,
+    val fireCount: Int? = null,
+    val triggerKind: ScheduledTriggerKind = ScheduledTriggerKind.CALENDAR,
+    val delaySec: Long? = null,
+    val intervalSec: Long? = null,
+    val maxFires: Int? = null,
+    val onCompletionOf: String? = null,
+    /** Persisted countdown origin; rebooting does not restart the countdown. */
+    val anchorMs: Long? = null,
+    /** Counted at alarm admission, independently of completion history. */
+    val triggeredCount: Int? = null,
 ) {
+
+    val isCalendar: Boolean get() = triggerKind == ScheduledTriggerKind.CALENDAR
+    val usesAnchor: Boolean
+        get() = triggerKind == ScheduledTriggerKind.AFTER || triggerKind == ScheduledTriggerKind.INTERVAL
+    val isOneShot: Boolean get() = when (triggerKind) {
+        ScheduledTriggerKind.CALENDAR -> repeatMode == ScheduledRepeatMode.ONCE
+        ScheduledTriggerKind.AFTER, ScheduledTriggerKind.ON_COMPLETION -> true
+        ScheduledTriggerKind.INTERVAL -> false
+    }
+    val remainingFires: Int?
+        get() = if (triggerKind == ScheduledTriggerKind.INTERVAL) {
+            maxFires?.let { (it - (triggeredCount ?: 0)).coerceAtLeast(0) }
+        } else null
+    val firesSoFar: Int get() = fireCount ?: runHistory.size
 
     /**
      * Wall-clock ms of the next firing time for this task, taking
@@ -156,6 +190,21 @@ data class ScheduledTask(
      */
     fun nextTriggerMs(now: Long = System.currentTimeMillis()): Long? {
         if (!enabled) return null
+
+        when (triggerKind) {
+            ScheduledTriggerKind.AFTER -> {
+                if ((triggeredCount ?: 0) >= 1) return null
+                val delay = delaySec?.takeIf { it > 0 } ?: return null
+                return maxOf(now, (anchorMs ?: createdAt) + delay * 1000)
+            }
+            ScheduledTriggerKind.INTERVAL -> {
+                val interval = intervalSec?.takeIf { it >= 60 } ?: return null
+                if (remainingFires == 0) return null
+                return maxOf(now, (anchorMs ?: createdAt) + interval * 1000)
+            }
+            ScheduledTriggerKind.ON_COMPLETION -> return null
+            ScheduledTriggerKind.CALENDAR -> Unit
+        }
 
         // Earliest instant we may fire: max(now, start-of-startDate). This lets
         // a task created today with a future startDate wait until that day.
@@ -223,6 +272,8 @@ data class ScheduledTask(
         put("targetMode", targetMode.encode())
         if (modelId != null) put("modelId", modelId)
         if (modelBinding != null) put("modelBinding", modelBinding)
+        if (thinkingLevel != null) put("thinkingLevel", thinkingLevel.name)
+        if (prefillToolCall != null) put("prefillToolCall", prefillToolCall.toJson())
         put("enabled", enabled)
         put("createdAt", createdAt)
         if (startDateMs != null) put("startDateMs", startDateMs)
@@ -233,11 +284,20 @@ data class ScheduledTask(
         if (runHistory.isNotEmpty()) {
             put("runHistory", JSONArray().apply { runHistory.forEach { put(it.toJson()) } })
         }
+        if (fireCount != null) put("fireCount", fireCount)
+        if (!isCalendar) put("trigger", triggerKind.name)
+        if (delaySec != null) put("delaySec", delaySec)
+        if (intervalSec != null) put("intervalSec", intervalSec)
+        if (maxFires != null) put("maxFires", maxFires)
+        if (onCompletionOf != null) put("onCompletionOf", onCompletionOf)
+        if (anchorMs != null) put("anchorMs", anchorMs)
+        if (triggeredCount != null) put("triggeredCount", triggeredCount)
     }
 
     companion object {
         /** Max recorded executions kept per task. */
         const val MAX_RUN_HISTORY = 50
+        const val RESULT_PLACEHOLDER = "{{result}}"
 
         fun fromJson(o: JSONObject): ScheduledTask = ScheduledTask(
             id = o.getString("id"),
@@ -253,6 +313,9 @@ data class ScheduledTask(
             targetMode = ScheduledTargetMode.decode(o.optString("targetMode", null)),
             modelId = if (o.has("modelId")) o.optString("modelId", null) else null,
             modelBinding = if (o.has("modelBinding")) o.optString("modelBinding", null) else null,
+            thinkingLevel = o.optString("thinkingLevel", "").takeIf { it.isNotEmpty() }
+                ?.let { raw -> ThinkingLevel.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } },
+            prefillToolCall = PrefilledToolCall.fromJson(o.optJSONObject("prefillToolCall")),
             enabled = o.optBoolean("enabled", true),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             startDateMs = if (o.has("startDateMs")) o.optLong("startDateMs") else null,
@@ -269,6 +332,16 @@ data class ScheduledTask(
                     }
                 }
             } ?: emptyList(),
+            fireCount = if (o.has("fireCount")) o.optInt("fireCount") else null,
+            triggerKind = runCatching {
+                ScheduledTriggerKind.valueOf(o.optString("trigger", "CALENDAR"))
+            }.getOrDefault(ScheduledTriggerKind.CALENDAR),
+            delaySec = if (o.has("delaySec")) o.optLong("delaySec") else null,
+            intervalSec = if (o.has("intervalSec")) o.optLong("intervalSec") else null,
+            maxFires = if (o.has("maxFires")) o.optInt("maxFires") else null,
+            onCompletionOf = if (o.has("onCompletionOf")) o.optString("onCompletionOf", null) else null,
+            anchorMs = if (o.has("anchorMs")) o.optLong("anchorMs") else null,
+            triggeredCount = if (o.has("triggeredCount")) o.optInt("triggeredCount") else null,
         )
     }
 }

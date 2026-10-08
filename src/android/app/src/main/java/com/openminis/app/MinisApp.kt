@@ -149,6 +149,11 @@ class MinisApp : Application(), ImageLoaderFactory {
     lateinit var chatRepository: ChatRepository
         private set
     val sessionMessenger by lazy { com.openminis.app.service.SessionMessenger(this) }
+    val chatWallpaperRepository by lazy {
+        com.openminis.app.data.repository.ChatWallpaperRepository(
+            getSharedPreferences("chat_wallpaper_preferences", android.content.Context.MODE_PRIVATE),
+        )
+    }
     lateinit var providerRepository: ProviderRepository
         private set
     lateinit var envVarRepository: EnvVarRepository
@@ -237,8 +242,36 @@ class MinisApp : Application(), ImageLoaderFactory {
         )
     }
 
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
     override fun onCreate() {
         super.onCreate()
+        // [T-android-content-capture-off] Opt every Compose window out of
+        // Android content capture, before any of them exists.
+        //
+        // With a content-capture service active (Pixel's Android System
+        // Intelligence enables one), Compose re-walks the whole semantics tree
+        // after UI changes to report screen content to it. Streaming replies
+        // change the UI continuously, and a Pixel 6 perf-build profile of a
+        // task put that walk (AndroidContentCaptureManager
+        // .contentCaptureChangeChecker) at 10.45% of all app CPU — about a
+        // quarter of the main thread, more than the frame work itself.
+        //
+        // Minis's own UI is unaffected: rendering, accessibility (a separate
+        // path), autofill, IME and in-app selection all stay the same. What is
+        // lost is system features that read app content through content
+        // capture (e.g. text selection in Recents, some screen-content
+        // suggestions), which also means chat text is no longer reported to
+        // that service.
+        //
+        // Set once, here, rather than paused while tasks run: in Compose 1.9.1
+        // a change check that finds the switch off returns WITHOUT clearing
+        // its pending flag, so nothing schedules another check even after the
+        // switch is turned back on. Only a switch that never flips is safe.
+        androidx.compose.ui.contentcapture.ContentCaptureManager.isEnabled = false
+        // [T-tools-granular-switches] Carry a pre-split delegation choice onto
+        // the per-tool key, once, before anything reads it. Mirrors iOS
+        // MinisApp.swift's AgentToolSwitch.migrateLegacyIfNeeded().
+        com.openminis.app.tools.AgentToolSwitch.migrateLegacyIfNeeded(this)
 
         // T287-followup: ACRA spawns a separate reporter process named
         // "<package>:acra" (declared by the library's manifest) to send
@@ -339,6 +372,8 @@ class MinisApp : Application(), ImageLoaderFactory {
         // touched in the last hour; if THRESHOLD+ are present, stash the
         // list so MainActivity.onCreate can prompt to share them.
         com.openminis.app.crash.CrashFrequencyDetector.checkAtLaunch(this)
+        Thread { com.openminis.app.crash.ExitInfoCollector.collect(this) }
+            .apply { isDaemon = true; name = "exit-info-collect" }.start()
 
         // Hard short-circuit: when checkAtLaunch flips safe-mode ON, skip
         // every heavy subsystem (DB, repositories, offload server, PRoot
@@ -423,6 +458,32 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
         database = AppDatabase.getInstance(this)
         chatRepository = ChatRepository(database.chatDao())
+        // [T-p2-agent-series] How a background agent's completion reaches its
+        // parent: submit the <agent_callback> as a PROGRAMMATIC prompt on the
+        // parent's ViewModel (queued behind a running loop, never interrupting).
+        com.openminis.app.agent.jobs.AgentJobRegistry.followUpDispatcher = { parentId, text, jobId ->
+            // [T-agent-port-round2] HeadlessChatRunner.prompt (not a bare
+            // submitPrompt): it waits up to 5 s for the parent's provider to
+            // resolve when the VM is freshly created (a scheduled child firing
+            // while the parent chat is not open), and reports a real outcome.
+            // A parent that no longer exists gets nothing — submitting would
+            // re-create rows for a deleted session.
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                runCatching {
+                    if (chatRepository.getSession(parentId) == null) {
+                        com.openminis.app.logging.AppLogger.warning("AgentJobRegistry", "followUp ${jobId.take(8)} dropped — parent ${parentId.take(8)} no longer exists")
+                        return@launch
+                    }
+                    val r = com.openminis.app.debug.HeadlessChatRunner.prompt(
+                        context = this@MinisApp, sessionId = parentId, text = text,
+                        attachments = emptyList(), thinkingLevel = null, wait = false, timeoutMs = 0L,
+                        programmatic = true,
+                    )
+                    com.openminis.app.logging.AppLogger.info("AgentJobRegistry", "followUp ${jobId.take(8)} → parent ${parentId.take(8)} outcome=${r.status}")
+                }.onFailure { com.openminis.app.logging.AppLogger.warning("AgentJobRegistry", "followUp ${jobId.take(8)} failed: ${it.message}") }
+            }
+        }
+        com.openminis.app.agent.jobs.AgentCallbackLabels.install(this)
         providerRepository = ProviderRepository(this)
         envVarRepository = EnvVarRepository(this)
         // [T-android-safemode-lateinit-crash-147] SkillRepository parses
@@ -432,6 +493,16 @@ class MinisApp : Application(), ImageLoaderFactory {
         // the comment there for why an exception at this point permanently
         // breaks the Application and produces the GH#147 crash loop.
         skillRepository = SkillRepository(this)
+        // [T-android-skill-scan-parity] Mirrors iOS reloading SkillStore on
+        // scenePhase .active: pick up skills changed while the app was away.
+        // Background and signature-gated, so a no-op resume costs one listing.
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : androidx.lifecycle.DefaultLifecycleObserver {
+                override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                    skillRepository.requestReload("foreground")
+                }
+            }
+        )
         mcpRepository = MCPRepository(this)
         memoryRepository = MemoryRepository(java.io.File(filesDir, "minis-global/memory"))
         webAppShortcutRepository = WebAppShortcutRepository(database.webAppShortcutDao())
@@ -486,6 +557,10 @@ class MinisApp : Application(), ImageLoaderFactory {
 
         // Initialize models.dev registry (loads from bundled asset, refreshes in background)
         ModelsDevApi.init(this)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { com.openminis.app.provider.ModelReleaseIndex.warmUp() }
+                .onFailure { AppLogger.warning("MinisApp", "release-index warm-up failed: ${it.message}") }
+        }
 
         // Initialize sandbox singletons (does not trigger extraction)
         RootfsManager.getInstance(this)
@@ -712,6 +787,20 @@ class MinisApp : Application(), ImageLoaderFactory {
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                     runCatching { mountedFoldersStore.refreshWritability() }
                 }
+                // [T-android-models-refresh-window] Re-check the model lists on
+                // a foreground return. The call is internally gated by a
+                // 6-hour rolling window, so this is a cheap no-op on ordinary
+                // app switches and only actually fetches when the window has
+                // expired while the app sat in the background.
+                //
+                // This is what closes the reported gap: a provider that turns
+                // a model on mid-session (GitHub enabling gpt-6-astra
+                // account-wide) used to be invisible until the next calendar
+                // day, because launch was the only trigger. iOS hooks the same
+                // event (scenePhase -> .active, fe625d5fd).
+                providerRepository.refreshAllModelsIfNeeded(
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+                )
             }
             override fun onActivityPaused(activity: Activity) {}
             override fun onActivityStopped(activity: Activity) {
@@ -925,6 +1014,51 @@ class MinisApp : Application(), ImageLoaderFactory {
             .onFailure { Log.w("MinisApp", "KatexWebViewPool.evictAll failed: ${it.message}") }
         runCatching { com.openminis.app.ui.markdown.KaTeXRendererCache.evictAll() }
             .onFailure { Log.w("MinisApp", "KaTeXRendererCache.evictAll failed: ${it.message}") }
+
+        // [T-android-browser-global-tab-cap] Browser tabs are the largest
+        // reclaimable allocation in the process — each is an out-of-process
+        // WebView renderer — so they go at the same staged threshold as the
+        // formula bitmaps above rather than waiting for COMPLETE. Only IDLE
+        // tabs are released; a tab an agent is mid-action on stays, because
+        // failing a running task is a worse outcome than the memory it holds,
+        // and the registry can still preempt it later if pressure persists.
+        runCatching {
+            com.openminis.app.browser.BrowserTabPoolRegistry.handleMemoryPressure()
+        }.onFailure { Log.w("MinisApp", "BrowserTabPoolRegistry.handleMemoryPressure failed: ${it.message}") }
+
+        // [T-android-trimmemory-vmstore] Cached ChatViewModels are the other
+        // large reclaimable allocation: each holds a session's messages,
+        // agentHistory and flattened render rows. ChatViewModelStore's own cap
+        // is a soft, count-based LRU that only trims when a NEW session is
+        // added, so four legitimately-cached heavy sessions survive any amount
+        // of external memory pressure. This is the path that gives them back.
+        //
+        // RUNNING_CRITICAL and above only — deliberately one step stricter than
+        // the formula/browser caches above. Dropping a cached session costs a
+        // full DB reload + re-flatten when the user navigates back to it, which
+        // is far more visible than re-rendering a formula bitmap, so it is not
+        // worth doing on RUNNING_LOW. Sessions running an agent loop and the
+        // on-screen session are exempt inside the store.
+        // NOT a `level >= RUNNING_CRITICAL` test. The constants are not a
+        // severity ladder: UI_HIDDEN (20) outranks RUNNING_CRITICAL (15) but
+        // means only "the UI went away", which happens on every home-button
+        // press. Treating that as pressure would throw away every cached
+        // session on a routine app switch and make coming back slow for no
+        // memory reason. Enumerate the levels that actually mean "reclaim".
+        val dropCachedSessions = when (level) {
+            TRIM_MEMORY_RUNNING_CRITICAL,   // still foreground, genuinely low
+            TRIM_MEMORY_BACKGROUND,         // on the LRU list, cheap to kill
+            TRIM_MEMORY_MODERATE,
+            TRIM_MEMORY_COMPLETE,
+            -> true
+            else -> false
+        }
+        if (dropCachedSessions) {
+            runCatching {
+                val freed = com.openminis.app.ui.chat.ChatViewModelStore.handleMemoryPressure()
+                Log.i("MinisApp", "onTrimMemory(level=$level): released $freed cached session store(s)")
+            }.onFailure { Log.w("MinisApp", "ChatViewModelStore.handleMemoryPressure failed: ${it.message}") }
+        }
 
         if (level >= TRIM_MEMORY_COMPLETE) {
             Log.i("MinisApp", "onTrimMemory(level=$level): tearing down the offscreen KaTeX WebView")

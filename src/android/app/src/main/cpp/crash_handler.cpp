@@ -29,12 +29,13 @@
 //      file the user can actually find and send (app logs dir) carries
 //      frame addresses even when nobody can fetch the tombstone.
 //
-// Strict async-signal-safety: only signal-safe libc calls inside the
-// handler (open/write/close/snprintf are safe; printf/malloc are not).
-// _Unwind_Backtrace is not on POSIX's async-signal-safe list, so it is
-// called only after the summary text is already written and only on
-// the first entry into the handler — a hang or fault inside it can no
-// longer cost us the report.
+// Best-effort crash diagnostics: fixed buffers avoid heap allocation.
+// Formatting and stack symbolization are not guaranteed async-signal-safe.
+// Neither _Unwind_Backtrace nor dladdr() is on POSIX's async-signal-safe
+// list, so both are called only after the summary text is already
+// written and only on the first entry into the handler — a hang or
+// fault inside either can no longer cost us the report, at worst only
+// the backtrace section appended below it.
 
 #include <jni.h>
 #include <signal.h>
@@ -42,11 +43,14 @@
 #include <fcntl.h>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <algorithm>
 #include <ctime>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <android/log.h>
 #include <unwind.h>
+#include <dlfcn.h>
 
 #define LOG_TAG "MinisCrashHandler"
 
@@ -82,26 +86,124 @@ static _Unwind_Reason_Code unwind_cb(struct _Unwind_Context* ctx, void* arg) {
     return _URC_NO_REASON;
 }
 
-// Append "  #NN 0x…" lines for the current stack. Best-effort: an
-// unwind that fails or returns nothing simply yields no lines, and the
-// summary above it has already been written to disk regardless.
+// Trailing path component of a shared-object path, so a line reads
+// "libfoo.so" rather than "/data/app/~~aBc==/lib/arm64/libfoo.so".
+// No allocation; returns a pointer into the original string.
+static const char* base_name(const char* path) {
+    if (path == nullptr) return nullptr;
+    const char* slash = strrchr(path, '/');
+    return (slash != nullptr && slash[1] != '\0') ? slash + 1 : path;
+}
+
+// Append "  #NN 0x… libfoo.so+0x1234 (symbol)" lines for the current
+// stack. Best-effort: an unwind that fails or returns nothing simply
+// yields no lines, and the summary above it has already been written to
+// disk regardless.
+//
+// [T-android-crash-dladdr] Why the library name is resolved here rather
+// than left to the reader.
+//
+// A raw PC is an ASLR'd absolute address: it is meaningless outside the
+// process that produced it, so a summary carrying only PCs cannot be
+// acted on at all without the matching tombstone — and the tombstone is
+// exactly the thing users usually cannot fetch (it needs adb, and on
+// most retail devices root or a full bugreport). Field reports were
+// therefore arriving as seven bare hex numbers, and every one of them
+// had to be answered with "please run adb bugreport" before triage
+// could even begin — see the 2026-09-10 voice-input crash, where the
+// only thing derivable from the summary was how the addresses grouped
+// by load base.
+//
+// dladdr() turns each PC into "which .so, how far in", and the offset
+// is stable across runs because it is relative to the library's own
+// load base. That is enough to name the faulting library immediately,
+// and enough to feed `llvm-addr2line -e <lib>.so <offset>` directly —
+// no tombstone, no memory map, no symbol server.
+//
+// Async-signal-safety: dladdr() takes the loader lock and is not on
+// POSIX's async-signal-safe list. That is the same trade-off this file
+// already accepts for _Unwind_Backtrace (see the header note), and it
+// is safe for the same structural reason: this runs only AFTER the
+// summary text is already on disk and only on first entry into the
+// handler, so a hang or fault inside it costs at most the backtrace
+// section — never the report. Deadlock is possible only if we crashed
+// while already holding the loader lock (i.e. inside dlopen); in that
+// case we lose these lines and nothing else.
 static void write_backtrace(int fd) {
     void* frames[32];
     BacktraceState st = { frames, 0, 32 };
     _Unwind_Backtrace(unwind_cb, &st);
     if (st.count <= 0) return;
 
-    const char* hdr = "\nBacktrace (raw PCs — symbolize with:\n"
-                      "  ndk-stack -sym <symbols-dir> , or\n"
-                      "  llvm-addr2line -Cfe <lib>.so <addr>):\n";
+    const char* hdr = "\nBacktrace (lib+offset resolved via dladdr; feed the\n"
+                      "offset straight to `llvm-addr2line -Cfe <lib>.so <offset>`,\n"
+                      "or symbolize the whole file with `ndk-stack -sym <dir>`):\n";
     write(fd, hdr, strlen(hdr));
 
     for (int i = 0; i < st.count; i++) {
-        char line[64];
-        const int n = snprintf(line, sizeof(line), "  #%02d %p\n", i,
-                               frames[i]);
-        if (n > 0) write(fd, line, static_cast<size_t>(n));
+        // Wider than the old 64: a path basename plus a symbol name can
+        // legitimately run long, and snprintf truncates rather than
+        // overflowing, so the only cost of the extra stack is bytes.
+        char line[256];
+        int n;
+
+        Dl_info info;
+        // dladdr returns non-zero on success. dli_fname/dli_sname may
+        // still be null (an anonymous or fully-stripped mapping), so
+        // every field is checked before use rather than assumed.
+        if (dladdr(frames[i], &info) != 0 && info.dli_fname != nullptr) {
+            const char* lib = base_name(info.dli_fname);
+            // Offset from the LIBRARY's load base — the run-independent
+            // number addr2line wants. dli_fbase is the mapping base.
+            const uintptr_t pc = reinterpret_cast<uintptr_t>(frames[i]);
+            const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+            const uintptr_t off = (pc >= base) ? (pc - base) : 0;
+
+            if (info.dli_sname != nullptr) {
+                // A resolved symbol is a bonus, not the point: exported
+                // names survive stripping, static ones do not, so most
+                // app frames will print without this half.
+                n = snprintf(line, sizeof(line), "  #%02d %p  %s+0x%lx (%s)\n",
+                             i, frames[i], lib, static_cast<unsigned long>(off),
+                             info.dli_sname);
+            } else {
+                n = snprintf(line, sizeof(line), "  #%02d %p  %s+0x%lx\n",
+                             i, frames[i], lib, static_cast<unsigned long>(off));
+            }
+        } else {
+            // Unmapped / unknown — keep the frame rather than dropping
+            // it, since its position in the stack is still evidence.
+            n = snprintf(line, sizeof(line), "  #%02d %p  <unknown>\n",
+                         i, frames[i]);
+        }
+
+        if (n > 0) write(fd, line, std::min(static_cast<size_t>(n), sizeof(line) - 1));
     }
+}
+
+// Capture liblog fatal reasons through the public API (Android 11+).
+// Avoid dereferencing bionic's private __abort_message layout: it is not an
+// ABI contract. Plain libc/Scudo aborts remain available in the tombstone.
+static char g_abort_msg[512] = {0};
+static volatile sig_atomic_t g_abort_msg_set = 0;
+static void (*g_default_aborter)(const char*) = nullptr;
+
+static void minis_aborter(const char* msg) {
+    if (msg != nullptr && g_abort_msg_set == 0) {
+        size_t i = 0;
+        for (; i < sizeof(g_abort_msg) - 1 && msg[i] != '\0'; i++) {
+            g_abort_msg[i] = msg[i];
+        }
+        g_abort_msg[i] = '\0';
+        g_abort_msg_set = 1;
+    }
+    // Replacing liblog's aborter must preserve its terminal behavior.
+    if (g_default_aborter != nullptr) g_default_aborter(msg);
+    abort();
+}
+
+static const char* abort_message_or_null() {
+    return g_abort_msg_set != 0 && g_abort_msg[0] != '\0' ? g_abort_msg : nullptr;
 }
 
 // Signal name lookup — strsignal() is NOT async-signal-safe on all
@@ -165,9 +267,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ctx) {
         return;
     }
 
-    // Build the per-crash filename. time(NULL) is async-signal-safe;
-    // localtime_r is too on bionic. snprintf is documented async-safe
-    // by POSIX.
+    // Build the per-crash filename with fixed, bounded buffers.
     time_t now = time(nullptr);
     struct tm tm_buf;
     localtime_r(&now, &tm_buf);
@@ -185,25 +285,55 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ctx) {
         return;
     }
 
-    // Thread name — the single most useful missing field. /proc/self/comm is a
-    // 16-byte name that immediately says WHICH subsystem died (e.g. "Jit thread
-    // pool", "native-offload-", "RenderThread"), which the previous report,
-    // carrying only a numeric tid, could never answer after the fact.
+    const int tid = (int)syscall(SYS_gettid);
+
+    // Thread name — the single most useful missing field. A 16-byte name says
+    // WHICH subsystem died (e.g. "Jit thread pool", "native-offload-",
+    // "RenderThread"), which a numeric tid alone can never answer after the
+    // fact.
+    //
+    // [T-android-crash-thread-name] Read /proc/self/task/<tid>/comm, NOT
+    // /proc/self/comm. `comm` is a per-THREAD attribute, and the /proc/self/
+    // shortcut resolves to /proc/<pid>/ — which is the MAIN thread's entry. So
+    // the previous code reported the main thread's name for every crash,
+    // whichever thread actually died, and it did so silently: the field looked
+    // plausible and was simply wrong.
+    //
+    // It mis-reported exactly the cases the comment above promises to answer —
+    // a "Jit thread pool" or "RenderThread" abort was filed as
+    // "m.openminis.app". A user report of a SIGABRT on TID 19937 of PID 17499
+    // (so definitively not the main thread) still carried Thread:
+    // "m.openminis.app", which sends triage looking at the UI thread for a
+    // crash that happened somewhere else entirely.
+    //
+    // openat on the per-thread path is just as async-signal-safe; the tid is
+    // already known from gettid() above, and snprintf into a fixed buffer adds
+    // no allocation.
     char comm[64] = {0};
     {
-        int cfd = open("/proc/self/comm", O_RDONLY);
+        char comm_path[64];
+        snprintf(comm_path, sizeof(comm_path), "/proc/self/task/%d/comm", tid);
+        int cfd = open(comm_path, O_RDONLY);
+        // A vanished thread entry is possible in principle; fall back to the
+        // process-wide name rather than reporting nothing, and say which it is.
+        if (cfd < 0) {
+            cfd = open("/proc/self/comm", O_RDONLY);
+            if (cfd >= 0) strncpy(comm, "(main?) ", sizeof(comm) - 1);
+        }
         if (cfd >= 0) {
-            ssize_t r = read(cfd, comm, sizeof(comm) - 1);
+            const size_t used = strlen(comm);
+            ssize_t r = read(cfd, comm + used, sizeof(comm) - used - 1);
             if (r > 0) {
-                comm[r] = 0;
-                for (ssize_t i = 0; i < r; i++) if (comm[i] == '\n') comm[i] = 0;
+                comm[used + r] = 0;
+                for (size_t i = 0; i < used + (size_t)r; i++) {
+                    if (comm[i] == '\n') comm[i] = 0;
+                }
             }
             close(cfd);
         }
     }
     if (comm[0] == 0) strncpy(comm, "(unknown)", sizeof(comm) - 1);
 
-    const int tid = (int)syscall(SYS_gettid);
     const int code = info ? info->si_code : 0;
 
     // si_addr is ONLY a fault address for fault-type si_codes. For SI_USER(0) /
@@ -250,10 +380,6 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ctx) {
             "sender pid == our own pid is the ordinary signature of abort()\n"
             "inside this process (libc assertion, Scudo heap check, ART\n"
             "runtime abort, or a C++ uncaught exception).\n"
-            "The REASON is not in siginfo — look for the abort message:\n"
-            "  * logcat around this timestamp, tags: scudo / libc / DEBUG\n"
-            "    (Scudo prints e.g. \"Scudo ERROR: invalid chunk state\")\n"
-            "  * the tombstone's \"Abort message:\" line\n"
             "(Tombstone with full backtrace written by Android system to "
             "/data/tombstones/ — adb pull or `adb bugreport`.)\n",
             tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
@@ -267,12 +393,44 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ctx) {
     }
     if (n > 0) {
         ssize_t written = 0;
-        while (written < n) {
-            ssize_t w = write(fd, buf + written, n - written);
+        const size_t length = std::min(static_cast<size_t>(n), sizeof(buf) - 1);
+        while (static_cast<size_t>(written) < length) {
+            ssize_t w = write(fd, buf + written, length - written);
             if (w <= 0) break;
             written += w;
         }
     }
+    // [OpenMinis#363] The abort message, for the signal class where it is
+    // the whole answer. Only read our pre-captured buffer here; no private
+    // bionic structures or dynamic symbol lookup inside the signal handler.
+    if (!addr_is_fault) {
+        const char* amsg = abort_message_or_null();
+        if (amsg != nullptr) {
+            const char* h = "\nAbort message: ";
+            write(fd, h, strlen(h));
+            // Keep the write bounded by the capture buffer.
+            size_t len = 0;
+            while (len < sizeof(g_abort_msg) - 1 && amsg[len] != '\0') len++;
+            write(fd, amsg, len);
+            write(fd, "\n", 1);
+        } else {
+            // No message — the usual cause is a runtime that raises SIGABRT
+            // without going through bionic (the Go runtime in libgojni.so
+            // does exactly this). The old advice text is still the best
+            // output we have for that case.
+            const char* note =
+                "\nAbort message: (none captured)\n"
+                "No liblog abort message was captured. Other runtime aborts\n"
+                "may still have a reason in the system tombstone. Look in:\n"
+                "  * logcat around this timestamp, tags: scudo / libc / DEBUG\n"
+                "    (Scudo prints e.g. \"Scudo ERROR: invalid chunk state\")\n"
+                "  * the tombstone's \"Abort message:\" line\n"
+                "  * exitinfo-*.log in this directory (ApplicationExitInfo\n"
+                "    carries the description and the full tombstone)\n";
+            write(fd, note, strlen(note));
+        }
+    }
+
     // Backtrace LAST, and only after the summary bytes are already on
     // their way to disk: _Unwind_Backtrace is the one call here that is
     // not async-signal-safe, so if it faults or hangs on some device we
@@ -298,6 +456,20 @@ Java_com_openminis_app_crash_NativeCrashHandler_nativeInstall(
 
     // mkdir is fine here — we're on the JVM thread, not in a signal.
     mkdir(g_log_dir, 0755);
+
+    // [OpenMinis#363] Hook the liblog aborter first, so a LOG_ALWAYS_FATAL
+    // between here and the sigaction() calls below is still captured.
+    //
+    // Resolved at runtime: minSdk is 26 and the symbol is
+    // __INTRODUCED_IN(30), so a direct call would not link for older
+    // targets. Older devices still produce the system tombstone.
+    g_default_aborter = reinterpret_cast<void (*)(const char*)>(
+        dlsym(RTLD_DEFAULT, "__android_log_default_aborter"));
+    using set_aborter_fn = void (*)(void (*)(const char*));
+    if (auto set_aborter =
+            reinterpret_cast<set_aborter_fn>(dlsym(RTLD_DEFAULT, "__android_log_set_aborter"))) {
+        set_aborter(minis_aborter);
+    }
 
     struct sigaction sa{};
     sa.sa_sigaction = crash_signal_handler;

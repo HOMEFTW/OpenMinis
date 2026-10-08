@@ -71,6 +71,7 @@ import androidx.compose.ui.res.stringResource
 import com.openminis.app.auth.OpenAIOAuthManager
 import com.openminis.app.auth.OpenRouterOAuthManager
 import com.openminis.app.data.model.ProviderCredential
+import com.openminis.app.data.model.DeepSeekModels
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.repository.ProviderRepository
@@ -185,11 +186,20 @@ private val providerDisplayOrder = listOf(
     ProviderType.gemini,
     ProviderType.xAI,
     ProviderType.kimiCode,
+    ProviderType.deepSeek,
     ProviderType.openRouter,
 )
 
+// [T-copilot-provider] Copilot is appended to `providerDisplayOrder` at the
+// call site, gated on CopilotFeatureFlag. Gating the LIST rather than the enum
+// is what makes the kill switch cheap: an instance a user already created keeps
+// decoding, rendering and running — flipping the flag off stops new sign-ups
+// without stranding anyone mid-conversation or making their saved provider
+// un-decodable.
+
 /** Icon and color per provider type, matching iOS SF Symbols. */
 private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (type) {
+    ProviderType.deepSeek -> Icons.Default.AutoAwesome to Color(0xFF4D6BFE)
     ProviderType.openAI -> Icons.Default.Hub to Color(0xFF4CAF50)           // green
     ProviderType.anthropic -> Icons.Default.AutoAwesome to Color(0xFFAB47BC) // purple
     ProviderType.gemini -> Icons.Default.Diamond to Color(0xFF42A5F5)        // blue
@@ -197,6 +207,8 @@ private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (t
     ProviderType.xAI -> Icons.Default.FlashOn to Color(0xFFFF7043)           // orange — Grok visual cue
     // [T-kimi-oauth] Indigo — matches iOS's Kimi accent.
     ProviderType.kimiCode -> Icons.Default.Terminal to Color(0xFF5C6BC0)
+    // [T-copilot-provider] GitHub purple.
+    ProviderType.githubCopilot -> Icons.Default.Terminal to Color(0xFF6E5494)
     // [T-android-provider-type-parity] Types that arrive only from an iOS
     // package / newer build; never offered in addableProviderTypes, but the
     // icon helper is also used to render an already-restored instance.
@@ -211,7 +223,7 @@ private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
         ProviderType.openRouter -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         ProviderType.anthropic,
         ProviderType.openAI -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
-        ProviderType.gemini -> listOf(ProviderCredential.apiKey)
+        ProviderType.gemini, ProviderType.deepSeek -> listOf(ProviderCredential.apiKey)
         // xAI Grok primarily targets SuperGrok / X Premium+ OAuth, but also
         // offers a plain API key path (api.x.ai). Mirror OpenAI's pattern
         // of exposing both so users on tiers without OAuth API access can
@@ -220,6 +232,10 @@ private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
         // [T-kimi-oauth] Primary target is the Coding Plan device-code
         // sign-in; a manual Moonshot API key remains available.
         ProviderType.kimiCode -> listOf(ProviderCredential.oauth, ProviderCredential.apiKey)
+        // [T-copilot-provider] OAuth ONLY. There is no user-obtainable API key
+        // for the Copilot chat endpoint — offering a key field would invite
+        // people to paste a GitHub PAT, which the endpoint rejects.
+        ProviderType.githubCopilot -> listOf(ProviderCredential.oauth)
         // [T-android-provider-type-parity] Responses API instances authenticate
         // exactly like OpenAI ones (API key, or a Codex OAuth login).
         ProviderType.openAIResponses -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
@@ -243,18 +259,37 @@ private fun ChooseProviderScreen(
         title = stringResource(R.string.provider_list_add_provider),
         onBack = onBack,
     ) {
+        // [T-android-copilot-row-consent-only] Copilot is a plain row here, like
+        // every other OAuth provider (xAI, Kimi Code): tap it and the sign-in
+        // flow opens on its risk notice, which must be accepted before any
+        // network call is made.
+        //
+        // It used to be hidden behind a `copilotProviderEnabled` switch in its
+        // own section below. That was removed for the reason iOS removed the
+        // same construct: the switch and the notice carried the SAME warning,
+        // so the user read it twice and acted twice to reach one result, and
+        // the switch's section occupied a permanent titled block of this screen
+        // — subtitle and footer both restating the risk — to control the
+        // visibility of a single row. The row's own subtitle states the
+        // unofficial status, and the disclaimer dialog is the gate that
+        // actually matters, since it stands between the user and the first
+        // request.
+        val context = LocalContext.current
+        val offeredTypes = providerDisplayOrder + ProviderType.githubCopilot
         SettingsSection(
             header = stringResource(R.string.add_provider_choose_provider),
             footer = stringResource(R.string.add_provider_you_can_add_multiple_instances_of_the_sa),
         ) {
-            providerDisplayOrder.forEachIndexed { index, type ->
+            offeredTypes.forEachIndexed { index, type ->
                 val displayTitle = when (type) {
+                    ProviderType.deepSeek -> "DeepSeek"
                     ProviderType.openAI -> "OpenAI / Compatible API"
                     ProviderType.anthropic -> "Anthropic / Compatible API"
                     ProviderType.gemini -> "Google Gemini"
                     ProviderType.openRouter -> "OpenRouter"
                     ProviderType.xAI -> "xAI (Grok)"
                     ProviderType.kimiCode -> "Kimi Code"
+                    ProviderType.githubCopilot -> "GitHub Copilot"
                     // [T-android-provider-type-parity] Fall back to the enum's
                     // own display name for types this screen doesn't curate.
                     ProviderType.openAIResponses,
@@ -264,12 +299,14 @@ private fun ChooseProviderScreen(
                 // Describe which vendors each protocol supports, rather than a
                 // raw built-in model count.
                 val subtitleRes = when (type) {
+                    ProviderType.deepSeek -> R.string.add_provider_subtitle_deepseek
                     ProviderType.openAI -> R.string.add_provider_subtitle_openai
                     ProviderType.anthropic -> R.string.add_provider_subtitle_anthropic
                     ProviderType.gemini -> R.string.add_provider_subtitle_gemini
                     ProviderType.openRouter -> R.string.add_provider_subtitle_openrouter
                     ProviderType.xAI -> R.string.add_provider_subtitle_xai
                     ProviderType.kimiCode -> R.string.add_provider_subtitle_kimi
+                    ProviderType.githubCopilot -> R.string.add_provider_subtitle_copilot
                     // [T-android-provider-type-parity] Not offered for
                     // creation; reuse the OpenAI copy for the Responses API and
                     // a generic line for the undrivable types.
@@ -284,7 +321,7 @@ private fun ChooseProviderScreen(
                     icon = icon,
                     iconColor = iconColor,
                     onClick = { onSelect(type) },
-                    showDivider = index < providerDisplayOrder.size - 1,
+                    showDivider = index < offeredTypes.size - 1,
                 )
             }
         }
@@ -368,24 +405,30 @@ private fun ChooseCredentialScreen(
 }
 
 private fun apiKeyDescription(type: ProviderType): String = when (type) {
+    ProviderType.deepSeek -> "Use your DeepSeek API Key for the native Messages API"
     ProviderType.openAI -> "Supports OpenAI official API and compatible third-party endpoints"
     ProviderType.anthropic -> "Use an API key from your Anthropic account"
     ProviderType.gemini -> "Use an API key from your Google Gemini account"
     ProviderType.openRouter -> "Use an API key from your OpenRouter account"
     ProviderType.xAI -> "Use an API key from your xAI Console (api.x.ai)"
     ProviderType.kimiCode -> "Use an API key from your Moonshot account"
+    // [T-copilot-provider] Never offered (availableCredentials returns OAuth
+    // only); present because this helper is total over the enum.
+    ProviderType.githubCopilot -> "GitHub Copilot requires signing in with GitHub"
     ProviderType.openAIResponses -> "Supports the OpenAI Responses API and compatible endpoints"
     ProviderType.antigravity,
     ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
 private fun oauthDescription(type: ProviderType): String = when (type) {
+    ProviderType.deepSeek -> "DeepSeek requires an API key"
     ProviderType.anthropic -> "Sign in with your Claude account"
     ProviderType.gemini -> "Sign in with Google for Cloud Code Assist"
     ProviderType.openAI -> "Sign in with OpenAI Codex"
     ProviderType.xAI -> "Sign in with xAI (requires SuperGrok or X Premium+)"
     ProviderType.openRouter -> "Sign in with OpenRouter"
     ProviderType.kimiCode -> "Sign in with your Kimi account (Coding Plan)"
+    ProviderType.githubCopilot -> "Sign in with GitHub (requires a Copilot subscription)"
     ProviderType.openAIResponses -> "Sign in with OpenAI Codex"
     ProviderType.antigravity,
     ProviderType.unsupported -> "This provider type is not supported on Android"
@@ -418,7 +461,7 @@ private fun ConfigureProviderScreen(
     }
 
     var label by remember { mutableStateOf(defaultLabel) }
-    // [T-provider-name-chinese-34602, port iOS 7b283951] Flips true the
+    // [T-provider-name-chinese, port iOS 7b283951] Flips true the
     // first time the user types into the label field. While `false`, the
     // LaunchedEffect below keeps `label` glued to the auto-incremented
     // default, so adding a second OpenAI instance picks up "OpenAI 2"
@@ -428,7 +471,7 @@ private fun ConfigureProviderScreen(
     // clobber what they typed. Without this gate the `remember(config)`
     // recomputation, combined with Compose tearing down + recreating
     // ConfigureProviderScreen on step navigation, makes the field
-    // appear to reject Chinese — the iOS root cause Telegram 34602
+    // appear to reject Chinese — the iOS root cause a user
     // reported, with the same Android equivalent here.
     var labelEdited by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(defaultLabel, labelEdited) {
@@ -502,19 +545,22 @@ private fun ColumnScope.ApiKeyConfigSection(
     val scope = rememberCoroutineScope()
     var showApiKeyPlaintext by remember { mutableStateOf(false) }
     var appendV1Suffix by remember {
-        mutableStateOf(initialAppendV1 ?: (providerType != ProviderType.gemini))
+        mutableStateOf(initialAppendV1 ?: (providerType != ProviderType.gemini && providerType != ProviderType.deepSeek))
     }
     // OpenAI API Format: false = Chat Completions, true = Responses API
     var useResponsesAPI by remember { mutableStateOf(false) }
 
     // ── Credential ──────────────────────────────────────────────────────
     val keyPlaceholder = when (providerType) {
+        ProviderType.deepSeek -> "DeepSeek API Key..."
         ProviderType.anthropic -> "sk-ant-..."
         ProviderType.openAI -> "sk-..."
         ProviderType.gemini -> "Gemini API Key..."
         ProviderType.openRouter -> "sk-or-..."
         ProviderType.xAI -> "xai-..."
         ProviderType.kimiCode -> "sk-..."
+        // Unreachable: Copilot offers no API-key credential.
+        ProviderType.githubCopilot -> ""
         ProviderType.openAIResponses -> "sk-..."
         ProviderType.antigravity,
         ProviderType.unsupported -> "API Key..."
@@ -524,7 +570,7 @@ private fun ColumnScope.ApiKeyConfigSection(
         footer = stringResource(R.string.add_provider_your_key_is_stored_securely_in_encrypted),
     ) {
         SettingsCardBlock {
-            RowLabel(text = stringResource(R.string.provider_list_api_key))
+            RowLabel(text = stringResource(if (providerType == ProviderType.deepSeek) R.string.deepseek_api_key else R.string.provider_list_api_key))
             SectionTextField(
                 value = apiKey,
                 onValueChange = onApiKeyChange,
@@ -546,6 +592,7 @@ private fun ColumnScope.ApiKeyConfigSection(
     // ── Endpoint (skip for OpenRouter — fixed base URL) ─────────────────
     if (providerType != ProviderType.openRouter) {
         val defaultUrl = when (providerType) {
+            ProviderType.deepSeek -> DeepSeekModels.DEFAULT_BASE_URL
             ProviderType.gemini -> "https://generativelanguage.googleapis.com/v1beta"
             ProviderType.anthropic -> "https://api.anthropic.com"
             ProviderType.openAI -> "https://api.openai.com"
@@ -560,7 +607,9 @@ private fun ColumnScope.ApiKeyConfigSection(
         // on the Anthropic endpoint footer so this can be discovered
         // without scraping issue threads. Default Anthropic + other
         // provider types keep their original footer copy.
-        val baseUrlFooter = if (providerType == ProviderType.gemini) {
+        val baseUrlFooter = if (providerType == ProviderType.deepSeek) {
+            stringResource(R.string.deepseek_endpoint_hint)
+        } else if (providerType == ProviderType.gemini) {
             "Leave empty to use the default Google endpoint. Enter the full base URL including version path."
         } else if (providerType == ProviderType.anthropic) {
             stringResource(R.string.add_provider_endpoint_anthropic_hint)
@@ -583,7 +632,7 @@ private fun ColumnScope.ApiKeyConfigSection(
                 )
             }
             // Auto Append "/v1" toggle (not for Gemini — Gemini uses full path)
-            if (providerType != ProviderType.gemini) {
+            if (providerType != ProviderType.gemini && providerType != ProviderType.deepSeek) {
                 SettingsSwitchRow(
                     title = stringResource(R.string.add_provider_auto_append_v1_quoted),
                     checked = appendV1Suffix,
@@ -642,8 +691,11 @@ private fun ColumnScope.ApiKeyConfigSection(
             if (apiKey.isNotBlank()) {
                 providerRepository.saveApiKey(instance.id, apiKey.trim())
             }
-            // Auto-refresh models in background (fetches from API or falls back to models.dev)
-            scope.launch { providerRepository.refreshModels(instance) }
+            // Auto-refresh models (fetches from API or falls back to models.dev).
+            // [T-provider-refresh-outlives-screen] (GH#265) On the repository's
+            // scope: onSaved() pops this screen on the next line, which cancels
+            // rememberCoroutineScope() and used to kill the fetch before it ran.
+            providerRepository.triggerAsyncModelReconcile(instance.id)
             onSaved()
         },
         modifier = Modifier
@@ -684,12 +736,14 @@ private fun ColumnScope.OAuthConfigSection(
     var appendV1Suffix by remember { mutableStateOf(providerType != ProviderType.gemini) }
 
     val signInLabel = when (providerType) {
+        ProviderType.deepSeek -> "DeepSeek API Key"
         ProviderType.anthropic -> "Sign in with Claude"
         ProviderType.gemini -> "Sign in with Google"
         ProviderType.openAI -> "Sign in with OpenAI"
         ProviderType.openRouter -> "Sign in with OpenRouter"
         ProviderType.xAI -> "Sign in with xAI"
         ProviderType.kimiCode -> "Sign in with Kimi Code"
+        ProviderType.githubCopilot -> "Sign in with GitHub"
         ProviderType.openAIResponses -> "Sign in with OpenAI"
         ProviderType.antigravity,
         ProviderType.unsupported -> "Sign in"
@@ -714,8 +768,48 @@ private fun ColumnScope.OAuthConfigSection(
         )
     }
 
+    // [T-copilot-provider] Same shape, separate state: both dialogs are driven
+    // by the login coroutine's onDeviceCode callback, and sharing one variable
+    // would make the type ambiguous.
+    var copilotDeviceAuth by remember {
+        mutableStateOf<com.openminis.app.auth.CopilotDeviceFlow.DeviceAuthorization?>(null)
+    }
+    // [T-copilot-disclaimer] Gate state for the pre-login notice. Declared
+    // before the sign-in section so both the button and the sheet see it.
+    var showCopilotDisclaimer by remember { mutableStateOf(false) }
+
+    copilotDeviceAuth?.let { auth ->
+        KimiDeviceLoginDialog(
+            userCode = auth.userCode,
+            verificationUrl = auth.verificationUri,
+            onCancel = {
+                kimiLoginJob?.cancel()
+                copilotDeviceAuth = null
+            },
+            title = stringResource(R.string.copilot_login_title),
+            instructions = stringResource(R.string.copilot_login_instructions),
+            // [T-android-copilot-disclaimer-parity] No risk notice here, as on
+            // iOS: this screen is reached only THROUGH the consent dialog, which
+            // the user has just read and accepted. Restating it a third time on
+            // the screen where they are entering a code is noise competing with
+            // the instructions that actually matter.
+        )
+    }
+
     if (isAuthenticated) {
         // ── Authenticated state — Token + Save ─────────────────────────
+        //
+        // [T-android-copilot-no-post-signin-reminder] Copilot gets the SAME
+        // post-sign-in footer as every other provider.
+        //
+        // It used to get a separate "unofficial — at your own risk" reminder
+        // here. Removed to match iOS, where the equivalent notice was retired
+        // with the reasoning that the disclosure now lives entirely in the
+        // sign-in consent page: by the time this footer is on screen the user
+        // has already read the full notice and pressed accept, so restating a
+        // one-line version of it adds nothing they have not just agreed to —
+        // and it displaced the genuinely useful line about where the token is
+        // stored.
         SettingsSection(
             header = stringResource(R.string.add_provider_authentication),
             footer = stringResource(R.string.add_provider_sign_in_succeeded_the_token_is_stored_in),
@@ -752,8 +846,11 @@ private fun ColumnScope.OAuthConfigSection(
                     credentialType = ProviderCredential.oauth,
                 )
                 providerRepository.addInstance(instance)
-                // Auto-refresh models (fetches from API or falls back to models.dev)
-                scope.launch { providerRepository.refreshModels(instance) }
+                // Auto-refresh models (fetches from API or falls back to models.dev).
+                // [T-provider-refresh-outlives-screen] (GH#265) Not on this
+                // screen's scope — onSaved() pops the screen and would cancel it,
+                // leaving an OAuth provider on the stale built-in catalog.
+                providerRepository.triggerAsyncModelReconcile(instance.id)
                 onSaved()
             },
             modifier = Modifier
@@ -769,11 +866,16 @@ private fun ColumnScope.OAuthConfigSection(
             footer = stringResource(R.string.add_provider_opens_the_provider_s_web_sign_in_flow_af),
         ) {
             SettingsCardBlock {
-                MinisButton(
-                    onClick = {
-                        isAuthenticating = true
-                        errorMessage = null
-                        kimiLoginJob = scope.launch {
+                // [T-copilot-disclaimer] The Copilot sign-in is gated: tapping
+                // the button opens the disclaimer instead of starting the
+                // flow, and ONLY the sheet's accept action calls this. Written
+                // as a named lambda so there is exactly one path that can
+                // begin Device Flow — an inline onClick would leave the
+                // ungated call site one edit away from coming back.
+                val beginSignIn: () -> Unit = {
+                    isAuthenticating = true
+                    errorMessage = null
+                    kimiLoginJob = scope.launch {
                             try {
                                 when (providerType) {
                                     ProviderType.kimiCode -> {
@@ -787,6 +889,19 @@ private fun ColumnScope.OAuthConfigSection(
                                             onDeviceCode = { auth -> kimiDeviceAuth = auth },
                                         )
                                         kimiDeviceAuth = null
+                                        maskedToken = maskOAuthToken(key)
+                                    }
+                                    ProviderType.githubCopilot -> {
+                                        // [T-copilot-provider] Same device-code
+                                        // shape as Kimi. login() also performs
+                                        // the first session-token exchange, so
+                                        // an account without Copilot access
+                                        // fails HERE rather than on first send.
+                                        val key = com.openminis.app.auth.CopilotOAuthManager.login(
+                                            context, pendingInstanceId,
+                                            onDeviceCode = { auth -> copilotDeviceAuth = auth },
+                                        )
+                                        copilotDeviceAuth = null
                                         maskedToken = maskOAuthToken(key)
                                     }
                                     ProviderType.openRouter -> {
@@ -814,9 +929,11 @@ private fun ColumnScope.OAuthConfigSection(
                                 // [T-kimi-oauth] User dismissed the device-code
                                 // dialog — not an error; just reset the button.
                                 kimiDeviceAuth = null
+                                copilotDeviceAuth = null
                                 throw e
                             } catch (e: Exception) {
                                 kimiDeviceAuth = null
+                                copilotDeviceAuth = null
                                 // T-android-codex-oauth-dns: surface a
                                 // localized "check network / proxy" hint
                                 // when the OAuth manager flags a DNS /
@@ -824,14 +941,63 @@ private fun ColumnScope.OAuthConfigSection(
                                 // (4xx, token format) keep their raw
                                 // message so we don't lose diagnostic
                                 // signal.
+                                // [T-android-oauth-failure-diagnostics] Log the
+                                // exception before reducing it to a string. The
+                                // fallback below renders a bare "Authentication
+                                // failed" whenever `message` is null, which is
+                                // exactly the case that tells the user nothing
+                                // AND left no trace to diagnose — a Copilot
+                                // sign-in that completed the device flow
+                                // reported it with nothing in the log.
+                                android.util.Log.e(
+                                    "AddProviderOAuth",
+                                    "OAuth sign-in failed for $providerType: " +
+                                        "${e.javaClass.name}: ${e.message}",
+                                    e,
+                                )
                                 errorMessage = if (e is com.openminis.app.auth.OAuthNetworkUnreachableException) {
                                     context.getString(R.string.add_provider_oauth_network_unreachable)
                                 } else {
-                                    e.message ?: "Authentication failed"
+                                    e.message ?: "${e.javaClass.simpleName}: authentication failed"
                                 }
                             } finally {
                                 isAuthenticating = false
                             }
+                    }
+                }
+
+                // [T-copilot-disclaimer] Mounted HERE, inside the section that
+                // owns `beginSignIn`, so accept calls it directly. An earlier
+                // draft hoisted the dialog and passed the action through a
+                // nullable state — that made "accept does nothing" a
+                // reachable state, which is exactly the bug this gate exists
+                // to prevent the inverse of.
+                if (showCopilotDisclaimer) {
+                    CopilotDisclaimerDialog(
+                        onAccept = {
+                            // [T-android-copilot-consent-remembered] Record the
+                            // acceptance so the notice is shown once rather than
+                            // on every sign-in. A warning that appears every
+                            // time is one the reader learns to tap past.
+                            com.openminis.app.util.CopilotFeatureFlag.recordConsent(context)
+                            showCopilotDisclaimer = false
+                            beginSignIn()
+                        },
+                        onCancel = { showCopilotDisclaimer = false },
+                    )
+                }
+
+                MinisButton(
+                    onClick = {
+                        // [T-copilot-disclaimer] Copilot: show the disclaimer
+                        // and stop. Nothing reaches the network until the user
+                        // taps accept. Every other provider is unchanged.
+                        if (providerType == ProviderType.githubCopilot &&
+                            !com.openminis.app.util.CopilotFeatureFlag.hasAcceptedConsent(context)
+                        ) {
+                            showCopilotDisclaimer = true
+                        } else {
+                            beginSignIn()
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -861,7 +1027,20 @@ private fun ColumnScope.OAuthConfigSection(
         }
 
         // ── Or Configure Manually ──────────────────────────────────────
+        //
+        // [T-android-copilot-oauth-only] Not for Copilot. Both fields in this
+        // section are dead ends there: the manual token is saved as an API key
+        // that `makeCopilotProvider` never reads (it wires `oauthTokenProvider`
+        // to the session-token minter unconditionally), and a custom base URL
+        // would break the fixed host the integration depends on — the editor
+        // identity headers and the no-/v1 endpoint layout are a contract with
+        // api.githubcopilot.com specifically. iOS reports Copilot as
+        // `customBaseURLSupported = false` and excludes it from the manual
+        // token entry for the same reasons. Showing fields that are stored,
+        // displayed as configured, and then ignored is worse than showing none.
+        if (providerType != ProviderType.githubCopilot) {
         val defaultUrl = when (providerType) {
+            ProviderType.deepSeek -> DeepSeekModels.DEFAULT_BASE_URL
             ProviderType.gemini -> "https://generativelanguage.googleapis.com/v1beta"
             ProviderType.anthropic -> "https://api.anthropic.com"
             ProviderType.openAI -> "https://api.openai.com"
@@ -869,6 +1048,9 @@ private fun ColumnScope.OAuthConfigSection(
             ProviderType.xAI -> "https://api.x.ai/v1"
             // [T-kimi-oauth] /v1 is load-bearing (…/coding/… 404s without it).
             ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+            // [T-copilot-provider] API root, no /v1 — /chat/completions and
+            // /models both hang directly off it.
+            ProviderType.githubCopilot -> com.openminis.app.auth.CopilotDeviceFlow.API_BASE
             ProviderType.openAIResponses -> "https://api.openai.com"
             ProviderType.antigravity,
             ProviderType.unsupported -> ""
@@ -919,7 +1101,8 @@ private fun ColumnScope.OAuthConfigSection(
                 providerRepository.addInstance(instance)
                 // Store the manual token as API key — ProviderFactory uses loadApiKey() for all credential types
                 providerRepository.saveApiKey(instance.id, manualToken.trim())
-                scope.launch { providerRepository.refreshModels(instance) }
+                // [T-provider-refresh-outlives-screen] (GH#265) Survives onSaved()'s pop.
+                providerRepository.triggerAsyncModelReconcile(instance.id)
                 onSaved()
             },
             modifier = Modifier
@@ -929,6 +1112,7 @@ private fun ColumnScope.OAuthConfigSection(
         ) {
             Text(stringResource(R.string.provider_list_add_provider))
         }
+        }  // end: manual configuration, hidden for Copilot
     }
 }
 

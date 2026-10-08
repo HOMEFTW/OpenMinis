@@ -12,6 +12,7 @@ import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.SubAgentDefinition
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -46,6 +47,10 @@ object ProviderConfigMetaKeys {
     const val VOICE_OUTPUT_GROUP_ID = "voice_output_group_id"
     // [T-android-vision-group / GH#182] Vision Group pointer (per-device meta KV).
     const val VISION_GROUP_ID = "vision_group_id"
+    // The repository returns the canonical DB snapshot after every save.
+    // Persist the roster here too, so that round-trip cannot erase custom definitions.
+    const val SUB_AGENTS_JSON = "sub_agents_json"
+      const val MODEL_ABSENCE_JSON = "model_absence_json"
     const val JSON_SYNC_HASH = "json_sync_hash"
 }
 
@@ -166,6 +171,16 @@ fun ProviderConfig.toSnapshot(
     }
 
     val metaRows = mutableListOf<ProviderConfigMetaEntity>()
+    val absence = org.json.JSONObject()
+    modelEntries.forEach { entry ->
+        entry.absentSince?.let { absence.put(compositeEntryKey(entry.providerInstanceId, entry.baseModel.id), it) }
+    }
+    metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.MODEL_ABSENCE_JSON, absence.toString()))
+    instances.forEach { instance ->
+        instance.responseTimeoutSeconds?.let {
+            metaRows.add(ProviderConfigMetaEntity("responseTimeoutSeconds:${instance.id}", it.coerceIn(30, 3600).toString()))
+        }
+    }
     defaultPrimaryGroupId?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.DEFAULT_PRIMARY_GROUP_ID, it))
     }
@@ -181,6 +196,11 @@ fun ProviderConfig.toSnapshot(
     visionGroupId?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.VISION_GROUP_ID, it))
     }
+    // Write an explicit empty list too, distinguishing a cleared roster from an older build.
+    metaRows.add(ProviderConfigMetaEntity(
+        ProviderConfigMetaKeys.SUB_AGENTS_JSON,
+        jsonForBlobs.encodeToString(ListSerializer(SubAgentDefinition.serializer()), subAgents.toList()),
+    ))
     jsonSyncHash?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.JSON_SYNC_HASH, it))
     }
@@ -206,6 +226,8 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             appendV1Suffix = row.appendV1Suffix != 0,
             customUserAgent = row.customUserAgent,
             useResponsesAPI = row.useResponsesAPI != 0,
+            responseTimeoutSeconds = meta.firstOrNull { it.key == "responseTimeoutSeconds:${row.id}" }
+                ?.value?.toIntOrNull()?.coerceIn(30, 3600),
             azureMode = row.azureMode != 0,
             // [GH#68] Safe parse: null (pre-migration rows) or an unknown
             // name from a future build falls back to auto / no cache rather
@@ -219,6 +241,9 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         )
     }.toMutableList()
 
+    val absence = org.json.JSONObject(this.meta.firstOrNull {
+        it.key == ProviderConfigMetaKeys.MODEL_ABSENCE_JSON
+    }?.value ?: "{}")
     val entries = this.entries.map { row ->
         val baseModel = jsonForBlobs.decodeFromString(LLMModel.serializer(), row.baseModelJson)
         val overrides = row.overridesJson?.let {
@@ -232,6 +257,7 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             isHidden = row.isHidden != 0,
             uuid = row.id,
             userModifiedAt = row.userModifiedAt,
+            absentSince = if (absence.has(row.id)) absence.getLong(row.id) else null,
         )
     }.toMutableList()
 
@@ -277,6 +303,11 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         visionGroupId = metaMap[ProviderConfigMetaKeys.VISION_GROUP_ID],
         agentLoopModelEntryIds = entryLoopIds,
         agentLoopGroupIds = groupLoopIds,
+        subAgents = metaMap[ProviderConfigMetaKeys.SUB_AGENTS_JSON]?.let { raw ->
+            runCatching {
+                jsonForBlobs.decodeFromString(ListSerializer(SubAgentDefinition.serializer()), raw)
+            }.getOrDefault(emptyList())
+        }.orEmpty().toMutableList(),
     )
 }
 

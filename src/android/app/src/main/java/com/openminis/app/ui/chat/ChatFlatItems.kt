@@ -306,6 +306,35 @@ internal sealed class FlatChatItem {
         override fun hashCode(): Int = message.hashCode() * 31 + precededByUser.hashCode()
     }
 
+    data class AgentCallbackCard(
+        val message: ChatMessage,
+        val callback: com.openminis.app.agent.jobs.AgentCallback,
+    ) : FlatChatItem() {
+        override val key = "callback:${message.id}"
+        override val contentType = "callback"
+    }
+
+    class ScheduledTaskCardItem(
+        val message: ChatMessage,
+        val marker: com.openminis.app.scheduled.ScheduledTaskMarker,
+    ) : FlatChatItem() {
+        override val key = "scheduled:${message.id}"
+        override val contentType = "scheduled"
+        override fun equals(other: Any?): Boolean =
+            this === other || (other is ScheduledTaskCardItem && message == other.message)
+        override fun hashCode(): Int = message.hashCode()
+    }
+
+    data class CompletedTools(
+        val messageId: String,
+        val firstToolId: String,
+        val count: Int,
+        val expanded: Boolean,
+    ) : FlatChatItem() {
+        override val key = "toolgroup:${messageId}:${firstToolId}"
+        override val contentType = "toolgroup"
+    }
+
     data class AssistantHeader(val messageId: String) : FlatChatItem() {
         override val key = "header:$messageId"
         override val contentType = "header"
@@ -507,6 +536,26 @@ internal fun mergeStreamingOverlay(
     }
 }
 
+internal fun ChatMessage.rendersAsUserBubble(): Boolean {
+    if (role != "user") return false
+    if (com.openminis.app.scheduled.ScheduledTaskMarker.parse(content) != null) return false
+    return !com.openminis.app.agent.jobs.AgentCallback.isCallbackText(content)
+}
+
+/** Merge only the few streaming messages when inspecting a child's live tool. */
+internal fun streamingOverlaySubset(
+    messages: List<ChatMessage>,
+    streaming: Map<String, StreamingDelta>,
+): List<ChatMessage> = if (streaming.isEmpty()) emptyList() else messages.mapNotNull { message ->
+    val delta = streaming[message.id] ?: return@mapNotNull null
+    message.copy(
+        content = delta.content,
+        isStreaming = true,
+        toolBlocks = delta.toolBlocks,
+        isAwaitingModelResponse = delta.isAwaitingModelResponse,
+    )
+}
+
 internal fun buildFlatChatItems(
     messages: List<ChatMessage>,
     // [T-android-perf-logging] Optional — when supplied, emit a progress
@@ -535,6 +584,9 @@ internal fun buildFlatChatItems(
         while (!usedKeys.add("${item.key}#$n")) n++
         return when (item) {
             is FlatChatItem.UserBubble -> FlatChatItem.UserBubble(item.message.copy(id = "${item.message.id}#$n"), item.precededByUser)
+            is FlatChatItem.ScheduledTaskCardItem -> FlatChatItem.ScheduledTaskCardItem(item.message.copy(id = "${item.message.id}#$n"), item.marker)
+            is FlatChatItem.AgentCallbackCard -> item.copy(message = item.message.copy(id = "${item.message.id}#$n"))
+            is FlatChatItem.CompletedTools -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantHeader -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantText -> FlatChatItem.AssistantText(
                 messageId = "${item.messageId}#$n",
@@ -578,6 +630,18 @@ internal fun buildFlatChatItems(
             )
         }
         if (message.role == "user") {
+            val scheduled = com.openminis.app.scheduled.ScheduledTaskMarker.parse(message.content)
+            if (scheduled != null) {
+                out.add(dedupe(FlatChatItem.ScheduledTaskCardItem(message, scheduled)))
+                continue
+            }
+            val callback = if (com.openminis.app.agent.jobs.AgentCallback.isCallbackText(message.content)) {
+                com.openminis.app.agent.jobs.AgentCallback.parse(message.content)
+            } else null
+            if (callback != null) {
+                out.add(dedupe(FlatChatItem.AgentCallbackCard(message, callback)))
+                continue
+            }
             // [T-android-candidate-bubble-gap] Flag when the previous message
             // is also a user message so the bubble can add a separating top
             // gap — back-to-back candidate / queued sends otherwise have no
@@ -607,7 +671,10 @@ internal fun buildFlatChatItems(
         // we reach the same end-result at the render layer.
         val prevNonSystem = (idx - 1 downTo 0).asSequence()
             .map { messages[it] }
-            .firstOrNull { it.role != "system" }
+            .firstOrNull {
+                it.role != "system" &&
+                    !com.openminis.app.agent.jobs.AgentCallback.isCallbackText(it.content)
+            }
         val isResumeContinuation = prevNonSystem?.role == "assistant"
         if (!isSystem && !isResumeContinuation) {
             out.add(dedupe(FlatChatItem.AssistantHeader(message.id)))
@@ -632,6 +699,18 @@ internal fun buildFlatChatItems(
                 "text" -> {
                     if (block.content.isNotEmpty()) {
                         val isLastText = index == lastTextIdx
+                        if (!(message.isStreaming && isLastText) && block.content.length > LARGE_MESSAGE_THRESHOLD_CHARS) {
+                            out.add(dedupe(FlatChatItem.AssistantMarkdownBlock(
+                                messageId = message.id,
+                                parentBlockId = block.id,
+                                rawText = block.content,
+                                blockIndex = 0,
+                                isLastBlockOfMessage = isLastText,
+                                messageIsStreaming = false,
+                                messageMarkdown = joinedMarkdown,
+                            )))
+                            return@forEachIndexed
+                        }
                         // Pattern A: split this text block's content into
                         // independent markdown fragments so each becomes its
                         // own LazyColumn item. Frozen prefix fragments are
@@ -779,4 +858,37 @@ internal fun buildFlatChatItems(
         }
     }
     return out
+}
+
+internal fun groupCompletedTools(
+    items: List<FlatChatItem>,
+    expandedKeys: Set<String>,
+): List<FlatChatItem> {
+    val candidates = items.map { item ->
+        val tool = item as? FlatChatItem.AssistantToolUse
+        ToolFoldCandidate(
+            tool?.messageId.orEmpty(),
+            tool != null && tool.block.toolStatus == ToolBlockStatus.SUCCESS &&
+                !com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(tool.block.toolName) &&
+                tool.block.toolName !in setOf("ask_user", "ask_question", "request_user_input"),
+        )
+    }
+    val ranges = completedToolRunRanges(candidates).associateBy { it.first }
+    if (ranges.isEmpty()) return items
+    return buildList {
+        var index = 0
+        while (index < items.size) {
+            val range = ranges[index]
+            if (range == null) {
+                add(items[index++])
+                continue
+            }
+            val first = items[index] as FlatChatItem.AssistantToolUse
+            val key = "toolgroup:${first.messageId}:${first.block.id}"
+            val expanded = key in expandedKeys
+            add(FlatChatItem.CompletedTools(first.messageId, first.block.id, range.count(), expanded))
+            if (expanded) addAll(items.subList(range.first, range.last + 1))
+            index = range.last + 1
+        }
+    }
 }

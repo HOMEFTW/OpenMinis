@@ -20,5 +20,5 @@ target_include_directories(jieba_jni PRIVATE
 
 find_library(log-lib log)
 target_link_libraries(pty_bridge ${log-lib})
-target_link_libraries(minis_crash_handler ${log-lib})
+target_link_libraries(minis_crash_handler ${log-lib} dl)
 target_link_libraries(jieba_jni ${log-lib})

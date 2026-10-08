@@ -1,5 +1,8 @@
 package com.openminis.app.ui.sessions
 
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.LinearProgressIndicator
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -606,6 +609,8 @@ fun SessionListScreen(
     // confirmation can restate the consequence.
     var folderToDelete by remember { mutableStateOf<Pair<FolderEntity, Int>?>(null) }
     var showBulkDeleteDialog by remember { mutableStateOf(false) }
+    var multiExportProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var multiExportResult by remember { mutableStateOf<com.openminis.app.share.SessionExporter.Result?>(null) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var editSession by remember { mutableStateOf<ChatSessionEntity?>(null) }
     var showBrowserSheet by remember { mutableStateOf(false) }
@@ -1246,7 +1251,36 @@ fun SessionListScreen(
                 // Selection toolbar at bottom (matching iOS: Export + Delete)
                 SelectionToolbar(
                     selectedCount = selectedIds.size,
-                    onExport = { /* TODO: export */ },
+                    onExport = { format ->
+                        // Displayed order, persisted rows only: the synthetic
+                        // draft row was never written, so it has nothing to export.
+                        val targets = persistedSessions.filter { it.id in selectedIds }
+                        if (targets.isNotEmpty() && multiExportProgress == null) {
+                            multiExportProgress = 0 to 0
+                            scope.launch {
+                                try {
+                                    val result = com.openminis.app.share.SessionExporter.exportToZip(
+                                        context, targets, chatRepository, format,
+                                    ) { done, total ->
+                                        scope.launch { multiExportProgress = done to total }
+                                    }
+                                    // iOS shows the summary only for several sessions.
+                                    if (result.sessionCount > 1) multiExportResult = result
+                                    else shareSessionExport(context, result)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (t: Throwable) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        context.getString(R.string.export_progress_failed),
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                } finally {
+                                    multiExportProgress = null
+                                }
+                            }
+                        }
+                    },
                     onMove = { viewModel.requestGroupPickerForSelection() },
                     onDelete = { showBulkDeleteDialog = true },
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -1315,6 +1349,37 @@ fun SessionListScreen(
     }
 
     // Bulk delete confirmation
+    multiExportProgress?.let { (done, total) ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(stringResource(R.string.sessionlist_export)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(R.string.export_progress_running, done, total))
+                    if (total > 0) {
+                        LinearProgressIndicator(
+                            progress = { (done.toFloat() / total).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+    }
+    multiExportResult?.let { result ->
+        SessionExportSummaryDialog(
+            result = result,
+            onShare = {
+                multiExportResult = null
+                shareSessionExport(context, result)
+            },
+            onDismiss = { multiExportResult = null },
+        )
+    }
+
     if (showBulkDeleteDialog) {
         MinisAlertDialog(
             onDismissRequest = { showBulkDeleteDialog = false },
@@ -1723,7 +1788,8 @@ private fun DualFabRow(
 @Composable
 private fun SelectionToolbar(
     selectedCount: Int,
-    onExport: () -> Unit,
+    /** [T-android-session-multi-export] JSON or plain text, picked from a menu as on iOS. */
+    onExport: (com.openminis.app.share.SessionExporter.Format) -> Unit,
     /** [T-android-session-grouping] Bulk-file the selection into a group. */
     onMove: () -> Unit,
     onDelete: () -> Unit,
@@ -1736,19 +1802,38 @@ private fun SelectionToolbar(
             .padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-        // Export button (matching iOS)
-        MinisTextButton(
-            onClick = onExport,
-            enabled = selectedCount > 0,
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Default.Share,
-                    contentDescription = stringResource(R.string.sessionlist_export),
-                    modifier = Modifier.size(20.dp),
+        // Export button (matching iOS: a menu of JSON / Plain Text)
+        var showExportMenu by remember { mutableStateOf(false) }
+        Box {
+            MinisTextButton(
+                onClick = { showExportMenu = true },
+                enabled = selectedCount > 0,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Share,
+                        contentDescription = stringResource(R.string.sessionlist_export),
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(stringResource(R.string.sessionlist_export), fontSize = 11.sp)
+                }
+            }
+            DropdownMenu(expanded = showExportMenu, onDismissRequest = { showExportMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.sessionlist_export_json)) },
+                    onClick = {
+                        showExportMenu = false
+                        onExport(com.openminis.app.share.SessionExporter.Format.JSON)
+                    },
                 )
-                Spacer(Modifier.height(4.dp))
-                Text(stringResource(R.string.sessionlist_export), fontSize = 11.sp)
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.sessionlist_export_plain)) },
+                    onClick = {
+                        showExportMenu = false
+                        onExport(com.openminis.app.share.SessionExporter.Format.PLAIN_TEXT)
+                    },
+                )
             }
         }
 
@@ -3358,6 +3443,86 @@ internal fun SessionEditSheet(
  * share sheet as a real file attachment. Peak memory stays bounded by
  * batch size regardless of session length.
  */
+private fun shareSessionExport(context: Context, result: com.openminis.app.share.SessionExporter.Result) {
+    val mime = when {
+        result.fileName.endsWith(".zip") -> "application/zip"
+        result.format == com.openminis.app.share.SessionExporter.Format.JSON -> "application/json"
+        else -> "text/plain"
+    }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_SUBJECT, result.fileName.substringBeforeLast('.'))
+        putExtra(Intent.EXTRA_STREAM, result.uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, context.getString(R.string.sessionlist_export))
+            .apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) },
+    )
+}
+
+/**
+ * [T-android-session-multi-export] What a multi-session export contains, before
+ * it is shared — iOS shows the same summary (format, sessions, messages, time
+ * range, attachments, size) for an export of several sessions.
+ */
+@Composable
+private fun SessionExportSummaryDialog(
+    result: com.openminis.app.share.SessionExporter.Result,
+    onShare: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val s = result.summary
+    val dateFmt = remember { java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT) }
+    val rows = buildList {
+        add(
+            stringResource(R.string.export_summary_format) to stringResource(
+                if (result.format == com.openminis.app.share.SessionExporter.Format.JSON) R.string.export_summary_format_value_json
+                else R.string.export_summary_format_value_txt,
+            ),
+        )
+        add(stringResource(R.string.export_summary_sessions) to result.sessionCount.toString())
+        add(stringResource(R.string.export_summary_messages) to stringResource(R.string.export_summary_messages_value, s.totalMessages))
+        if (s.earliest != null && s.latest != null) {
+            add(
+                stringResource(R.string.export_summary_timerange) to stringResource(
+                    R.string.export_summary_timerange_value,
+                    dateFmt.format(java.util.Date(s.earliest)),
+                    dateFmt.format(java.util.Date(s.latest)),
+                ),
+            )
+        }
+        if (s.attachmentCount > 0) {
+            add(stringResource(R.string.export_summary_attachments) to stringResource(R.string.export_summary_attachments_value, s.images, s.videos))
+        }
+        add(
+            stringResource(R.string.export_summary_size) to stringResource(
+                R.string.export_summary_size_value,
+                android.text.format.Formatter.formatShortFileSize(context, result.fileSizeBytes),
+            ),
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.export_progress_done)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((label, value) in rows) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(value, fontSize = 14.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onShare) { Text(stringResource(R.string.common_share)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+    )
+}
+
+
 private fun exportSession(
     context: Context,
     session: ChatSessionEntity,

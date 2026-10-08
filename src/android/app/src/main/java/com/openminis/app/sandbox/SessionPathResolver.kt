@@ -9,7 +9,8 @@ internal object SessionPathResolver {
         val match = Regex("^/var/minis/(attachments|offloads|workspace|browser)(/.*)?$").matchEntire(linuxPath)
             ?: return null
         require(sessionId.matches(Regex("[A-Za-z0-9_-]+"))) { "Invalid session identifier" }
-        val session = File(filesDir.canonicalFile, "minis-sessions/$sessionId")
+        val owner = SessionWorkspaceRegistry.owner(sessionId)
+        val session = File(filesDir.canonicalFile, "minis-sessions/$owner")
         require(session.canonicalFile == session.absoluteFile) { "Session directory is a symbolic link" }
         val scoped = File(session, match.groupValues[1])
         require(scoped.canonicalFile == scoped.absoluteFile) { "Session scope is a symbolic link" }

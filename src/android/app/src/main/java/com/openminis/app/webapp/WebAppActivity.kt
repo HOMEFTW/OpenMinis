@@ -512,8 +512,9 @@ class WebAppActivity : ComponentActivity() {
                 webViewRef = null
                 view.disposeSafely()
                 view.rendererGoneNotice()
-                finish()
-                return true
+                val handled = com.openminis.app.ui.webview.WebViewRenderProcess.handle("WebAppActivity", detail)
+                runCatching { finish() }
+                return handled
             }
 
             override fun shouldInterceptRequest(

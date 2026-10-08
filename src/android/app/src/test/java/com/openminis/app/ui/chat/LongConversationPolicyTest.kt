@@ -9,6 +9,39 @@ import org.junit.Test
 import java.net.SocketTimeoutException
 
 class LongConversationPolicyTest {
+    @Test fun oldReasoningIsTrimmedOldestFirstWithoutChangingStoredHistory() {
+        val history = (0..7).map { i -> LLMMessage(
+            if (i == 3) LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT,
+            "message-$i", reasoningContent = if (i == 3) null else "thought-$i",
+        ) }
+        val trimmed = trimOldReasoning(history, 1) { it.length }
+        assertEquals("", trimmed[0].reasoningContent)
+        assertEquals(history.drop(1), trimmed.drop(1))
+        assertEquals("thought-0", history[0].reasoningContent)
+        val allOld = trimOldReasoning(history, 1000) { it.length }
+        assertTrue(allOld.take(3).all { it.reasoningContent == "" })
+        assertEquals(history.drop(3), allOld.drop(3))
+    }
+
+    @Test fun currentToolCycleAndLatestFourMessagesKeepReasoning() {
+        val history = listOf(LLMMessage(LLMMessage.Role.USER, "question")) +
+            (0..7).map { LLMMessage(LLMMessage.Role.ASSISTANT, "", reasoningContent = "current") }
+        assertEquals(history, trimOldReasoning(history, 1000) { it.length })
+        val lastUserAtEnd = history + LLMMessage(LLMMessage.Role.USER, "next")
+        val trimmed = trimOldReasoning(lastUserAtEnd, 1000) { it.length }
+        assertEquals(lastUserAtEnd.takeLast(4), trimmed.takeLast(4))
+        assertEquals(history, trimOldReasoning(history, 0) { it.length })
+    }
+
+    @Test fun certificateFailureNeverRetriesButConnectionResetCan() {
+        val cert = RuntimeException(javax.net.ssl.SSLHandshakeException("handshake").apply {
+            initCause(java.security.cert.CertificateException("invalid certificate"))
+        })
+        assertTrue(com.openminis.app.data.model.LLMError.isCertificateFailure(cert))
+        assertFalse(StreamRetryPolicy.canRetrySameProvider(cert, 1000))
+        assertTrue(StreamRetryPolicy.canRetrySameProvider(java.io.IOException("connection reset"), 1000))
+    }
+
     @Test fun summaryAppearsInActualChatAndResponsesPayloads() {
         val message = prependContextSummary(LLMMessage(LLMMessage.Role.USER, "question",
             contentParts = listOf(AgentContentPart.Text("question"))), "preserved-old-decision")

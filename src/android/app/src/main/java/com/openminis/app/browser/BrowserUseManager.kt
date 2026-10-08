@@ -1,7 +1,6 @@
 package com.openminis.app.browser
 
 import com.openminis.app.ui.webview.disposeSafely
-import com.openminis.app.ui.webview.isDisposed
 import com.openminis.app.ui.webview.rendererGoneNotice
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
@@ -66,6 +65,24 @@ class BrowserUseManager(
          * scrollHeight so the agent can scroll-then-stitch if it needs more.
          */
         private const val MAX_FULL_PAGE_HEIGHT_PX = 32768
+
+        /**
+         * [T-android-browser-screenshot-scroll-offset] Budget for the JS probe
+         * that reads the page's scroll offset before a capture. Short on
+         * purpose: the probe is a correctness refinement, and a wedged
+         * renderer must not be able to stall every screenshot. On timeout the
+         * capture proceeds uncompensated, i.e. the pre-fix behaviour.
+         */
+        private const val SCROLL_PROBE_TIMEOUT_MS = 500L
+
+        /**
+         * [T-android-browser-fullpage-repaint] How long to let the renderer
+         * paint the newly exposed area after the full-page capture stretches
+         * the WebView's layout box. Without it the stretch and the draw happen
+         * in the same main-thread pass, so the region below the original
+         * viewport can be captured before it has been rendered.
+         */
+        private const val FULL_PAGE_REPAINT_DELAY_MS = 120L
 
         /**
          * Minimal HTML used in place of `about:blank` when a fresh tab
@@ -175,6 +192,48 @@ class BrowserUseManager(
     /** Deferred for awaiting navigation completion. */
     private val scriptWaiters = mutableSetOf<CompletableDeferred<String>>()
     @Volatile private var rendererFailed = false
+
+    val isRendererDead: Boolean get() = rendererFailed
+
+    @Volatile
+    var isWedged: Boolean = false
+        private set
+
+    @Volatile
+    var wedgeReason: String? = null
+        private set
+
+    @Volatile private var disposed = false
+    val isUnusable: Boolean get() = rendererFailed || isWedged || disposed
+
+    fun markWedged(reason: String) {
+        if (isWedged) return
+        wedgeReason = reason
+        isWedged = true
+        Log.w(TAG, "Tab marked unresponsive: $reason")
+    }
+
+    private fun ensureUsable() {
+        if (isUnusable) throw WebViewWedgedException(
+            if (isRendererDead) "browser tab renderer process died"
+            else "browser tab stopped responding (${wedgeReason ?: "tab closed"})",
+        )
+    }
+
+    /** Main-thread teardown also wakes actions waiting on a reclaimed tab. */
+    fun dispose() {
+        disposed = true
+        scriptWaiters.toList().forEach {
+            it.completeExceptionally(WebViewWedgedException("browser tab was closed or reclaimed"))
+        }
+        scriptWaiters.clear()
+        _isLoading.value = false
+        navigationDeferred?.complete(Unit)
+        navigationDeferred = null
+        asyncJsDeferred?.complete("{\"error\":\"Browser tab was closed or reclaimed.\"}")
+        asyncJsDeferred = null
+        webView.disposeSafely()
+    }
 
     private var navigationDeferred: CompletableDeferred<Unit>? = null
 
@@ -298,7 +357,7 @@ class BrowserUseManager(
                     .catch(function(e) { __minis__.blobDownloadError(String(e)); });
             })();
         """.trimIndent()
-        webView.post { if (!rendererFailed) webView.evaluateJavascript(js, null) }
+        webView.post { if (!isUnusable) webView.evaluateJavascript(js, null) }
     }
 
     /**
@@ -323,7 +382,7 @@ class BrowserUseManager(
      * a 412-wide viewport on a 1080-wide container.
      */
     private fun applyShrinkToFit(cssWidth: Int) {
-        if (rendererFailed) return
+        if (isUnusable) return
         val containerPx = lastKnownContainerWidthPx
         if (containerPx <= 0 || cssWidth <= 0) return
         val density = webView.resources.displayMetrics.density
@@ -351,7 +410,7 @@ class BrowserUseManager(
         webView.webViewClient = object : WebViewClient() {
             override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                 rendererFailed = true
-                scriptWaiters.toList().forEach { it.completeExceptionally(IllegalStateException("Browser renderer stopped")) }
+                scriptWaiters.toList().forEach { it.completeExceptionally(WebViewWedgedException("browser tab renderer process died")) }
                 scriptWaiters.clear()
                 _isLoading.value = false
                 navigationDeferred?.complete(Unit)
@@ -359,9 +418,8 @@ class BrowserUseManager(
                 asyncJsDeferred?.complete("{\"error\":\"Browser renderer stopped; open a new tab.\"}")
                 asyncJsDeferred = null
                 view.disposeSafely()
-                onCloseWindow?.invoke()
                 view.rendererGoneNotice()
-                return true
+                return com.openminis.app.ui.webview.WebViewRenderProcess.handle("BrowserUseManager", detail)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -673,22 +731,23 @@ class BrowserUseManager(
     // -- Execute Action --
 
     suspend fun execute(input: BrowserActionInput): BrowserActionResult {
-        val failure = "Browser renderer stopped; open a new tab."
-        if (rendererFailed) return BrowserActionResult.error(failure)
+        ensureUsable()
         return try {
             val result = executeWhileAlive(input)
-            if (rendererFailed) BrowserActionResult.error(failure) else result
+            if (isRendererDead || disposed) ensureUsable()
+            result
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (rendererFailed) BrowserActionResult.error(failure) else throw e
+            ensureUsable()
+            throw e
         }
     }
 
     private suspend fun executeWhileAlive(input: BrowserActionInput): BrowserActionResult {
-        if (rendererFailed) return BrowserActionResult.error("Browser renderer stopped; open a new tab.")
+        ensureUsable()
         val prevUrl = withContext(Dispatchers.Main) {
-            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+            ensureUsable()
             webView.url
         }
         var result: BrowserActionResult = when (input.action) {
@@ -726,7 +785,7 @@ class BrowserUseManager(
         // Detect URL change after visual-change actions (ignore hash-only changes)
         if (result.success && BrowserAction.visualChangeActions.contains(input.action)) {
             val newUrl = withContext(Dispatchers.Main) {
-                check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                ensureUsable()
                 webView.url
             }
             if (prevUrl != null && newUrl != null) {
@@ -746,7 +805,7 @@ class BrowserUseManager(
     private suspend fun attachSnapshot(result: BrowserActionResult): BrowserActionResult {
         return try {
             delay(300) // Let page settle
-            val bitmap = captureWebViewBitmap() ?: return result
+            val bitmap = captureWebViewBitmap(gpu = true) ?: return result
             val file = saveBitmapToFile(bitmap, "snapshot", SNAPSHOT_QUALITY)
             bitmap.recycle()
             result.copy(imageFilePath = file.absolutePath)
@@ -769,7 +828,7 @@ class BrowserUseManager(
         _isLoading.value = true
 
         withContext(Dispatchers.Main) {
-            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+            ensureUsable()
 
             // Re-assert the last applied viewport before loadUrl. Intercepted
             // navigations (minis://) served via shouldInterceptRequest skip
@@ -812,14 +871,26 @@ class BrowserUseManager(
         // so a session or global viewport override shows the actual layout
         // size, not the UA profile default. Matches iOS which likewise queries
         // the WKWebView's live bounds rather than a profile constant.
-        val scrollInfo = evaluateJavascript(
-            "JSON.stringify({" +
-                "sx:window.scrollX||0,sy:window.scrollY||0," +
-                "pw:document.documentElement.scrollWidth||0," +
-                "ph:document.documentElement.scrollHeight||0," +
-                "vw:window.innerWidth||0,vh:window.innerHeight||0" +
-                "})"
-        )
+        //
+        // (GH#245) If the page cannot answer, degrade to URL + title instead of
+        // failing the navigate: the load itself may well have finished, and the
+        // tab is already flagged for rebuild by evaluateJavascript.
+        val scrollInfo = try {
+            evaluateJavascript(
+                "JSON.stringify({" +
+                    "sx:window.scrollX||0,sy:window.scrollY||0," +
+                    "pw:document.documentElement.scrollWidth||0," +
+                    "ph:document.documentElement.scrollHeight||0," +
+                    "vw:window.innerWidth||0,vh:window.innerHeight||0" +
+                    "})"
+            )
+        } catch (e: WebViewWedgedException) {
+            return buildString {
+                appendLine("Navigated to $url")
+                if (title.isNotEmpty()) appendLine("  Title: $title")
+                append("  (page metrics unavailable: ${e.message})")
+            }
+        }
         var scrollX = 0; var scrollY = 0; var pageW = 0; var pageH = 0
         var vpW = 0; var vpH = 0
         try {
@@ -863,7 +934,7 @@ class BrowserUseManager(
                 (cssScrollHeight * density).toInt()
             } else {
                 withContext(Dispatchers.Main) {
-                    check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                    ensureUsable()
                     webView.height
                 }
             }
@@ -891,20 +962,28 @@ class BrowserUseManager(
             savedH = applied.second
             val cssCappedHeight = (cappedPx / density).toInt().coerceAtLeast(savedH)
             withContext(Dispatchers.Main) {
-                check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                ensureUsable()
 
                 applyViewport(savedW, cssCappedHeight)
             }
             didStretch = true
+            // [T-android-browser-fullpage-repaint] Give the renderer a chance
+            // to paint the area the stretch just exposed. applyViewport only
+            // measure/layouts the view; without a gap the capture below runs
+            // in the same main-thread pass and can read back a region that has
+            // never been drawn, which is why --full-page shots came out
+            // partially blank below the first viewport.
             Log.i(TAG, "full_page stretch: ${savedW}x$cssCappedHeight CSS (px=$cappedPx, original=$scrollHeightPx, truncated=$truncated)")
         }
 
         val bitmap = try {
-            captureWebViewBitmap()
+            if (didStretch) delay(FULL_PAGE_REPAINT_DELAY_MS)
+            // A stretched full page is far taller than a display can be.
+            captureWebViewBitmap(gpu = !didStretch)
         } finally {
             if (didStretch) {
                 withContext(Dispatchers.Main) {
-                    check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                    ensureUsable()
 
                     applyViewport(savedW, savedH)
                 }
@@ -995,8 +1074,49 @@ class BrowserUseManager(
      */
     suspend fun captureLiveSnapshot(): Bitmap? = captureWebViewBitmap()
 
-    private suspend fun captureWebViewBitmap(): Bitmap? = withContext(Dispatchers.Main) {
-        if (rendererFailed) return@withContext null
+    /**
+     * [T-android-browser-screenshot-scroll-offset] The page's current scroll
+     * offset in CSS pixels, as (x, y).
+     *
+     * Read from JS rather than from `webView.scrollX/scrollY` because the pool
+     * WebView is usually detached, and a detached View never receives the
+     * scroll pass that would update those fields — measured on device as
+     * `scrollY=0` while the page was scrolled 300 CSS px. The authoritative
+     * value lives in the renderer.
+     *
+     * Must be called on the main thread (the caller already is). Uses its own
+     * short timeout and degrades to (0,0): a capture that is merely
+     * uncompensated is the old behaviour, which is far better than no capture
+     * at all, and `evaluateJavascript` cannot answer while the renderer is
+     * wedged — exactly when a screenshot is most wanted.
+     */
+    private suspend fun readCssScrollOffset(): Pair<Float, Float> {
+        val raw = withTimeoutOrNull(SCROLL_PROBE_TIMEOUT_MS) {
+            val d = CompletableDeferred<String>()
+            webView.evaluateJavascript(
+                "(function(){return (window.scrollX||window.pageXOffset||0)+','+" +
+                    "(window.scrollY||window.pageYOffset||0);})()",
+            ) { v -> if (!d.isCompleted) d.complete(v ?: "") }
+            d.await()
+        } ?: return 0f to 0f
+        // evaluateJavascript hands back a JSON string literal: "12,300"
+        val cleaned = raw.trim().removeSurrounding("\"")
+        val parts = cleaned.split(',')
+        if (parts.size != 2) return 0f to 0f
+        val x = parts[0].toFloatOrNull() ?: 0f
+        val y = parts[1].toFloatOrNull() ?: 0f
+        return x to y
+    }
+
+    /**
+     * [gpu] routes the capture through [HeadlessRenderHost] — a real GPU frame,
+     * so WebGL / video are included — whenever the WebView is headless (not on
+     * screen in the browser sheet). Agent-facing captures pass true; the 3 s
+     * live-preview thumbnail and the stretched full-page capture keep the
+     * cheaper software draw. Any GPU-path miss falls through to that draw.
+     */
+    private suspend fun captureWebViewBitmap(gpu: Boolean = false): Bitmap? = withContext(Dispatchers.Main) {
+        if (isUnusable) return@withContext null
 
         try {
             // WebView may be detached (pool-owned, never added to a window), so
@@ -1018,10 +1138,53 @@ class BrowserUseManager(
                 webView.layout(0, 0, targetW, targetH)
                 w = targetW; h = targetH
             }
+            if (gpu) HeadlessRenderHost.capture(webView, w, h)?.let { return@withContext it }
+            // [T-android-browser-screenshot-scroll-offset] Undo the scroll
+            // before drawing, or the capture is the scrolled-away region.
+            //
+            // `View.draw(Canvas)` does NOT compensate scroll — that is done by
+            // the PARENT, in `draw(Canvas, ViewGroup, long)`:
+            //     canvas.translate(mLeft - sx, mTop - sy)   (View.java)
+            // Drawing straight into our own bitmap skips that parent pass, so
+            // the content lands `scrollOffset` lower than it should: the top of
+            // the image is blank and the bottom is cropped. Measured on a
+            // Pixel 6 at CSS scrollY=300 — 788 physical px of white
+            // (788 / 2.625 density = 300.2 CSS px, i.e. exactly scrollY) and
+            // the Y300 band sitting at viewport y=300 instead of y=0. Once
+            // scrollY reaches the viewport height the blank band fills the
+            // whole frame, which is the "scroll 1500 → 100% white" report;
+            // same defect, not a second one.
+            //
+            // The offset CANNOT be read from `webView.scrollY` alone. This
+            // WebView is pool-owned and, whenever the browser sheet is closed,
+            // not attached to a window — and a detached View never gets the
+            // scroll pass that would update its own scrollX/scrollY. Verified
+            // on device: after `window.scrollTo(0, 300)` the capture logged
+            // `scrollY=0 attached=false` while the bitmap was still offset by
+            // 300 CSS px, because the scroll lives in Chromium's compositor.
+            // A plain `canvas.translate(-webView.scrollY)` would translate by
+            // zero there and fix nothing, which is why the offset is probed
+            // from JS as well.
+            //
+            // The two sources describe ONE quantity, so take whichever is
+            // populated — never their sum. When the sheet is mounted the View
+            // mirrors the compositor scroll, and adding both double-counts:
+            // measured on device at CSS scrollY=300 as
+            // `css=300.19 view=788 offset=1576` (788 = 300.19 × 2.625), which
+            // scrolls the capture twice as far as the page actually is.
+            // `webView.scrollY` wins when non-zero because it is already in
+            // physical px and carries no density-rounding error; the CSS probe
+            // covers the detached case, where the View stays at 0.
+            val cssScroll = readCssScrollOffset()
+            ensureUsable()
             val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
+            val offsetX = if (webView.scrollX != 0) webView.scrollX.toFloat() else cssScroll.first * density
+            val offsetY = if (webView.scrollY != 0) webView.scrollY.toFloat() else cssScroll.second * density
+            if (offsetX != 0f || offsetY != 0f) canvas.translate(-offsetX, -offsetY)
             webView.draw(canvas)
-            Log.d(TAG, "captureWebViewBitmap ${w}x$h")
+            Log.d(TAG, "captureWebViewBitmap ${w}x$h offset=(${offsetX},${offsetY}) " +
+                "css=(${cssScroll.first},${cssScroll.second}) view=(${webView.scrollX},${webView.scrollY})")
             bitmap
         } catch (e: Exception) {
             Log.e(TAG, "captureWebViewBitmap failed: ${e.message}")
@@ -1113,7 +1276,7 @@ class BrowserUseManager(
                 })();
             """.trimIndent()
             withContext(Dispatchers.Main) {
-                check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+                ensureUsable()
 
                 webView.evaluateJavascript(wrapped, null)
             }
@@ -1250,7 +1413,7 @@ class BrowserUseManager(
             })();
         """.trimIndent()
         withContext(Dispatchers.Main) {
-            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+            ensureUsable()
 
             webView.evaluateJavascript(wrapped, null)
         }
@@ -1263,7 +1426,7 @@ class BrowserUseManager(
 
     /** Set user agent from UI settings (public, non-result). */
     fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {
-        if (rendererFailed) return
+        if (isUnusable) return
         currentProfile = profile
         val ua = if (profile == UserAgentProfile.CUSTOM && !customUA.isNullOrEmpty()) customUA
             else profile.userAgentString
@@ -1309,7 +1472,7 @@ class BrowserUseManager(
      * — mirrors iOS `BrowserUseManager.setViewport(width:height:...)`.
      */
     fun applyViewport(cssWidth: Int, cssHeight: Int) {
-        if (rendererFailed) return
+        if (isUnusable) return
         val density = webView.resources.displayMetrics.density
         val w = ((cssWidth * density).toInt()).coerceAtLeast(1)
         val h = ((cssHeight * density).toInt()).coerceAtLeast(1)
@@ -1337,7 +1500,7 @@ class BrowserUseManager(
         // WebView; settings / reload likewise. Hop to main so we don't
         // crash with "A WebView method was called on thread 'worker-N'".
         withContext(Dispatchers.Main) {
-            check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
+            ensureUsable()
 
             if (ua != null) {
                 webView.settings.userAgentString = ua
@@ -1354,10 +1517,10 @@ class BrowserUseManager(
 
     // -- User Navigation --
 
-    fun goBack() { if (!rendererFailed && webView.canGoBack()) webView.goBack() }
-    fun goForward() { if (!rendererFailed && webView.canGoForward()) webView.goForward() }
-    fun reload() { if (!rendererFailed) webView.reload() }
-    fun stopLoading() { if (!rendererFailed) webView.stopLoading(); _isLoading.value = false }
+    fun goBack() { if (!isUnusable && webView.canGoBack()) webView.goBack() }
+    fun goForward() { if (!isUnusable && webView.canGoForward()) webView.goForward() }
+    fun reload() { if (!isUnusable) webView.reload() }
+    fun stopLoading() { if (!isUnusable) webView.stopLoading(); _isLoading.value = false }
 
     /**
      * Reload the current page and suspend until `onPageFinished` fires (or
@@ -1373,7 +1536,7 @@ class BrowserUseManager(
      * viewport-change callers still get a deterministic page refresh.
      */
     suspend fun reloadAndWait() {
-        if (rendererFailed) return
+        if (isUnusable) return
         val deferred = CompletableDeferred<Unit>()
         navigationDeferred = deferred
         _isLoading.value = true
@@ -1414,7 +1577,7 @@ class BrowserUseManager(
      * `document.body` populated. Must be called on the main thread.
      */
     suspend fun loadBlankPage() {
-        if (rendererFailed) return
+        if (isUnusable) return
         val deferred = CompletableDeferred<Unit>()
         navigationDeferred = deferred
         _isLoading.value = true
@@ -1433,7 +1596,7 @@ class BrowserUseManager(
     }
 
     fun loadURL(urlString: String) {
-        if (rendererFailed) return
+        if (isUnusable) return
         var normalized = urlString
         if (!normalized.contains("://")) normalized = "https://$normalized"
         _isLoading.value = true
@@ -1442,9 +1605,12 @@ class BrowserUseManager(
 
     // -- JS Evaluation Helpers --
 
-    private suspend fun evaluateJavascript(js: String): String = withContext(Dispatchers.Main) {
-        check(!rendererFailed) { "Browser renderer stopped; open a new tab." }
-
+    private suspend fun evaluateJavascript(
+        js: String,
+        timeoutMs: Long = BrowserActionGuard.JS_EVAL_TIMEOUT_MS,
+    ): String = withContext(Dispatchers.Main) {
+        if (isRendererDead) throw WebViewWedgedException("browser tab renderer process died")
+        ensureUsable()
         val deferred = CompletableDeferred<String>()
         scriptWaiters.add(deferred)
         try {
@@ -1461,7 +1627,12 @@ class BrowserUseManager(
                 }
                 deferred.complete(unquoted)
             }
-            deferred.await()
+            withTimeoutOrNull(timeoutMs) { deferred.await() } ?: run {
+                markWedged("evaluateJavascript got no callback within ${timeoutMs / 1000}s")
+                throw WebViewWedgedException(
+                    "browser tab stopped responding (JS evaluation timed out after ${timeoutMs / 1000}s)",
+                )
+            }
         } finally { scriptWaiters.remove(deferred) }
     }
 

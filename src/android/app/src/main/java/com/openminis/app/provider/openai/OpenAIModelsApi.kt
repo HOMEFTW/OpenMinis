@@ -80,6 +80,8 @@ object OpenAIModelsApi {
     )
 
     // Chat-capable model prefixes (matching iOS)
+    fun codexImageModels(): List<LLMModel> = fetchModelsOAuth().filter { "image" in it.outputModalities.orEmpty() }
+
     private val chatPrefixes = listOf("gpt-", "o1", "o3", "o4-", "codex-", "chatgpt-")
 
     // Suffixes to exclude (matching iOS)

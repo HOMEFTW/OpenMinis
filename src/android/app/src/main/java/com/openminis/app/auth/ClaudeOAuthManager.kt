@@ -7,6 +7,8 @@ import androidx.browser.customtabs.CustomTabsIntent
 import com.openminis.app.BuildConfig
 import com.openminis.app.data.repository.ProviderRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -15,6 +17,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import kotlin.coroutines.resume
+import kotlin.coroutines.coroutineContext
 
 /**
  * OAuth manager for Anthropic (Claude) OAuth flow.
@@ -25,7 +28,7 @@ import kotlin.coroutines.resume
  * 3. Open claude.ai/oauth/authorize in Chrome Custom Tab (in-app browser)
  * 4. User authorizes → Anthropic redirects to localhost:54545/callback
  * 5. Callback server captures code + state
- * 6. Exchange code for tokens via POST JSON to console.anthropic.com/v1/oauth/token
+ * 6. Exchange code for tokens via POST JSON to claude.ai/v1/oauth/token
  * 7. Store access_token as API key via ProviderRepository
  *
  * Key differences from OpenRouter:
@@ -103,7 +106,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     enum class RefreshOutcome {
         /** New access token is in storage. */
         SUCCESS,
-        /** Refresh token is invalid/revoked (HTTP 400/401/403 or invalid_grant). Credentials cleared; user must log in again. */
+        /** Refresh token rejected. Credentials retained and marked for re-login. */
         INVALID_GRANT,
         /** Transient network/5xx error. Existing token kept; caller may retry later. */
         TRANSIENT,
@@ -112,7 +115,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     }
 
     override val authURL = "https://claude.ai/oauth/authorize"
-    override val tokenURL = "https://console.anthropic.com/v1/oauth/token"
+    override val tokenURL = "https://claude.ai/v1/oauth/token"
     override val clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     override val clientSecret: String? = null
     override val callbackPort = 54545
@@ -171,6 +174,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             }
 
             // Step 3: Exchange code for tokens (JSON body, NOT form-urlencoded)
+            OAuthForegroundGate.awaitForeground(TAG)
             exchangeCodeJson(code)
         }
 
@@ -182,7 +186,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      * Exchange authorization code for tokens using JSON body.
      * Anthropic requires application/json, NOT form-urlencoded.
      */
-    private fun exchangeCodeJson(code: String): String {
+    private suspend fun exchangeCodeJson(code: String): String {
         val body = JSONObject().apply {
             put("grant_type", "authorization_code")
             put("client_id", clientId)
@@ -196,16 +200,35 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
         val request = okhttp3.Request.Builder()
             .url(tokenURL)
+            .applyClaudeCliMimicryHeaders()
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        val response = httpClient.newCall(request).execute()
-        val responseCode = response.code
-        val responseBody = response.body?.string() ?: ""
-        response.close()
+        // Foregrounding may precede restoration of network access by the OS.
+        var response: okhttp3.Response? = null
+        for (attempt in 1..3) {
+            coroutineContext.ensureActive()
+            try {
+                response = httpClient.newCall(request).execute()
+                break
+            } catch (e: java.io.IOException) {
+                coroutineContext.ensureActive()
+                // Never log a request URL, code, or token from exception text.
+                Log.w(TAG, "Token exchange attempt $attempt failed: ${e.javaClass.simpleName}")
+                if (attempt == 3) {
+                    throw if (e is java.net.UnknownHostException || e is java.net.SocketTimeoutException) {
+                        OAuthNetworkUnreachableException(e)
+                    } else e
+                }
+                delay(1000L * attempt)
+            }
+        }
+        val (responseCode, responseBody) = checkNotNull(response).use {
+            it.code to (it.body?.string() ?: "")
+        }
 
         if (responseCode !in 200..299) {
             Log.e(TAG, "Token exchange failed: $responseCode ${OAuthManager.sanitizeBody(responseBody)}")
-            throw Exception("Token exchange failed ($responseCode): $responseBody")
+            throw Exception("Token exchange failed ($responseCode): ${OAuthManager.sanitizeBody(responseBody)}")
         }
 
         val json = JSONObject(responseBody)
@@ -238,9 +261,8 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      * Refresh with structured error classification and concurrency protection.
      * Mirrors iOS `ClaudeOAuthManager.validAccessToken` error handling:
      *
-     *  - `INVALID_GRANT` — HTTP 400/401/403 or body mentions `invalid_grant`:
-     *    stored credentials are cleared (iOS parity: `deleteOAuthToken`).
-     *    Caller must re-run the OAuth login flow.
+     *  - `INVALID_GRANT` — structured rejection marks retained credentials
+     *    for re-login. Caller must re-run the OAuth login flow.
      *  - `TRANSIENT` — network/timeout/5xx: credentials kept intact; caller
      *    may retry. The still-valid access token (if any) remains usable.
      *  - `NO_TOKEN` — no refresh token stored (not logged in).
@@ -280,6 +302,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 Log.d(TAG, "Refreshing OAuth token via JSON POST to $tokenURL")
                 val request = okhttp3.Request.Builder()
                     .url(tokenURL)
+                    .applyClaudeCliMimicryHeaders()
                     .post(body.toString().toRequestBody("application/json".toMediaType()))
                     .build()
                 val response = httpClient.newCall(request).execute()
@@ -296,19 +319,16 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     if (expiresIn > 0) {
                         json.put("expire_at", System.currentTimeMillis() + expiresIn * 1000)
                     }
-                    saveOAuthString("tokens", json.toString())
+                    if (!saveRefreshedTokens(refreshTokenValue, json)) return@withLock RefreshOutcome.TRANSIENT
                     Log.i(TAG, "Token refresh successful. Expires in ${expiresIn}s")
                     return@withLock RefreshOutcome.SUCCESS
                 }
 
                 // Classify failure.
-                val bodyLower = responseBody.lowercase()
-                val isInvalidGrant = responseCode == 400 || responseCode == 401 || responseCode == 403 ||
-                    bodyLower.contains("invalid_grant") ||
-                    bodyLower.contains("refresh_token")
+                val isInvalidGrant = isRefreshRejected(responseCode, responseBody, DEFAULT_FATAL_REFRESH_CODES)
                 if (isInvalidGrant) {
-                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — clearing credentials")
-                    logout()
+                    Log.e(TAG, "Refresh token rejected ($responseCode); credentials retained")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 // 5xx or unexpected code — keep credentials, let caller retry.
@@ -332,6 +352,8 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      * caring about the refresh outcome details.
      */
     override suspend fun validAccessToken(): String? = withContext(Dispatchers.IO) {
+        loadManualBearerToken()?.takeIf { it.isNotBlank() }?.let { return@withContext it }
+        if (needsReauth()) return@withContext null
         val stored = loadStoredTokens() ?: return@withContext null
         val token = stored.optString("access_token", "").ifEmpty { return@withContext null }
         val expireAt = stored.optLong("expire_at", 0)
@@ -340,20 +362,8 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val needsRefresh = expireAt > 0 && (expireAt - now) <= REFRESH_BUFFER_MS
         if (!needsRefresh) return@withContext token
 
-        when (refreshTokenClassified()) {
-            RefreshOutcome.SUCCESS ->
-                loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
-            RefreshOutcome.INVALID_GRANT -> {
-                // logout() already ran inside refreshTokenClassified.
-                null
-            }
-            RefreshOutcome.TRANSIENT -> {
-                // Old token still usable if not actually expired. If it IS
-                // expired, surface null so the caller can bubble up auth error.
-                if (expireAt > 0 && now >= expireAt) null else token
-            }
-            RefreshOutcome.NO_TOKEN -> null
-        }
+        refreshTokenClassified()
+        currentUsableAccessToken()
     }
 
     /**

@@ -121,6 +121,7 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
                 canDrawOverlays =
                     Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
                         Settings.canDrawOverlays(context)
+                com.openminis.app.service.DynamicIslandSupport.invalidateCapabilityCache()
                 dynamicIslandCapable =
                     com.openminis.app.service.DynamicIslandSupport.isDynamicIslandCapable(context)
             }

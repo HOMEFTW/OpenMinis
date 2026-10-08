@@ -18,6 +18,25 @@ import java.io.File
  * code single-sourced — the RPC is purely a transport.
  */
 internal object ChatMutationMethods {
+    suspend fun runScheduledAgentChild(context: Context, params: JSONObject): JSONObject {
+        val sessionId = params.optString("sessionId").ifBlank { throw RPCException(-32602, "Missing 'sessionId'") }
+        val prompt = params.optString("prompt").ifBlank { throw RPCException(-32602, "Missing 'prompt'") }
+        val app = app(context)
+        app.chatRepository.getSession(sessionId) ?: throw RPCException(-32602, "Session not found")
+        val cal = java.util.Calendar.getInstance()
+        val task = com.openminis.app.scheduled.ScheduledTask(
+            label = params.optString("label", "Agent child probe"),
+            timeOfDayHour = cal.get(java.util.Calendar.HOUR_OF_DAY),
+            timeOfDayMinute = cal.get(java.util.Calendar.MINUTE),
+            repeatMode = com.openminis.app.scheduled.ScheduledRepeatMode.ONCE,
+            prompt = prompt,
+            targetMode = com.openminis.app.scheduled.ScheduledTargetMode.ChildOfCurrent(sessionId),
+            enabled = false,
+        )
+        com.openminis.app.scheduled.ScheduledTaskManager(app).create(task)
+        val childId = com.openminis.app.scheduled.ScheduledAgentRunner.run(app, task, waitForCompletion = false)
+        return JSONObject().put("taskId", task.id).put("childSessionId", childId ?: JSONObject.NULL)
+    }
 
     private fun app(context: Context): MinisApp =
         context.applicationContext as? MinisApp
@@ -401,9 +420,7 @@ internal object ChatMutationMethods {
             ?: throw RPCException(-32602, "Session not found")
         // Cancel any in-flight stream first so we don't leave a dangling job
         // writing into a deleted session row.
-        HeadlessChatRunner.cancel(context, sessionId)
-        app.chatRepository.deleteSession(sessionId)
-        HeadlessChatRunner.forget(sessionId)
+        com.openminis.app.data.session.SessionDeleter.deleteTree(context, app.chatRepository, sessionId, "debug")
         return JSONObject().apply {
             put("sessionId", sessionId)
             put("deleted", true)

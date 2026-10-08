@@ -29,6 +29,8 @@ data class LLMMessage(
      * reasoning_content once `thinking` is enabled.
      */
     val reasoningContent: String? = null,
+    /** DeepSeek Messages block order/signatures; ignored by other providers. */
+    val deepSeekReplay: String? = null,
 ) {
     enum class Role(val value: String) {
         USER("user"),

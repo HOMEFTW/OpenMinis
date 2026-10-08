@@ -53,6 +53,8 @@ data class LLMModel(
     // Mirrors iOS ModelModality flags. When null, treat as text-in/text-out only.
     val inputModalities: List<String>? = if (isGPT6Id(id) || isGPTImage25Id(id) || isDeepSeekFlashId(id)) listOf("text", "image") else null,
     val outputModalities: List<String>? = if (isGPTImage25Id(id)) listOf("image") else null,
+    // OpenRouter catalog role: tts/stt/none. null keeps legacy/manual modality routing.
+    val voiceRole: String? = null,
 ) {
     val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
     val isGPT61Sol: Boolean get() = matchesModelId(id, "gpt-6.1-sol")

@@ -137,6 +137,7 @@ fun ProviderDetailScreen(
     var callCheckEntry by remember(instanceId) { mutableStateOf<ModelEntry?>(null) }
     var showCallCheckModelPicker by remember(instanceId) { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
+    var refreshError by remember(instanceId) { mutableStateOf<String?>(null) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
 
@@ -180,7 +181,9 @@ fun ProviderDetailScreen(
         val isOAuthProvider =
             instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth
         SettingsSection(
-            header = if (isOAuthProvider) stringResource(R.string.add_provider_credential) else stringResource(R.string.provider_list_api_key),
+            header = if (isOAuthProvider) stringResource(R.string.add_provider_credential)
+                else if (instance.providerType == ProviderType.deepSeek) stringResource(R.string.deepseek_api_key)
+                else stringResource(R.string.provider_list_api_key),
             footer = if (isOAuthProvider) {
                 "OAuth tokens are stored securely in encrypted storage."
             } else {
@@ -230,7 +233,7 @@ fun ProviderDetailScreen(
         CredentialsStorageWarning(modifier = Modifier.padding(top = 8.dp))
 
         // Manual Bearer Token (OAuth providers only — proxy override)
-        if (isOAuthProvider) {
+        if (isOAuthProvider && instance.providerType != ProviderType.githubCopilot) {
             SettingsSection(
                 header = stringResource(R.string.provider_detail_manual_bearer_token),
                 footer = stringResource(R.string.provider_detail_use_a_static_bearer_token_instead_of_the) +
@@ -246,8 +249,11 @@ fun ProviderDetailScreen(
         }
 
         // ─── Custom Base URL ────────────────────────────────────────
-        if (instance.providerType != ProviderType.openRouter) {
-            SettingsSection(header = stringResource(R.string.provider_detail_custom_api_base)) {
+        if (instance.providerType != ProviderType.openRouter && instance.providerType != ProviderType.githubCopilot) {
+            SettingsSection(
+                header = stringResource(R.string.provider_detail_custom_api_base),
+                footer = if (instance.providerType == ProviderType.deepSeek) stringResource(R.string.deepseek_endpoint_hint) else null,
+            ) {
                 // URL input row — tighter vertical padding to match T226's
                 // SectionTextField height shrink (~-20%).
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -255,7 +261,9 @@ fun ProviderDetailScreen(
                         value = customBaseURL,
                         onValueChange = { customBaseURL = it },
                         singleLine = true,
-                        placeholder = stringResource(R.string.provider_detail_https_api_example_placeholder),
+                        placeholder = if (instance.providerType == ProviderType.deepSeek)
+                            com.openminis.app.data.model.DeepSeekModels.DEFAULT_BASE_URL
+                        else stringResource(R.string.provider_detail_https_api_example_placeholder),
                         fieldModifier = Modifier.bringIntoViewOnFocus(),
                     )
                 }
@@ -270,28 +278,30 @@ fun ProviderDetailScreen(
                 // around the 32dp Switch over-reported the height (~60dp),
                 // breaking the three-row rhythm in the Custom API base card
                 // (T231).
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 44.dp)
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = stringResource(R.string.provider_detail_auto_append_v1),
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.weight(1f),
-                    )
-                    SettingsSwitch(
-                        checked = appendV1Suffix,
-                        onCheckedChange = { appendV1Suffix = it },
+                if (instance.providerType != ProviderType.deepSeek) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 44.dp)
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.provider_detail_auto_append_v1),
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SettingsSwitch(
+                            checked = appendV1Suffix,
+                            onCheckedChange = { appendV1Suffix = it },
+                        )
+                    }
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                     )
                 }
-                HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    thickness = 0.5.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                )
                 // [T-provider-custom-user-agent] Custom User-Agent input —
                 // only for OpenAI-/Anthropic-compat (relay) protocols. Some
                 // gateways reject Minis' default UA and only allow official
@@ -302,7 +312,7 @@ fun ProviderDetailScreen(
                 // the official path customUserAgent stays at its default null
                 // unless the user typed one — applied verbatim if they do).
                 val showUserAgentField = instance.providerType == ProviderType.openAI ||
-                    instance.providerType == ProviderType.anthropic
+                    instance.providerType == ProviderType.anthropic || instance.providerType == ProviderType.deepSeek
                 if (showUserAgentField) {
                     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                         Text(
@@ -330,7 +340,7 @@ fun ProviderDetailScreen(
                         providerRepository.updateInstance(
                             instance.copy(
                                 customBaseURL = customBaseURL.ifBlank { null },
-                                appendV1Suffix = appendV1Suffix,
+                                appendV1Suffix = instance.providerType != ProviderType.deepSeek && appendV1Suffix,
                                 // [T-provider-custom-user-agent] Blank → null →
                                 // default UA. Only the gated providers can edit
                                 // this; for others customUserAgent equals the
@@ -386,6 +396,22 @@ fun ProviderDetailScreen(
                         ) { Text(stringResource(R.string.provider_detail_responses_api)) }
                     }
                 }
+            }
+        }
+
+        if (instance.providerType == ProviderType.openAI || instance.providerType == ProviderType.openAIResponses ||
+            instance.providerType == ProviderType.deepSeek
+        ) {
+            var timeoutText by remember(instance.id, instance.responseTimeoutSeconds) {
+                mutableStateOf(instance.responseTimeoutSeconds?.toString().orEmpty())
+            }
+            SettingsSection(header = stringResource(R.string.provider_response_timeout),
+                footer = stringResource(R.string.provider_response_timeout_hint)) {
+                SectionTextField(value = timeoutText, onValueChange = { timeoutText = it.filter(Char::isDigit).take(4) }, singleLine = true)
+                MinisSmallButton(
+                    enabled = timeoutText.isBlank() || timeoutText.toIntOrNull() in 30..3600,
+                    onClick = { providerRepository.updateInstance(instance.copy(responseTimeoutSeconds = timeoutText.toIntOrNull())) },
+                ) { Text(stringResource(R.string.save)) }
             }
         }
 
@@ -528,7 +554,9 @@ fun ProviderDetailScreen(
         }
 
         // ─── Thinking Rules [T-android-thinking-rules-phase2 §3] ─────
-        ThinkingRulesSection(instance = instance, providerRepository = providerRepository)
+        if (instance.providerType != ProviderType.deepSeek) {
+            ThinkingRulesSection(instance = instance, providerRepository = providerRepository)
+        }
 
         // ─── Provider call check ────────────────────────────────────
         SettingsSection(
@@ -566,6 +594,7 @@ fun ProviderDetailScreen(
         // ─── Models ─────────────────────────────────────────────────
         SettingsSection(
             header = stringResource(R.string.provider_detail_models_count_header, entries.size),
+            footer = if (instance.providerType == ProviderType.deepSeek) stringResource(R.string.deepseek_model_catalog_hint) else null,
         ) {
             // Refresh action sits as the first row, mirroring the iOS
             // tap-to-refresh affordance in the section header area.
@@ -576,10 +605,20 @@ fun ProviderDetailScreen(
                 } else {
                     {
                         isRefreshing = true
+                        refreshError = null
                         scope.launch {
                             try {
-                                providerRepository.refreshModels(instance)
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    providerRepository.refreshModels(instance, forceRefresh = true,
+                                        onVendorError = { refreshError = it })
+                                }
                                 AppLogger.info(TAG, "Refreshed models for ${instance.id}")
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: com.openminis.app.data.repository.CodexDiscoveryAuthException) {
+                                refreshError = exportContext.getString(R.string.provider_refresh_auth_failed_body)
+                            } catch (e: Exception) {
+                                refreshError = e.message ?: e.javaClass.simpleName
                             } finally {
                                 isRefreshing = false
                             }
@@ -609,7 +648,7 @@ fun ProviderDetailScreen(
                         // wasn't enough for users to tell them apart. alpha is
                         // visual-only, so the row stays tappable to re-show the
                         // model from its detail screen.
-                        .then(if (entry.isHidden) Modifier.alpha(0.45f) else Modifier)
+                        .then(if (entry.isHidden || entry.isUnavailableFromProvider) Modifier.alpha(0.45f) else Modifier)
                         .combinedClickable(
                             onClick = { onModelEntryClick(entry.id) },
                             // [T-android-model-row-hide-action] Long-press now
@@ -648,11 +687,13 @@ fun ProviderDetailScreen(
                     val outputModalities = entry.model.outputModalities.orEmpty()
                     val hasBadge = inputModalities.any { it in modalityIconKeys } ||
                         outputModalities.any { it in modalityOutputIconKeys }
+                    val unavailableLabel = stringResource(R.string.model_not_listed_by_provider)
                     SettingsRow(
                         title = entry.model.displayName,
                         subtitle = buildString {
                             append(entry.model.id)
                             if (entry.isHidden) append(" • Hidden")
+                            if (entry.isUnavailableFromProvider) append(" • " + unavailableLabel)
                         },
                         // onClick = null so SettingsRow doesn't add a second
                         // clickable that would swallow the long-press. The
@@ -779,6 +820,17 @@ fun ProviderDetailScreen(
         Spacer(modifier = Modifier.height(32.dp))
     }
 
+    refreshError?.let { error ->
+        MinisAlertDialog(
+            onDismissRequest = { refreshError = null },
+            title = stringResource(R.string.provider_detail_refresh_models),
+            text = error,
+            confirmText = stringResource(R.string.ok),
+            dismissText = stringResource(R.string.common_close),
+            onConfirm = { refreshError = null },
+        )
+    }
+
     if (showDeleteDialog) {
         MinisAlertDialog(
             onDismissRequest = { showDeleteDialog = false },
@@ -855,14 +907,37 @@ private fun OAuthCredentialBlock(
     // sign-out left Sign In dead too. `displayedKey` mirrors the live credential
     // so the masked token / connected dot refresh together. Mirrors iOS
     // ProviderInstanceDetailView's `oauthRefreshTrigger.toggle()`.
-    var displayedKey by remember(instance.id) { mutableStateOf(storedKey) }
+    var displayedKey by remember(instance.id) { mutableStateOf(if (instance.providerType == ProviderType.githubCopilot &&
+        com.openminis.app.auth.CopilotOAuthManager(context, instance.id).isAuthenticated()) "oauth" else storedKey) }
     var isAuthenticating by remember(instance.id) { mutableStateOf(false) }
+    // [T-android-oauth-foreground-exchange] Sign-in progress and failure, made
+    // visible. Before, a pending sign-in looked identical to signed-out, and a
+    // failure was only written to the log — after authorizing Anthropic in the
+    // browser the user came back to an unchanged screen and no explanation.
+    var authError by remember(instance.id) { mutableStateOf<String?>(null) }
+    val oauthPhase by com.openminis.app.auth.OAuthForegroundGate.phase.collectAsState()
     // [T-kimi-oauth] Device-code dialog state for Kimi re-auth (see
     // AddProviderScreen.OAuthConfigSection for the rationale).
     var kimiDeviceAuth by remember(instance.id) {
         mutableStateOf<com.openminis.app.auth.KimiDeviceFlow.DeviceAuthorization?>(null)
     }
+    var copilotDeviceAuth by remember(instance.id) {
+        mutableStateOf<com.openminis.app.auth.CopilotDeviceFlow.DeviceAuthorization?>(null)
+    }
+    var showCopilotDisclaimer by remember(instance.id) { mutableStateOf(false) }
     var kimiLoginJob by remember(instance.id) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    copilotDeviceAuth?.let { auth ->
+        KimiDeviceLoginDialog(
+            userCode = auth.userCode,
+            verificationUrl = auth.verificationUri,
+            title = stringResource(R.string.copilot_login_title),
+            instructions = stringResource(R.string.copilot_login_instructions),
+            onCancel = {
+                kimiLoginJob?.cancel()
+                copilotDeviceAuth = null
+            },
+        )
+    }
     kimiDeviceAuth?.let { auth ->
         KimiDeviceLoginDialog(
             userCode = auth.userCode,
@@ -871,6 +946,104 @@ private fun OAuthCredentialBlock(
                 kimiLoginJob?.cancel()
                 kimiDeviceAuth = null
             },
+        )
+    }
+
+    // [T-oauth-keep-credentials] Refresh rejected: the credential is kept (never
+    // auto-deleted) but unusable until the user signs in again.
+    var needsReauth by remember(instance.id) {
+        mutableStateOf(com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id))
+    }
+
+    // Shared by the Sign In button and, for a rejected refresh, Sign In Again.
+    fun startSignIn() {
+        if (isAuthenticating) return
+        isAuthenticating = true
+        authError = null
+        com.openminis.app.auth.OAuthForegroundGate.begin()
+        kimiLoginJob = scope.launch {
+            try {
+                val token = when (instance.providerType) {
+                    ProviderType.githubCopilot ->
+                        com.openminis.app.auth.CopilotOAuthManager.login(
+                            context, instance.id,
+                            onDeviceCode = { auth -> copilotDeviceAuth = auth },
+                        ).also { copilotDeviceAuth = null }
+                    ProviderType.kimiCode ->
+                        com.openminis.app.auth.KimiOAuthManager.login(
+                            context, instance.id, providerRepository,
+                            onDeviceCode = { auth -> kimiDeviceAuth = auth },
+                        ).also { kimiDeviceAuth = null }
+                    ProviderType.anthropic ->
+                        com.openminis.app.auth.ClaudeOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    ProviderType.openAI, ProviderType.openAIResponses ->
+                        com.openminis.app.auth.OpenAIOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    ProviderType.openRouter ->
+                        com.openminis.app.auth.OpenRouterOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    ProviderType.xAI ->
+                        com.openminis.app.auth.XAIOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    else -> null
+                }
+                // login() persists the token via providerRepository.saveApiKey;
+                // reflect it locally so the UI flips to the connected state
+                // without needing the parent to recompose.
+                if (token != null) {
+                    displayedKey = if (instance.providerType == ProviderType.githubCopilot) "oauth"
+                    else providerRepository.loadApiKey(instance.id) ?: token
+                    needsReauth = false
+                    AppLogger.info(TAG, "OAuth signed in for ${instance.id}")
+                    // [T-provider-refresh-outlives-screen] (GH#265) A fresh
+                    // sign-in (including Sign In Again after a rejected refresh)
+                    // is when the account's real catalog becomes reachable —
+                    // reconcile it now instead of waiting for a manual Refresh.
+                    // Forced, so a cached discovery result cannot stand in for
+                    // the new account's list. Repository scope: the user may
+                    // leave this screen straight after signing in.
+                    providerRepository.triggerAsyncModelReconcile(instance.id, forceRefresh = true)
+                }
+            } catch (e: Exception) {
+                // A cancelled sign-in (user backed out, screen left) is not
+                // an error to show.
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLogger.warning(TAG, "OAuth sign-in failed for ${instance.id}: ${e.message}")
+                authError = if (e is com.openminis.app.auth.OAuthNetworkUnreachableException) {
+                    context.getString(R.string.add_provider_oauth_network_unreachable)
+                } else {
+                    context.getString(
+                        R.string.oauth_sign_in_failed,
+                        e.message ?: e.javaClass.simpleName,
+                    )
+                }
+            } finally {
+                isAuthenticating = false
+                kimiDeviceAuth = null
+                copilotDeviceAuth = null
+                com.openminis.app.auth.OAuthForegroundGate.end()
+            }
+        }
+    }
+
+    fun requestSignIn() {
+        if (instance.providerType == ProviderType.githubCopilot &&
+            !com.openminis.app.util.CopilotFeatureFlag.hasAcceptedConsent(context)
+        ) showCopilotDisclaimer = true else startSignIn()
+    }
+    if (showCopilotDisclaimer) {
+        CopilotDisclaimerDialog(
+            onAccept = {
+                com.openminis.app.util.CopilotFeatureFlag.recordConsent(context)
+                showCopilotDisclaimer = false
+                startSignIn()
+            },
+            onCancel = { showCopilotDisclaimer = false },
         )
     }
 
@@ -883,7 +1056,7 @@ private fun OAuthCredentialBlock(
         Spacer(modifier = Modifier.width(8.dp))
         if (displayedKey.isNotEmpty()) {
             Text(
-                maskedKey(displayedKey),
+                if (instance.providerType == ProviderType.githubCopilot) "Connected" else maskedKey(displayedKey),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
@@ -892,18 +1065,38 @@ private fun OAuthCredentialBlock(
                 modifier = Modifier
                     .padding(horizontal = 8.dp)
                     .size(8.dp)
-                    .background(Color(0xFF34C759), CircleShape),
+                    .background(
+                        if (needsReauth) MaterialTheme.colorScheme.error else Color(0xFF34C759),
+                        CircleShape,
+                    ),
             )
         } else {
             Spacer(modifier = Modifier.weight(1f))
             Text(
-                "Not connected",
-                color = MaterialTheme.colorScheme.error,
+                if (isAuthenticating) stringResource(R.string.oauth_status_signing_in) else "Not connected",
+                color = if (isAuthenticating) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
+    if (displayedKey.isNotEmpty() && needsReauth) {
+        Text(
+            stringResource(R.string.provider_oauth_sign_in_expired_detail),
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        MinisSmallButton(
+            enabled = !isAuthenticating,
+            onClick = { requestSignIn() },
+        ) {
+            Text(stringResource(R.string.provider_oauth_sign_in_again))
+        }
+        OAuthProgressLine(isAuthenticating = isAuthenticating, phase = oauthPhase, error = authError)
+        Spacer(modifier = Modifier.height(8.dp))
+    }
     if (displayedKey.isNotEmpty()) {
         MinisSmallButton(
             onClick = {
@@ -916,9 +1109,11 @@ private fun OAuthCredentialBlock(
                 // and validAccessToken() silently re-minted an access token —
                 // the user stayed effectively logged in. Then flip local state so
                 // the UI swaps to the Sign In button immediately.
+                kimiLoginJob?.cancel()
                 com.openminis.app.auth.OAuthManager.forInstance(context, instance)?.logout()
                 providerRepository.deleteApiKey(instance.id)
                 displayedKey = ""
+                needsReauth = false
                 AppLogger.info(TAG, "OAuth signed out for ${instance.id} (tokens + apiKey cleared)")
             },
             colors = ButtonDefaults.buttonColors(
@@ -930,53 +1125,56 @@ private fun OAuthCredentialBlock(
         }
     } else {
         MinisSmallButton(
-            onClick = {
-                if (isAuthenticating) return@MinisSmallButton
-                isAuthenticating = true
-                kimiLoginJob = scope.launch {
-                    try {
-                        val token = when (instance.providerType) {
-                            ProviderType.kimiCode ->
-                                com.openminis.app.auth.KimiOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                    onDeviceCode = { auth -> kimiDeviceAuth = auth },
-                                ).also { kimiDeviceAuth = null }
-                            ProviderType.anthropic ->
-                                com.openminis.app.auth.ClaudeOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            ProviderType.openAI ->
-                                com.openminis.app.auth.OpenAIOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            ProviderType.openRouter ->
-                                com.openminis.app.auth.OpenRouterOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            ProviderType.xAI ->
-                                com.openminis.app.auth.XAIOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            else -> null
-                        }
-                        // login() persists the token via providerRepository.saveApiKey;
-                        // reflect it locally so the UI flips to the connected state
-                        // without needing the parent to recompose.
-                        if (token != null) {
-                            displayedKey = providerRepository.loadApiKey(instance.id) ?: token
-                            AppLogger.info(TAG, "OAuth signed in for ${instance.id}")
-                        }
-                    } catch (e: Exception) {
-                        AppLogger.warning(TAG, "OAuth sign-in failed for ${instance.id}: ${e.message}")
-                    } finally {
-                        isAuthenticating = false
-                        kimiDeviceAuth = null
-                    }
-                }
-            },
+            // Disabled while a sign-in runs, rather than silently ignoring taps.
+            enabled = !isAuthenticating,
+            onClick = { requestSignIn() },
         ) {
             Text(stringResource(R.string.provider_detail_sign_in))
         }
+        OAuthProgressLine(isAuthenticating = isAuthenticating, phase = oauthPhase, error = authError)
+    }
+}
+
+/**
+ * [T-android-oauth-foreground-exchange] What a sign-in is doing right now, or
+ * why it failed. The waiting line is the point: without it, coming back from
+ * the browser looked exactly like never having started.
+ */
+@Composable
+private fun OAuthProgressLine(
+    isAuthenticating: Boolean,
+    phase: com.openminis.app.auth.OAuthForegroundGate.Phase?,
+    error: String?,
+) {
+    if (isAuthenticating) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(top = 8.dp),
+        ) {
+            androidx.compose.material3.CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                stringResource(
+                    if (phase == com.openminis.app.auth.OAuthForegroundGate.Phase.COMPLETING) {
+                        R.string.oauth_completing_sign_in
+                    } else {
+                        R.string.oauth_waiting_for_authorization
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else if (error != null) {
+        Text(
+            error,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = 8.dp),
+        )
     }
 }
 

@@ -204,7 +204,12 @@ internal object ProviderMutationMethods {
             ?: throw RPCException(-32602, "Instance not found: $id")
         val timeoutMs = params.optInt("timeoutMs", 10_000).coerceIn(1_000, 30_000)
 
+        if (instance.providerType == ProviderType.deepSeek) {
+            throw RPCException(-32602, "DeepSeek uses a static advisory catalog and has no /models probe. Use the provider call check to test the API key.")
+        }
+
         val baseURL = instance.effectiveBaseURL ?: when (instance.providerType) {
+            ProviderType.deepSeek -> com.openminis.app.data.model.DeepSeekModels.DEFAULT_BASE_URL
             ProviderType.anthropic -> "https://api.anthropic.com"
             ProviderType.gemini -> "https://generativelanguage.googleapis.com"
             // [T-android-provider-type-parity] Responses API shares the host.
@@ -212,9 +217,11 @@ internal object ProviderMutationMethods {
             ProviderType.openRouter -> "https://openrouter.ai/api/v1"
             ProviderType.xAI -> "https://api.x.ai/v1"
             ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+            ProviderType.githubCopilot -> com.openminis.app.auth.CopilotDeviceFlow.API_BASE
             ProviderType.antigravity, ProviderType.unsupported -> ""
         }
         val probeURL = when (instance.providerType) {
+            ProviderType.deepSeek -> baseURL // Unreachable: static catalog is handled above.
             ProviderType.anthropic -> "$baseURL/v1/models"
             ProviderType.gemini -> "$baseURL/v1beta/models?key=" + (repo.loadApiKey(id) ?: "")
             ProviderType.openAI, ProviderType.openAIResponses ->
@@ -224,6 +231,7 @@ internal object ProviderMutationMethods {
             ProviderType.xAI -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
             // Kimi Coding: OpenAI-compatible /models under /coding/v1.
             ProviderType.kimiCode -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
+            ProviderType.githubCopilot -> "$baseURL/models"
             // No probe endpoint for a type this build cannot drive.
             ProviderType.antigravity, ProviderType.unsupported -> baseURL
         }
@@ -235,6 +243,7 @@ internal object ProviderMutationMethods {
         val builder = okhttp3.Request.Builder().url(probeURL).get()
         val key = repo.loadApiKey(id)
         when (instance.providerType) {
+            ProviderType.deepSeek -> if (!key.isNullOrEmpty()) builder.header("x-api-key", key)
             ProviderType.anthropic -> if (!key.isNullOrEmpty()) builder.header("x-api-key", key).header("anthropic-version", "2023-06-01")
             ProviderType.openAI, ProviderType.openAIResponses ->
                 if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
@@ -245,6 +254,8 @@ internal object ProviderMutationMethods {
             ProviderType.xAI -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             // Kimi Coding: OpenAI-compat bearer (OAuth access token or key).
             ProviderType.kimiCode -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
+            // Copilot /models needs an exchanged session token; the API-key mirror is not one.
+            ProviderType.githubCopilot -> Unit
             // [T-android-provider-type-parity] No auth scheme known for a type
             // this build cannot drive; the probe will simply fail.
             ProviderType.antigravity, ProviderType.unsupported -> { /* no auth */ }

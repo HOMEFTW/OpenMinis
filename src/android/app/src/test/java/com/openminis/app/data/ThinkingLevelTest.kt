@@ -5,7 +5,6 @@ import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ThinkingLevel
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -26,8 +25,7 @@ class ThinkingLevelTest {
 
     @Test
     fun decoded_unknownValueClampsToXHigh_neverThrows() {
-        // A completely unrecognized future value must clamp to the highest
-        // level THIS build knows, not throw.
+        // A completely unrecognized future value uses the wire fallback.
         assertEquals(ThinkingLevel.XHIGH, ThinkingLevel.decoded("SUPREME"))
         assertEquals(ThinkingLevel.XHIGH, ThinkingLevel.decoded(""))
         assertEquals(ThinkingLevel.XHIGH, ThinkingLevel.decoded("garbage-token"))
@@ -47,10 +45,8 @@ class ThinkingLevelTest {
     }
 
     /**
-     * The repository's Json instance uses coerceInputValues so an unknown enum
-     * value in a persisted blob falls back to the property default instead of
-     * throwing SerializationException. This is what stops a newer-build config
-     * from wiping the UI when read by an older build.
+     * The custom serializer accepts both Android and iOS spellings and uses
+     * the same safe fallback as decoded() for unknown future values.
      */
     private val json = Json {
         ignoreUnknownKeys = true
@@ -59,21 +55,20 @@ class ThinkingLevelTest {
     }
 
     @Test
-    fun modelGroup_unknownThinkingLevel_coercesToNull_notThrow() {
+    fun modelGroup_unknownThinkingLevel_usesWireFallback_notThrow() {
         // Simulate JSON a NEWER build wrote: defaultThinkingLevel="ULTRA" is a
         // value this test's enum DOES know, so also throw in a truly-unknown one.
         val wire = """{"id":"g1","name":"G","memberEntryIds":[],"defaultThinkingLevel":"SUPREME"}"""
         val group = json.decodeFromString(ModelGroup.serializer(), wire)
-        // Unknown enum value on a nullable-with-default field coerces to null.
-        assertNull(group.defaultThinkingLevel)
+        assertEquals(ThinkingLevel.XHIGH, group.defaultThinkingLevel)
         assertEquals("G", group.name) // other fields intact — config NOT wiped
     }
 
     @Test
-    fun modelOverrides_unknownMaxThinkingLevel_coercesToNull() {
+    fun modelOverrides_unknownMaxThinkingLevel_usesWireFallback() {
         val wire = """{"maxThinkingLevel":"SUPREME","displayName":"X"}"""
         val ov = json.decodeFromString(ModelOverrides.serializer(), wire)
-        assertNull(ov.maxThinkingLevel)
+        assertEquals(ThinkingLevel.XHIGH, ov.maxThinkingLevel)
         assertEquals("X", ov.displayName)
     }
 

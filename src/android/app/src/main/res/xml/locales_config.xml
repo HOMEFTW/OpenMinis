@@ -51,4 +51,5 @@
          file (verified on Android 13 and 17), so the wording avoids
          Brazil-only slang where a neutral choice reads naturally in both. -->
     <locale android:name="pt-BR"/>
+    <locale android:name="hr"/>
 </locale-config>

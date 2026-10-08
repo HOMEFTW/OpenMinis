@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.14"
+        versionCode = 27
+        versionName = "1.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -176,6 +176,31 @@ val stageDebugSkillAssets by tasks.registering(Exec::class) {
 }
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") && it.name.contains("Debug") }
     .configureEach { dependsOn(stageDebugSkillAssets) }
+
+tasks.withType<Test>().configureEach {
+    systemProperty("minis.test.shell", providers.gradleProperty("minisBashPath").getOrElse("sh"))
+}
+
+abstract class WriteBuildInfoTask : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun write() {
+        val file = outputDir.file("build_info/build_time.txt").get().asFile
+        file.parentFile.mkdirs()
+        file.writeText(System.currentTimeMillis().toString())
+    }
+}
+androidComponents {
+    onVariants { variant ->
+        val cap = variant.name.replaceFirstChar { it.uppercase() }
+        val task = tasks.register<WriteBuildInfoTask>("write${cap}BuildInfo") {
+            outputs.upToDateWhen { false }
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(task, WriteBuildInfoTask::outputDir)
+    }
+}
 
 dependencies {
     // Compose BOM

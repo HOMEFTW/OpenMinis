@@ -265,7 +265,7 @@ class AnthropicProvider(
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
-                android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                com.openminis.app.logging.AppLogger.trace("ToolChain") { "SSE type=${event.safeOptString("type", "")}" }
                 val eventType = event.safeOptString("type", "")
 
                 when (eventType) {
@@ -300,7 +300,7 @@ class AnthropicProvider(
                                 val partial = delta.safeOptString("partial_json", "")
                                 if (partial.isNotEmpty() && currentToolId != null) {
                                     toolInputBuffer.append(partial)
-                                    android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars")
+                                    com.openminis.app.logging.AppLogger.trace("ToolChain") { "ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars" }
                                     sendChunk(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
                                 }
                             }
@@ -327,6 +327,11 @@ class AnthropicProvider(
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
                         sendChunk(LLMStreamChunk.Finished(stopReason))
+                    }
+                    "error" -> {
+                        val error = event.optJSONObject("error")
+                        throw streamError(error?.safeOptString("type", "") ?: "error",
+                            error?.safeOptString("message", "") ?: "Stream failed")
                     }
                 }
             }
@@ -481,14 +486,14 @@ class AnthropicProvider(
                     }
                 }
             }
-        } else if (modelUsesAdaptiveThinking(model.id)) {
-            // Adaptive-generation models (4.6+/5) think by DEFAULT when the
+        } else if (modelAcceptsExplicitThinkingDisabled(model.id)) {
+            // Claude 4.6-4.x models think by DEFAULT when the
             // request carries no thinking field at all — "off" must be sent
             // explicitly, or small-maxTokens calls burn the whole budget on
             // thinking_tokens and return zero text (iOS ea86dd8a observed:
             // max_tokens=256 → stop_reason=max_tokens, thinking_tokens=256/256,
             // empty body). Legacy (<=4.5) models default to no thinking, so
-            // absence is fine there.
+            // absence is fine there. Claude 5+ rejects the disabled literal.
             body.put("thinking", JSONObject().put("type", "disabled"))
         }
 
@@ -904,6 +909,19 @@ class AnthropicProvider(
             return major > 4 || (major == 4 && minor >= 6)
         }
 
+        fun modelAcceptsExplicitThinkingDisabled(modelId: String): Boolean {
+            val (major, minor) = parseClaudeVersion(modelId) ?: return false
+            return major == 4 && minor >= 6
+        }
+
+        internal fun streamError(type: String, message: String): LLMError = when (type) {
+            "overloaded_error" -> LLMError.TransientError("[$type] $message", httpStatus = 529)
+            "api_error" -> LLMError.TransientError("[$type] $message", httpStatus = 500)
+            "rate_limit_error" -> LLMError.RateLimited()
+            "authentication_error", "permission_error" -> LLMError.InvalidApiKey("[$type] $message")
+            else -> LLMError.ProviderError("[$type] $message")
+        }
+
         /**
          * [T-android-claude-opus48-thinking-toggle] (Sow Sow 38845/38850) True
          * when this Claude model supports extended thinking — i.e. the Deep
@@ -1135,9 +1153,9 @@ class AnthropicProvider(
 
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) {
-            return LLMError.TransientError(message)
+            return LLMError.TransientError(message, httpStatus = statusCode)
         }
-        return LLMError.ProviderError(message)
+        return LLMError.ProviderError(message, httpStatus = statusCode)
     }
 
     private fun mapError(error: Throwable): LLMError {

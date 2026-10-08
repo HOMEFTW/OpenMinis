@@ -1259,7 +1259,25 @@ fun MinisSelectionToolbarHost(
                 // narrow screens, but it was never a good primary answer — an
                 // action reachable only by swiping a 40dp bar is an action most
                 // users never find.
-                val inlineCount = MAX_INLINE_SELECTION_ACTIONS
+                // [T-android-selection-add-to-input-first] As many actions as
+                // FIT, up to MAX_INLINE_SELECTION_ACTIONS: in Chinese Copy ·
+                // Add to Chat Input · Copy Full Text · Read Aloud all fit a
+                // phone-width bar, while German/Russian/French labels are two
+                // to three times longer and would push the "⋯" off the edge.
+                // Each label is measured in the button's own style, plus its
+                // padding and divider, against the capped bar width.
+                val toolbarMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
+                val buttonStyle = MaterialTheme.typography.labelLarge
+                val buttonPadPx = with(density) { (14.dp * 2 + 1.dp).toPx() }
+                fun buttonWidth(label: String): Float =
+                    toolbarMeasurer.measure(label, buttonStyle, maxLines = 1, softWrap = false)
+                        .size.width + buttonPadPx
+                val inlineCount = inlineSelectionActionCount(
+                    widths = items.map { buttonWidth(if (it.children.isEmpty()) it.label else it.label + "  ›") },
+                    overflowWidth = buttonWidth("⋯"),
+                    maxWidth = with(density) { maxBarWidth.toPx() },
+                    cap = MAX_INLINE_SELECTION_ACTIONS,
+                )
                 // [T-android-selection-copy-full-inline] Submenu parents may now
                 // sit inline: tapping one opens the same expandable menu the
                 // overflow uses, anchored to its own button.
@@ -1522,11 +1540,32 @@ private class SelectionAction(
 /**
  * How many actions stay on the bar before the rest move into the overflow menu.
  *
- * Three, matching what iOS's edit menu shows before its own chevron. The bar is
+ * Up to four — Copy, Add to Chat Input, Copy Full Text, Read Aloud — and fewer
+ * when the labels do not fit the bar ([inlineSelectionActionCount]). The bar is
  * anchored to a selection the user is looking at, so it has to stay narrow
  * enough not to cover the text it belongs to.
  */
-private const val MAX_INLINE_SELECTION_ACTIONS = 3
+internal const val MAX_INLINE_SELECTION_ACTIONS = 4
+
+/**
+ * [T-android-selection-add-to-input-first] How many leading actions sit on the
+ * bar: the most (at least one, at most [cap]) whose [widths] plus, when any are
+ * left over, the "⋯" button's [overflowWidth] fit in [maxWidth]. Pure so it can
+ * be unit-tested without Compose.
+ */
+internal fun inlineSelectionActionCount(
+    widths: List<Float>,
+    overflowWidth: Float,
+    maxWidth: Float,
+    cap: Int,
+): Int {
+    val limit = minOf(cap, widths.size)
+    for (n in limit downTo 1) {
+        val needed = widths.take(n).sum() + if (n < widths.size) overflowWidth else 0f
+        if (needed <= maxWidth) return n
+    }
+    return minOf(1, widths.size)
+}
 
 @Composable
 private fun MinisToolbarDivider() {

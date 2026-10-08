@@ -13,8 +13,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * [T-android-scheduled-tasks-design] Headless agent launch for scheduled
@@ -40,6 +44,83 @@ object ScheduledAgentRunner {
      * agent loop + completion notification finish even after the user leaves.
      */
     private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val activeExecutions = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var deliveryQueue: ScheduledDeliveryQueue? = null
+
+    /** Invoked by rescheduleAll on app launch as well as by a new fire. */
+    fun recoverPending(context: Context) { queue(context.applicationContext) }
+
+    @Synchronized
+    private fun queue(context: Context): ScheduledDeliveryQueue {
+        deliveryQueue?.let { return it }
+        val prefs = context.getSharedPreferences("minis_scheduled_deliveries", Context.MODE_PRIVATE)
+        val queue = ScheduledDeliveryQueue(prefs.getString("pending", null)) { json ->
+            check(prefs.edit().putString("pending", json).commit()) { "Scheduled delivery persistence failed" }
+        }
+        deliveryQueue = queue
+        bgScope.launch {
+            // A claimed run may already have executed tools before the process
+            // stopped. Record interruption instead of replaying uncertain work.
+            for (delivery in queue.deliveries.value.filter { it.running }) {
+                recordFailure(context, delivery.task, delivery.executionId, delivery.sessionId,
+                    "Interrupted: app stopped before completion; check the target chat", delivery.firedAt)
+                queue.finish(delivery.executionId)
+            }
+            while (isActive) {
+                val app = context as? MinisApp
+                if (app?.subsystemsReady() == true) {
+                    for (delivery in queue.deliveries.value.filter { !it.running }) {
+                        if (!activeExecutions.add(delivery.executionId)) continue
+                        bgScope.launch {
+                            try { deliver(app, delivery, queue) }
+                            catch (t: kotlinx.coroutines.CancellationException) { throw t }
+                            catch (t: Throwable) {
+                                if (queue.deliveries.value.any { it.executionId == delivery.executionId && it.superseded }) {
+                                    AppLogger.error(TAG, "cancelled delivery history write failed: ${t.message}")
+                                    return@launch
+                                }
+                                recordFailure(app, delivery.task, delivery.executionId, delivery.sessionId,
+                                    "delivery_failed: ${t.message}", delivery.firedAt)
+                                queue.finish(delivery.executionId)
+                                AppLogger.error(TAG, "delivery failed: ${t.message}")
+                            } finally { activeExecutions.remove(delivery.executionId) }
+                        }
+                    }
+                }
+                delay(1_000)
+            }
+        }
+        return queue
+    }
+
+    private suspend fun deliver(app: MinisApp, delivery: ScheduledDelivery, queue: ScheduledDeliveryQueue) {
+        if (queue.deliveries.value.firstOrNull { it.executionId == delivery.executionId }?.superseded == true) {
+            // Do not swallow a history write failure: the tombstone stays queued
+            // and can be retried after restart instead of silently disappearing.
+            ScheduledTaskManager(app).markFired(
+                taskId = delivery.task.id, sessionId = delivery.sessionId,
+                resultPreview = "Cancelled: superseded before delivery", ok = false,
+                executionId = delivery.executionId, firedAt = delivery.firedAt,
+            )
+            queue.finish(delivery.executionId)
+            return
+        }
+        if (app.chatRepository.getSession(delivery.sessionId) == null || ScheduledTaskManager(app).get(delivery.task.id) == null) {
+            recordFailure(app, delivery.task, delivery.executionId, delivery.sessionId,
+                "Target chat or scheduled task was deleted", delivery.firedAt)
+            queue.finish(delivery.executionId)
+            return
+        }
+        val prefillError = delivery.task.prefillToolCall?.validationError()
+        if (prefillError != null) {
+            recordFailure(app, delivery.task, delivery.executionId, delivery.sessionId, prefillError, delivery.firedAt)
+            queue.finish(delivery.executionId)
+            return
+        }
+        val result = ScheduledSessionDispatcher.dispatch(app, delivery, queue, RUN_TIMEOUT_MS) ?: return
+        finishRun(app, delivery.task, delivery.sessionId, delivery.executionId, result, delivery.firedAt, delivery.scheduledFire)
+        queue.finish(delivery.executionId)
+    }
 
     /**
      * Fire a scheduled task.
@@ -69,7 +150,9 @@ object ScheduledAgentRunner {
         task: ScheduledTask,
         waitForCompletion: Boolean = true,
         executionId: String = "scheduled_${UUID.randomUUID()}",
+        scheduledFire: Boolean = false,
     ): String? {
+        val firedAt = System.currentTimeMillis()
         // [T-android-scheduled-lateinit-crash-156] `as? MinisApp` only rules out
         // a null / wrong-type Application — it does NOT mean the Application is
         // INITIALIZED, which is what the old comment here claimed. Every
@@ -133,44 +216,37 @@ object ScheduledAgentRunner {
                 "mode=${task.targetMode.encode()} session=$sessionId wait=$waitForCompletion",
         )
 
-        if (waitForCompletion) {
-            val result = dispatch(app, task, sessionId, wait = true)
-            finishRun(app, task, sessionId, executionId, result)
-            return sessionId
-        }
-
-        // Fire-and-forget: the session is resolved and the FGS is up, so the
-        // task HAS started. Run the actual dispatch + completion entirely off
-        // the app scope (wait=true so we still mark-fired + notify when it
-        // finishes), and return the session id immediately so the UI can show
-        // "task started" without blocking on the agent loop. Leaving the editor
-        // can't cancel it because bgScope outlives the screen.
-        bgScope.launch {
-            val result = dispatch(app, task, sessionId, wait = true)
-            finishRun(app, task, sessionId, executionId, result)
-        }
+        val queue = queue(app)
+        queue.enqueue(ScheduledDelivery(task, sessionId, executionId, firedAt, scheduledFire))
+        if (waitForCompletion) queue.deliveries.first { pending -> pending.none { it.executionId == executionId } }
         return sessionId
     }
 
     /** Persist and announce one terminal result for one trigger. */
-    private fun finishRun(
+    private suspend fun finishRun(
         app: MinisApp,
         task: ScheduledTask,
         sessionId: String,
         executionId: String,
         result: HeadlessChatRunner.PromptResult,
+        firedAt: Long,
+        scheduledFire: Boolean,
     ) {
         val ok = ScheduledRunPolicy.isSuccess(result.status)
         val response = result.responseText.orEmpty().ifBlank { "(no response)" }
         val preview = (if (ok) response else "${result.status}: $response").take(200)
-        ScheduledTaskManager(app).markFired(
+        val recorded = ScheduledTaskManager(app).markFired(
             taskId = task.id,
             sessionId = sessionId,
             resultPreview = preview,
             ok = ok,
             executionId = executionId,
+            firedAt = firedAt,
         )
-        postCompletionNotification(app, task, sessionId, preview)
+        if (recorded) postCompletionNotification(app, task, sessionId, preview)
+        if (scheduledFire && result.status != "Cancelled") {
+            ScheduledCompletionTriggers.onScheduledRunFinished(app, task, result.responseText)
+        }
     }
 
     private fun recordFailure(
@@ -179,6 +255,7 @@ object ScheduledAgentRunner {
         executionId: String,
         sessionId: String?,
         reason: String,
+        firedAt: Long = System.currentTimeMillis(),
     ) {
         runCatching {
             ScheduledTaskManager(context.applicationContext).markFired(
@@ -187,59 +264,38 @@ object ScheduledAgentRunner {
                 resultPreview = reason.take(200),
                 ok = false,
                 executionId = executionId,
+                firedAt = firedAt,
             )
         }.onFailure { t ->
             AppLogger.error(TAG, "task ${task.id} failure history write failed: ${t.message}")
         }
     }
 
-    /**
-     * [T-android-scheduled-tasks-full] Branch on target mode, mirroring the iOS
-     * App Intent set:
-     *   NewSession / AppendToSession → HeadlessChatRunner.prompt (the prompt is
-     *     sent as a fresh user turn; for append it lands in the existing
-     *     session, for new it's the first turn of the freshly-created one).
-     *   RerunMessage → HeadlessChatRunner.retry from the chosen message id (the
-     *     message is replayed; task.prompt is ignored, matching iOS
-     *     RetryRunIntent which has no prompt param).
-     */
-    private suspend fun dispatch(
-        app: MinisApp,
-        task: ScheduledTask,
-        sessionId: String,
-        wait: Boolean,
-    ): HeadlessChatRunner.PromptResult = runCatching {
-        val mode = task.targetMode
-        if (mode is ScheduledTargetMode.RerunMessage) {
-            HeadlessChatRunner.retry(
-                context = app,
-                sessionId = sessionId,
-                messageId = mode.messageId,
-                wait = wait,
-                timeoutMs = RUN_TIMEOUT_MS,
-            )
-        } else {
-            HeadlessChatRunner.prompt(
-                context = app,
-                sessionId = sessionId,
-                text = task.prompt,
-                attachments = emptyList(),
-                thinkingLevel = null,
-                wait = wait,
-                timeoutMs = RUN_TIMEOUT_MS,
-            )
-        }
-    }.getOrElse { t ->
-        AppLogger.error(TAG, "task ${task.id} dispatch failed: ${t.message}")
-        HeadlessChatRunner.PromptResult(
-            status = "Error",
-            responseText = "Error: ${t.message}",
-            timedOut = false,
-        )
-    }
-
     private suspend fun resolveSessionId(app: MinisApp, task: ScheduledTask): String? {
         return when (val mode = task.targetMode) {
+            is ScheduledTargetMode.ChildOfCurrent -> {
+                val parent = app.chatRepository.getSession(mode.sessionId) ?: return null
+                val binding = task.modelBinding ?: if (task.modelId == null) parent.modelBinding else null
+                val seedModelId = binding?.let(::parseEntryIdFromBinding)
+                    ?.let { id -> app.providerRepository.config.value.modelEntries.firstOrNull { it.id == id }?.model?.id }
+                    ?: binding?.let(::parseGroupIdFromBinding)?.let(app.providerRepository::group)
+                        ?.let { app.providerRepository.availableMemberEntries(it).firstOrNull()?.model?.id }
+                    ?: task.modelId ?: parent.modelId
+                val child = app.chatRepository.createSession(
+                    modelId = seedModelId,
+                    title = task.label.ifBlank { "Scheduled task" },
+                    memoryEnabled = false,
+                    parentSessionId = parent.id,
+                    thinkingOverride = task.thinkingLevel?.name ?: parent.thinkingOverride,
+                )
+                if (binding != null) app.chatRepository.updateSessionBinding(child.id, binding, seedModelId)
+                app.chatRepository.dao.updateSource(child.id, "scheduled")
+                val workspaceRoot = com.openminis.app.sandbox.SessionWorkspaceRegistry.restore(parent.id) {
+                    app.chatRepository.getSession(it)?.parentSessionId
+                }
+                com.openminis.app.sandbox.SessionWorkspaceRegistry.register(child.id, workspaceRoot)
+                child.id
+            }
             is ScheduledTargetMode.AppendToSession -> {
                 // Follow-up: the target session must still exist. If the user
                 // deleted it, abort rather than silently spawning a new chat.

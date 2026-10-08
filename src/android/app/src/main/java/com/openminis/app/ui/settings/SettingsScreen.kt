@@ -19,6 +19,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Handyman
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
@@ -110,6 +112,8 @@ fun SettingsScreen(
     // work will wire this through.
     onAboutClick: () -> Unit = {},
     onContextWindowClick: () -> Unit = {},
+    onAgentsClick: () -> Unit = {},
+    onAgentToolsClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val savedContextWindow by ContextWindowSettings.changes.collectAsState()
@@ -186,6 +190,20 @@ fun SettingsScreen(
 
             // -- Agent Runtime --
             SettingsSection(title = stringResource(R.string.settings_section_agent_runtime)) {
+                SettingsItem(
+                    icon = Icons.Outlined.Handyman,
+                    iconColor = Color(0xFF5E5CE6),
+                    title = stringResource(R.string.settings_agent_tools),
+                    subtitle = stringResource(R.string.settings_agent_tools_subtitle),
+                    onClick = onAgentToolsClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Groups,
+                    iconColor = com.openminis.app.ui.chat.HelperAccentStatic,
+                    title = stringResource(R.string.settings_agents),
+                    subtitle = stringResource(R.string.settings_agents_subtitle),
+                    onClick = onAgentsClick,
+                )
                 SettingsItem(
                     icon = Icons.Outlined.Extension,
                     iconColor = Color(0xFF007AFF),

@@ -45,6 +45,8 @@ data class VoiceOutputRequest(
     /** 0.25 ~ 4.0, null = 1.0 (provider default). */
     val speed: Float? = null,
     val responseFormat: VoiceOutputFormat = VoiceOutputFormat.MP3,
+    /** Catalog role distinguishes dedicated TTS models from chat-audio models. */
+    val resolvedModel: LLMModel? = null,
 )
 
 enum class VoiceOutputFormat(val wireValue: String) {

@@ -36,23 +36,31 @@ class ScheduledTaskStore(private val context: Context) {
 
     fun get(taskId: String): ScheduledTask? = all().firstOrNull { it.id == taskId }
 
-    fun upsert(task: ScheduledTask) {
+    fun upsert(task: ScheduledTask): Unit = synchronized(LOCK) {
         val current = all().filter { it.id != task.id }
         write(current + task)
     }
 
-    fun delete(taskId: String) {
+    fun delete(taskId: String): Unit = synchronized(LOCK) {
         write(all().filter { it.id != taskId })
     }
 
-    fun clear() {
+    fun update(taskId: String, transform: (ScheduledTask) -> ScheduledTask?): ScheduledTask? = synchronized(LOCK) {
+        val tasks = all()
+        val current = tasks.firstOrNull { it.id == taskId } ?: return null
+        val next = transform(current) ?: return null
+        write(tasks.map { if (it.id == taskId) next else it })
+        next
+    }
+
+    fun clear(): Unit = synchronized(LOCK) {
         prefs.edit().remove(KEY_TASKS).apply()
     }
 
     private fun write(tasks: List<ScheduledTask>) {
         val arr = JSONArray()
         for (t in tasks) arr.put(t.toJson())
-        prefs.edit().putString(KEY_TASKS, arr.toString()).apply()
+        check(prefs.edit().putString(KEY_TASKS, arr.toString()).commit()) { "Scheduled task persistence failed" }
     }
 
     /**
@@ -61,17 +69,18 @@ class ScheduledTaskStore(private val context: Context) {
      * live.
      */
     fun observe(): Flow<List<ScheduledTask>> = callbackFlow {
-        trySend(all())
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == KEY_TASKS || key == null) {
                 trySend(all())
             }
         }
         prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(all())
         awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
     companion object {
+        private val LOCK = Any()
         private const val TAG = "ScheduledTaskStore"
         private const val PREFS_NAME = "minis_scheduled_tasks_prefs"
         private const val KEY_TASKS = "tasks_json"

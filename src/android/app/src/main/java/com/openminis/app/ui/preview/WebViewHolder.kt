@@ -39,6 +39,9 @@ class WebViewHolder(
     var rendererFailed by mutableStateOf(false)
         private set
 
+    /** A dead holder must be recreated by its owner, never reused. */
+    val isDead: Boolean get() = rendererFailed
+
     var pageTitle by mutableStateOf("")
         private set
     var currentUrl by mutableStateOf(initialUrl)
@@ -107,7 +110,7 @@ class WebViewHolder(
                 isLoading = false
                 pageFavicon = null
                 view.disposeSafely()
-                return true
+                return com.openminis.app.ui.webview.WebViewRenderProcess.handle("WebViewHolder", detail)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -443,5 +446,9 @@ class WebViewHolder(
 @Composable
 fun rememberWebViewHolder(url: String): WebViewHolder {
     val context = androidx.compose.ui.platform.LocalContext.current
-    return remember(url) { WebViewHolder(context.applicationContext, url) }
+    var holder by remember(url) { mutableStateOf(WebViewHolder(context.applicationContext, url)) }
+    if (holder.isDead) {
+        holder = WebViewHolder(context.applicationContext, url)
+    }
+    return holder
 }

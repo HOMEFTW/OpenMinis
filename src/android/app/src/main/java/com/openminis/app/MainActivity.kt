@@ -557,6 +557,7 @@ class MainActivity : ComponentActivity() {
                 DisposableEffect(navController) {
                     val job = lifecycleScope.launch {
                         navController.currentBackStackEntryFlow.collect { entry ->
+                            com.openminis.app.diagnostics.HangDetector.noteScreen(entry.destination.route)
                             val isChatRoute = entry.destination.route == Routes.CHAT
                             val sid = entry.arguments?.getString("sessionId").takeIf { isChatRoute }
                             val previous = currentChatSessionId
@@ -636,6 +637,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun applyKeepScreenAwakeFlag(hasActiveSession: Boolean) {
         val want = keepScreenAwakeEnabled(this) && hasActiveSession
+        if (!keepScreenOnNeedsChange(window.attributes.flags, want)) return
         if (want) {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             AppLogger.info("KeepScreenAwake", "screen-on lock acquired (active sessions present)")
@@ -748,3 +750,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+internal fun keepScreenOnNeedsChange(flags: Int, want: Boolean): Boolean =
+    ((flags and android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) != want

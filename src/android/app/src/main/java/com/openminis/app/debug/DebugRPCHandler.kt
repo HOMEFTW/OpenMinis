@@ -71,13 +71,28 @@ class DebugRPCHandler(private val context: Context) {
     }
 
     private suspend fun dispatch(method: String, params: JSONObject): Any {
+        if (!BuildConfig.DEBUG && (method.startsWith("debug.backup.") || method.startsWith("debug.subAgents.") ||
+                method == "debug.calendar.exec" || method == "debug.voice.injectFailedAudio" || method == "scheduled.runAgentChild")) {
+            throw RPCException(-32601, "Method not found: $method")
+        }
         return when (method) {
             "rpc.discover" -> DebugMethodRegistry.discover()
+            "scheduled.runAgentChild" -> ChatMutationMethods.runScheduledAgentChild(context, params)
             "debug.appInfo" -> handleAppInfo()
             "debug.screenshot" -> handleScreenshot(params)
             "debug.ls" -> handleLS(params)
             "debug.rawLs" -> handleRawLS(params)
             "debug.readFile" -> handleReadFile(params)
+            "debug.backup.export" -> BackupDebugMethods.backupExport(context, params)
+            "debug.backup.restore" -> BackupDebugMethods.backupRestore(context, params)
+            "debug.backup.upload" -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BackupDebugMethods.backupUpload(context, params) }
+            "debug.backup.remotes.addWebdav" -> BackupDebugMethods.remotesAddWebdav(context, params)
+            "debug.backup.remotes.remove" -> BackupDebugMethods.remotesRemove(context, params)
+            "debug.subAgents.list" -> BackupDebugMethods.subAgentsList(context)
+            "debug.subAgents.upsert" -> BackupDebugMethods.subAgentsUpsert(context, params)
+            "debug.subAgents.delete" -> BackupDebugMethods.subAgentsDelete(context, params)
+            "debug.calendar.exec" -> handleCalendarExec(params)
+            "debug.voice.injectFailedAudio" -> withContext(Dispatchers.Main) { handleVoiceInjectFailedAudio(params) }
             "debug.logs.list" -> handleLogsList()
             "debug.logs.read" -> handleLogsRead(params)
             "debug.logs.setEnabled" -> handleLogsSetEnabled(params)
@@ -228,8 +243,7 @@ class DebugRPCHandler(private val context: Context) {
     }
 
     private fun dirSize(dir: File): Long {
-        if (!dir.exists()) return 0
-        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        return com.openminis.app.data.session.SessionStorage.directorySize(dir)
     }
 
     // ── Screenshot ──────────────────────────────────────────────────────────
@@ -668,6 +682,139 @@ class DebugRPCHandler(private val context: Context) {
      * Debug-only by construction: DebugServer is started under
      * `if (BuildConfig.DEBUG)` in MinisApp, so no release build carries this.
      */
+    private fun handleCalendarExec(params: JSONObject): JSONObject {
+        val argvTail: List<String> = when {
+            params.has("args") -> {
+                val arr = params.optJSONArray("args")
+                    ?: throw RPCException(-32602, "args must be an array of strings")
+                List(arr.length()) { arr.optString(it) }
+            }
+            params.has("command") -> {
+                params.optString("command").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            }
+            else -> throw RPCException(-32602, "Missing 'args' (array) or 'command' (string)")
+        }
+        AppLogger.info("DebugRPC", "debug.calendar.exec argv=${argvTail.joinToString(" ")}")
+        if (argvTail.firstOrNull() == "debug-local") return calendarDebugLocal(argvTail.drop(1))
+        val handler = com.openminis.app.sandbox.offload.CalendarOffloadHandler(context.applicationContext)
+        val request = com.openminis.app.sandbox.NativeOffloadRequest(
+            pid = -1,
+            argv = listOf("android-calendar") + argvTail,
+            env = emptyMap(),
+            cwd = "/",
+            sessionId = null,
+        )
+        val result = handler.handle(request)
+        return JSONObject().apply {
+            put("exitCode", result.exitCode)
+            put("output", result.output)
+            put("argv", JSONArray(argvTail))
+        }
+    }
+
+
+    private fun calendarDebugLocal(argv: List<String>): JSONObject {
+        val cr = context.contentResolver
+        val account = "minis-debug"
+        val syncUri = android.provider.CalendarContract.Calendars.CONTENT_URI.buildUpon()
+            .appendQueryParameter(android.provider.CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(android.provider.CalendarContract.Calendars.ACCOUNT_NAME, account)
+            .appendQueryParameter(android.provider.CalendarContract.Calendars.ACCOUNT_TYPE, android.provider.CalendarContract.ACCOUNT_TYPE_LOCAL)
+            .build()
+        val out = JSONObject().put("argv", JSONArray(argv))
+        when (argv.firstOrNull()) {
+            "create" -> {
+                val v = android.content.ContentValues().apply {
+                    put(android.provider.CalendarContract.Calendars.ACCOUNT_NAME, account)
+                    put(android.provider.CalendarContract.Calendars.ACCOUNT_TYPE, android.provider.CalendarContract.ACCOUNT_TYPE_LOCAL)
+                    put(android.provider.CalendarContract.Calendars.NAME, "minis_debug_local")
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, "Minis Debug (local)")
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_COLOR, 0xFF888888.toInt())
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, android.provider.CalendarContract.Calendars.CAL_ACCESS_OWNER)
+                    put(android.provider.CalendarContract.Calendars.OWNER_ACCOUNT, account)
+                    put(android.provider.CalendarContract.Calendars.VISIBLE, 1)
+                    put(android.provider.CalendarContract.Calendars.SYNC_EVENTS, 1)
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_TIME_ZONE, java.util.TimeZone.getDefault().id)
+                }
+                val uri = cr.insert(syncUri, v)
+                out.put("exitCode", if (uri != null) 0 else 1).put("calendar_id", uri?.lastPathSegment ?: JSONObject.NULL)
+            }
+            "delete" -> {
+                val n = cr.delete(
+                    syncUri,
+                    "${android.provider.CalendarContract.Calendars.ACCOUNT_NAME}=? AND ${android.provider.CalendarContract.Calendars.ACCOUNT_TYPE}=?",
+                    arrayOf(account, android.provider.CalendarContract.ACCOUNT_TYPE_LOCAL),
+                )
+                out.put("exitCode", 0).put("deleted_calendars", n)
+            }
+            "raw" -> {
+                val id = argv.getOrNull(1)?.toLongOrNull() ?: throw RPCException(-32602, "raw <event_id>")
+                cr.query(
+                    android.provider.CalendarContract.Events.CONTENT_URI.buildUpon().appendPath(id.toString()).build(),
+                    arrayOf(
+                        android.provider.CalendarContract.Events.DTSTART,
+                        android.provider.CalendarContract.Events.DTEND,
+                        android.provider.CalendarContract.Events.ALL_DAY,
+                        android.provider.CalendarContract.Events.EVENT_TIMEZONE,
+                        android.provider.CalendarContract.Events.RRULE,
+                        android.provider.CalendarContract.Events.TITLE,
+                        android.provider.CalendarContract.Events.CALENDAR_ID,
+                    ),
+                    null, null, null,
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val utc = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                        out.put("exitCode", 0)
+                            .put("dtstart", c.getLong(0)).put("dtstart_utc", utc.format(java.util.Date(c.getLong(0))))
+                            .put("dtend", if (c.isNull(1)) JSONObject.NULL else c.getLong(1))
+                            .put("dtend_utc", if (c.isNull(1)) JSONObject.NULL else utc.format(java.util.Date(c.getLong(1))))
+                            .put("all_day", c.getInt(2)).put("event_timezone", c.getString(3) ?: JSONObject.NULL)
+                            .put("rrule", c.getString(4) ?: JSONObject.NULL).put("title", c.getString(5) ?: "")
+                            .put("calendar_id", c.getLong(6))
+                    } else out.put("exitCode", 1).put("error", "not found")
+                }
+            }
+            "legacy-allday" -> {
+                val calId = argv.getOrNull(1)?.toLongOrNull() ?: throw RPCException(-32602, "legacy-allday <calendar_id> <YYYY-MM-DD>")
+                val day = com.openminis.app.sandbox.offload.CalendarOffloadHandler.parseDate(argv.getOrNull(2) ?: "")
+                    ?: throw RPCException(-32602, "legacy-allday <calendar_id> <YYYY-MM-DD>")
+                val (s0, e0) = com.openminis.app.sandbox.offload.CalendarOffloadHandler.allDayBounds(day, day)
+                val v = android.content.ContentValues().apply {
+                    put(android.provider.CalendarContract.Events.CALENDAR_ID, calId)
+                    put(android.provider.CalendarContract.Events.TITLE, "Minis legacy all-day probe")
+                    put(android.provider.CalendarContract.Events.DTSTART, s0)
+                    put(android.provider.CalendarContract.Events.DTEND, e0)
+                    put(android.provider.CalendarContract.Events.ALL_DAY, 1)
+                    put(android.provider.CalendarContract.Events.EVENT_TIMEZONE, "UTC")
+                }
+                val uri = cr.insert(android.provider.CalendarContract.Events.CONTENT_URI, v)
+                out.put("exitCode", if (uri != null) 0 else 1).put("event_id", uri?.lastPathSegment ?: JSONObject.NULL)
+            }
+            else -> throw RPCException(-32602, "debug-local create | delete | raw <id> | legacy-allday <cal> <date>")
+        }
+        return out
+    }
+
+
+    private fun handleVoiceInjectFailedAudio(params: JSONObject): JSONObject {
+        val b64 = params.optString("wavBase64", "").ifEmpty { throw RPCException(-32602, "Missing 'wavBase64' param") }
+        val wav = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        val seconds = ((wav.size - 44).coerceAtLeast(0) / 32000.0)
+        com.openminis.app.ui.chat.voice.VoiceSendGate.recordFailure(
+            com.openminis.app.speech.SpeechRecognitionManager.FailedAudio(
+                wav = wav,
+                seconds = seconds,
+                error = com.openminis.app.speech.RecognitionError.NETWORK,
+                message = "injected by debug.voice.injectFailedAudio",
+                engineId = params.optString("engineId", "provider"),
+            ),
+            com.openminis.app.ui.chat.voice.VoiceSendGate.generation,
+        )
+        return JSONObject().put("ok", true).put("bytes", wav.size).put("seconds", seconds)
+    }
+
+
     private suspend fun handleSetClipboard(params: JSONObject): JSONObject {
         val text = params.optString("text")
         if (text.isEmpty()) throw RPCException(-32602, "Invalid params: 'text' is required")
@@ -783,6 +930,7 @@ class DebugRPCHandler(private val context: Context) {
             put("app", "MinisApp")
             put("version", BuildConfig.VERSION_NAME)
             put("build", BuildConfig.VERSION_CODE)
+            put("buildDate", com.openminis.app.AppBuildInfo.buildDate(context))
             put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             put("platform", "android")
         }

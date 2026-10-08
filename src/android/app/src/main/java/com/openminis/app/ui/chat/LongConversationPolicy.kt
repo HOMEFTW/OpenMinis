@@ -4,6 +4,24 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import java.io.InterruptedIOException
 
+/** Trim only old reasoning, never the current user/tool cycle. Stored transcripts are unchanged. */
+internal fun trimOldReasoning(
+    history: List<LLMMessage>, tokensToFree: Int, countTokens: (String) -> Int,
+): List<LLMMessage> {
+    if (tokensToFree <= 0) return history
+    val latestUser = history.indexOfLast { it.role == LLMMessage.Role.USER &&
+        it.contentParts.none { part -> part is AgentContentPart.ToolResult } }
+    val end = minOf((history.size - 4).coerceAtLeast(0), latestUser.coerceAtLeast(0))
+    var remaining = tokensToFree
+    return history.mapIndexed { index, message ->
+        val reasoning = message.reasoningContent
+        if (index < end && remaining > 0 && !reasoning.isNullOrEmpty()) {
+            remaining -= countTokens(reasoning)
+            message.copy(reasoningContent = "")
+        } else message
+    }
+}
+
 /** Keep the wire representation and the plain-text representation in sync. */
 internal fun prependContextSummary(message: LLMMessage, summary: String): LLMMessage {
     val parts = message.contentParts.toMutableList()
@@ -39,7 +57,8 @@ internal object StreamRetryPolicy {
     fun canStartRecovery(elapsedMs: Long): Boolean = elapsedMs < RECOVERY_WINDOW_MS
 
     fun canRetrySameProvider(error: Throwable, elapsedMs: Long): Boolean =
-        canStartRecovery(elapsedMs) && !isTimeout(error)
+        canStartRecovery(elapsedMs) && !isTimeout(error) &&
+            !com.openminis.app.data.model.LLMError.isCertificateFailure(error)
 }
 
 /** Coalesce growing reasoning before copying it or scheduling a UI update. */

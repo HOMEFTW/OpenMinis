@@ -65,6 +65,9 @@ import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTargetMode
 import com.openminis.app.scheduled.ScheduledTask
+import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.ui.chat.localizedName
+import androidx.compose.material3.ModalBottomSheet
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -80,7 +83,7 @@ import java.util.Locale
  * override, time (compact input), repeat, and an optional start/end date
  * window.
  */
-private enum class TargetKind { NEW, FOLLOW_UP, RERUN }
+private enum class TargetKind { NEW, FOLLOW_UP, RERUN, AGENT }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,6 +98,7 @@ fun ScheduledTaskEditScreen(
     )
     val scope = rememberCoroutineScope()
     val isNew = taskId == null
+    val draftId = remember(taskId) { taskId ?: java.util.UUID.randomUUID().toString() }
 
     var label by remember { mutableStateOf("") }
     var prompt by remember { mutableStateOf("") }
@@ -121,12 +125,16 @@ fun ScheduledTaskEditScreen(
     //   - {"type":"group","groupId":"…"} → bound to that group (load-balance / fallback)
     var modelBinding by remember { mutableStateOf<String?>(null) }
     var modelDisplay by remember { mutableStateOf<String?>(null) }
+    var thinkingLevel by remember { mutableStateOf<ThinkingLevel?>(null) }
+    var sourceTask by remember { mutableStateOf<ScheduledTask?>(null) }
     var startDateMs by remember { mutableStateOf<Long?>(null) }
     var endDateMs by remember { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(taskId) {
         if (taskId == null) { loaded = true; return@LaunchedEffect }
         val existing = vm.get(taskId) ?: run { onBack(); return@LaunchedEffect }
+        sourceTask = existing
+        thinkingLevel = existing.thinkingLevel
         label = existing.label
         prompt = existing.prompt
         repeatMode = existing.repeatMode
@@ -150,6 +158,10 @@ fun ScheduledTaskEditScreen(
                 targetKind = TargetKind.RERUN
                 targetSessionId = m.sessionId
                 targetMessageId = m.messageId
+            }
+            is ScheduledTargetMode.ChildOfCurrent -> {
+                targetKind = TargetKind.AGENT
+                targetSessionId = m.sessionId
             }
         }
         // Resolve display names for any pre-selected session / model. The
@@ -179,7 +191,7 @@ fun ScheduledTaskEditScreen(
     val runNowState by vm.runNowState.collectAsState()
 
     fun currentTask(): ScheduledTask = buildTask(
-        id = taskId, label = label, prompt = prompt, hour = hour, minute = minute,
+        id = draftId, label = label, prompt = prompt, hour = hour, minute = minute,
         repeatMode = repeatMode, customDays = customDays, enabled = enabled,
         createdAt = createdAt, lastFiredAt = lastFiredAt,
         lastResultPreview = lastResultPreview, lastResultSessionId = lastResultSessionId,
@@ -190,6 +202,8 @@ fun ScheduledTaskEditScreen(
             vm.listModels().firstOrNull { it.entryId == eid }?.modelId
         },
         startDateMs = startDateMs, endDateMs = endDateMs,
+        sourceTask = sourceTask,
+        thinkingLevel = thinkingLevel,
     )
 
     // re-run replays the chosen message, so prompt isn't required there.
@@ -197,6 +211,7 @@ fun ScheduledTaskEditScreen(
     val targetOk = when (targetKind) {
         TargetKind.NEW -> true
         TargetKind.FOLLOW_UP -> targetSessionId != null
+        TargetKind.AGENT -> targetSessionId != null
         TargetKind.RERUN -> targetSessionId != null && targetMessageId != null
     }
     val canSave = targetOk && (!needsPrompt || prompt.isNotBlank())
@@ -255,6 +270,8 @@ fun ScheduledTaskEditScreen(
             modelBindingForPreselect = modelBinding,
             modelDisplay = modelDisplay,
             onPickModel = { binding, display -> modelBinding = binding; modelDisplay = display },
+            thinkingLevel = thinkingLevel, onPickThinking = { thinkingLevel = it },
+            fixedTrigger = sourceTask?.takeIf { !it.isCalendar },
             startDateMs = startDateMs, onStartDateChange = { startDateMs = it },
             endDateMs = endDateMs, onEndDateChange = { endDateMs = it },
             vm = vm,
@@ -301,7 +318,7 @@ fun ScheduledTaskEditScreen(
                 AlertDialog(
                     onDismissRequest = { vm.clearRunNowState() },
                     title = { Text(stringResource(R.string.scheduled_task_run_now_started)) },
-                    text = { Text(stringResource(R.string.scheduled_task_run_now_started_body)) },
+                    text = { Text(scheduledText("任务已加入投递队列，会话空闲后运行。", "The task is queued and will run when the chat is available.")) },
                     confirmButton = {
                         val sid = state.sessionId
                         if (sid != null) {
@@ -353,6 +370,8 @@ private fun EditFormBody(
     targetSessionId: String?,
     modelBindingForPreselect: String?,
     modelDisplay: String?, onPickModel: (binding: String?, display: String?) -> Unit,
+    thinkingLevel: ThinkingLevel?, onPickThinking: (ThinkingLevel?) -> Unit,
+    fixedTrigger: ScheduledTask?,
     startDateMs: Long?, onStartDateChange: (Long?) -> Unit,
     endDateMs: Long?, onEndDateChange: (Long?) -> Unit,
     vm: ScheduledTasksViewModel,
@@ -371,6 +390,7 @@ private fun EditFormBody(
     var showSessionPicker by remember { mutableStateOf(false) }
     var showMessagePicker by remember { mutableStateOf(false) }
     var showModelPicker by remember { mutableStateOf(false) }
+    var showThinkingPicker by remember { mutableStateOf(false) }
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
 
@@ -398,6 +418,7 @@ private fun EditFormBody(
                 TargetKind.NEW to R.string.scheduled_task_target_new,
                 TargetKind.FOLLOW_UP to R.string.scheduled_task_target_followup,
                 TargetKind.RERUN to R.string.scheduled_task_target_rerun,
+                TargetKind.AGENT to R.string.agents_title,
             )
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 targetOpts.forEachIndexed { idx, (kind, resId) ->
@@ -429,14 +450,20 @@ private fun EditFormBody(
         }
 
         // ── Time (compact) ──
-        Column {
+        if (fixedTrigger != null) Column {
+            SectionLabel(scheduledText("触发条件", "Trigger"))
+            Text(formatScheduleSummary(fixedTrigger))
+            Text(scheduledText("保留创建时的触发条件；可修改提示词和投递目标。", "The original trigger is preserved; the prompt and destination can be edited."),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (fixedTrigger == null) Column {
             SectionLabel(stringResource(R.string.scheduled_task_field_time))
             Spacer(Modifier.height(8.dp))
             TimeInput(state = timeState)
         }
 
         // ── Repeat ──
-        Column {
+        if (fixedTrigger == null) Column {
             SectionLabel(stringResource(R.string.scheduled_task_field_repeat))
             Spacer(Modifier.height(8.dp))
             val options = listOf(
@@ -484,7 +511,7 @@ private fun EditFormBody(
         }
 
         // ── Active window (start / end date) ──
-        Column {
+        if (fixedTrigger == null) Column {
             SectionLabel(stringResource(R.string.scheduled_task_field_active_window))
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -535,6 +562,13 @@ private fun EditFormBody(
             onClear = if (modelDisplay != null) ({ onPickModel(null, null) }) else null,
         )
 
+        PickerRow(
+            title = scheduledText("思考强度", "Thinking level"),
+            value = thinkingLevel?.localizedName(LocalContext.current) ?: stringResource(R.string.scheduled_task_model_default),
+            onClick = { showThinkingPicker = true },
+            onClear = if (thinkingLevel != null) ({ onPickThinking(null) }) else null,
+        )
+
         HorizontalDivider()
 
         MinisOutlinedButton(onClick = onRunNow, enabled = canRunNow, modifier = Modifier.fillMaxWidth()) {
@@ -571,6 +605,20 @@ private fun EditFormBody(
     // reading an unassigned lateinit — the row's label and the "use default
     // model" behaviour are unaffected.
     val providerRepo = vm.providerRepository
+    if (showThinkingPicker) {
+        ModalBottomSheet(onDismissRequest = { showThinkingPicker = false }) {
+            Column(Modifier.padding(bottom = 24.dp)) {
+                MinisTextButton(onClick = { onPickThinking(null); showThinkingPicker = false }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.scheduled_task_model_default))
+                }
+                for (level in ThinkingLevel.entries) {
+                    MinisTextButton(onClick = { onPickThinking(level); showThinkingPicker = false }, modifier = Modifier.fillMaxWidth()) {
+                        Text(level.localizedName(LocalContext.current))
+                    }
+                }
+            }
+        }
+    }
     if (showModelPicker && providerRepo != null) {
         // [T-android-scheduled-task-model-binding] Reuse the chat-screen's
         // ModelPickerSheet so groups and individual entries are both
@@ -816,6 +864,8 @@ private fun buildTask(
     modelEntryIdLookup: (String) -> String?,
     startDateMs: Long?,
     endDateMs: Long?,
+    sourceTask: ScheduledTask?,
+    thinkingLevel: ThinkingLevel?,
 ): ScheduledTask {
     val targetMode = when (targetKind) {
         TargetKind.NEW -> ScheduledTargetMode.NewSession
@@ -825,6 +875,8 @@ private fun buildTask(
             if (targetSessionId != null && targetMessageId != null)
                 ScheduledTargetMode.RerunMessage(targetSessionId, targetMessageId)
             else ScheduledTargetMode.NewSession
+        TargetKind.AGENT -> targetSessionId?.let { ScheduledTargetMode.ChildOfCurrent(it) }
+            ?: ScheduledTargetMode.NewSession
     }
     // For backcompat: if the binding pins to a specific entry, also fill in
     // legacy modelId so older code paths (and any external readers) still
@@ -856,5 +908,14 @@ private fun buildTask(
         lastFiredAt = lastFiredAt,
         lastResultPreview = lastResultPreview,
         lastResultSessionId = lastResultSessionId,
+        thinkingLevel = thinkingLevel,
+        prefillToolCall = sourceTask?.prefillToolCall?.takeIf { targetMode !is ScheduledTargetMode.RerunMessage },
+        triggerKind = sourceTask?.triggerKind ?: com.openminis.app.scheduled.ScheduledTriggerKind.CALENDAR,
+        delaySec = sourceTask?.delaySec,
+        intervalSec = sourceTask?.intervalSec,
+        maxFires = sourceTask?.maxFires,
+        onCompletionOf = sourceTask?.onCompletionOf,
+        anchorMs = sourceTask?.anchorMs,
+        triggeredCount = sourceTask?.triggeredCount,
     )
 }

@@ -5,8 +5,10 @@ import com.openminis.app.auth.OpenAIOAuthManager
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
+import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.provider.anthropic.AnthropicProvider
+import com.openminis.app.provider.deepseek.DeepSeekProvider
 import com.openminis.app.provider.gemini.GeminiProvider
 import com.openminis.app.provider.openai.OpenAIProvider
 
@@ -15,7 +17,14 @@ object ProviderFactory {
      * Create a provider, optionally with OAuth support.
      * [context] is needed for OpenAI OAuth to access encrypted storage for token refresh.
      */
-    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    fun create(
+        instance: ProviderInstance,
+        apiKey: String,
+        model: LLMModel,
+        context: Context? = null,
+        sessionId: String? = null,
+        overrides: ModelOverrides? = null,
+    ): LLMProvider {
         // T174: route through ProviderInstance.effectiveBaseURL instead of
         // re-implementing the trim-+-endsWith dance inline. The previous
         // version did `url.endsWith("/v1")` on the raw, untrimmed string,
@@ -32,6 +41,13 @@ object ProviderFactory {
         // produces a single-slash join.
         val basePath = instance.effectiveBaseURL
         val provider: LLMProvider = when (instance.providerType) {
+            ProviderType.deepSeek -> DeepSeekProvider(
+                apiKey = apiKey,
+                model = model,
+                baseURL = basePath,
+                customUserAgent = instance.customUserAgent,
+                responseTimeoutSeconds = instance.responseTimeoutSeconds,
+            )
             ProviderType.anthropic -> {
                 val isOAuth = instance.credentialType == ProviderCredential.oauth
                 // [T-provider-custom-user-agent] Only meaningful for custom-base
@@ -194,6 +210,21 @@ object ProviderFactory {
             // build) whose provider Android cannot speak. Fail with a clear
             // credential error rather than constructing a provider that would
             // emit malformed requests. iOS throws FactoryError here likewise.
+            ProviderType.githubCopilot -> {
+                if (context == null) throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                val manager = com.openminis.app.auth.CopilotOAuthManager(context, instance.id)
+                OpenAIProvider.oauthOpenAICompat(
+                    oauthTokenProvider = {
+                        manager.validAccessToken() ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                    },
+                    model = model,
+                    basePath = com.openminis.app.auth.CopilotDeviceFlow.API_BASE,
+                    extraHeaders = com.openminis.app.auth.CopilotDeviceFlow.staticChatHeaders(),
+                    customUserAgent = com.openminis.app.auth.CopilotDeviceFlow.USER_AGENT,
+                ).also {
+                    it.perRequestHeaders = com.openminis.app.auth.CopilotDeviceFlow::perRequestHeaders
+                }
+            }
             ProviderType.antigravity, ProviderType.unsupported -> {
                 throw com.openminis.app.data.model.LLMError.InvalidApiKey()
             }
@@ -204,6 +235,9 @@ object ProviderFactory {
         // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
+        (provider as? OpenAIProvider)?.responseTimeoutSeconds = instance.responseTimeoutSeconds
+        (provider as? OpenAIProvider)?.sessionId = sessionId
+        (provider as? OpenAIProvider)?.modelOverrides = overrides?.takeIf { !it.isEmpty }
         return provider
     }
 }

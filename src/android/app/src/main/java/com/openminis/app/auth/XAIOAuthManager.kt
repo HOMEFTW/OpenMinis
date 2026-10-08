@@ -367,6 +367,7 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
             }
             if (code !in 200..299) {
                 Log.e(TAG, "xAI refresh failed: $code")
+                if (isRefreshRejected(code, body, DEFAULT_FATAL_REFRESH_CODES)) markNeedsReauth(refresh)
                 return@withContext false
             }
             val json = JSONObject(body)
@@ -375,8 +376,7 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
             if (expiresIn > 0) {
                 json.put("expire_at", System.currentTimeMillis() + expiresIn * 1000)
             }
-            saveTokensJson(json)
-            true
+            saveRefreshedTokens(refresh, json)
         } catch (e: Exception) {
             Log.e(TAG, "xAI refresh error", e)
             false
