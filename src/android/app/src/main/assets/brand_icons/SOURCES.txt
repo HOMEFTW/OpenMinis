@@ -1,0 +1,9 @@
+AI 品牌图标来源
+
+用户指定使用 2026-10-09 侧会话已生成的素材，未重新生图。
+GPT：minis-dragon-icon-20261009/minis-dragon-avatar.png
+DeepSeek：minis-ai-icons-20261009/deepseek-minis-icon-1024.png
+Claude：minis-ai-icons-20261009/claude-minis-icon-1024.png
+
+应用内资源仅进行尺寸转换、自适应图标边缘处理和单色图层提取。
+人物原型来源说明另见 assets/chat_wallpapers/SOURCES.txt。

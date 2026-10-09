@@ -807,11 +807,14 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     }
 
     override fun cancel() {
-        mainHandler.post {
+        val abort = Runnable {
+            listener = null
+            sessionCommitted = true
             try { recognizer?.cancel() }
             catch (e: Throwable) { Log.w(TAG, "cancel: ${e.message}") }
             tearDown()
         }
+        if (Looper.myLooper() == Looper.getMainLooper()) abort.run() else mainHandler.post(abort)
     }
 
     override fun markDegraded() {

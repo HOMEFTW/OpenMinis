@@ -2,83 +2,77 @@ package com.openminis.app.data.repository
 
 import android.content.ComponentName
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.util.Log
+import com.openminis.app.R
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
-/**
- * T-android-dynamic-app-icon: Manage the launcher-icon alias the system
- * resolves for MAIN/LAUNCHER. Mirrors iOS
- * `UIApplication.setAlternateIconName` — the user picks an icon variant
- * in Settings → Appearance → App Icon, and we toggle the corresponding
- * `<activity-alias>` enabled/disabled via PackageManager.
- *
- * Wire:
- *   - All three aliases target MainActivity (declared in AndroidManifest).
- *   - At any time exactly ONE alias is enabled. Selecting a new variant
- *     enables that alias and disables the others.
- *   - DONT_KILL_APP keeps the current Activity alive across the toggle;
- *     the launcher may still take a few seconds to refresh its icon
- *     cache (this is a launcher-side caching detail we don't control).
- *
- * The current selection is also persisted to SharedPreferences so the
- * Appearance screen can render the correct checkmark before reading
- * back the PackageManager state (which can lag right after a toggle).
- */
+/** Legacy alias names are retained so upgrades keep a usable launcher entry. */
 object AppIconRepository {
-    private const val TAG = "AppIconRepository"
     private const val PREFS = "app_icon_prefs"
     private const val KEY_SELECTED_ID = "selected_icon_id"
     private const val PACKAGE_NAME = "com.openminis.app"
 
-    enum class Variant(val id: String, val aliasClass: String) {
-        Auto("auto", "$PACKAGE_NAME.MainActivityIconAuto"),
-        ClassicLight("classic_light", "$PACKAGE_NAME.MainActivityIconLight"),
-        ClassicDark("classic_dark", "$PACKAGE_NAME.MainActivityIconDark"),
-        ;
+    enum class Variant(val id: String, val aliasClass: String, val iconRes: Int, val notificationRes: Int) {
+        Gpt("gpt", "$PACKAGE_NAME.MainActivityIconAuto", R.mipmap.ic_launcher, R.drawable.brand_gpt_notification),
+        DeepSeek("deepseek", "$PACKAGE_NAME.MainActivityIconLight", R.mipmap.ic_launcher_classic_light, R.drawable.brand_deepseek_notification),
+        Claude("claude", "$PACKAGE_NAME.MainActivityIconDark", R.mipmap.ic_launcher_classic_dark, R.drawable.brand_claude_notification);
 
         companion object {
-            fun fromId(id: String?): Variant = entries.firstOrNull { it.id == id } ?: Auto
+            // Previous Auto/Light/Dark choices were themes, not AI identities.
+            fun fromId(id: String?): Variant = entries.firstOrNull { it.id == id } ?: Gpt
         }
     }
 
-    private fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val selected = MutableStateFlow(Variant.Gpt)
+    val selection = selected.asStateFlow()
 
-    fun current(context: Context): Variant =
-        Variant.fromId(prefs(context).getString(KEY_SELECTED_ID, Variant.Auto.id))
+    fun current(context: Context): Variant = Variant.fromId(
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SELECTED_ID, null),
+    )
 
-    /**
-     * Apply [target] as the active launcher icon. Disables every other
-     * alias in one PackageManager pass + persists the selection.
-     * No-op when [target] is already current — the PackageManager call
-     * is mildly expensive (writes to package state) and the launcher
-     * doesn't appreciate repeated unchanged toggles.
-     */
+    fun initialize(context: Context) {
+        selected.value = current(context)
+        apply(context, selected.value)
+    }
+
+    /** Enable the target first so a pre-33 launcher never sees zero enabled entries. */
+    internal fun switchAliases(target: Variant, setEnabled: (Variant, Boolean) -> Unit) {
+        setEnabled(target, true)
+        Variant.entries.filter { it != target }.forEach { setEnabled(it, false) }
+    }
+
+    @Synchronized
     fun apply(context: Context, target: Variant): Boolean {
         val ctx = context.applicationContext
-        val current = current(ctx)
-        if (current == target) return false
         val pm = ctx.packageManager
+        val previous = try {
+            Variant.entries.associateWith { pm.getComponentEnabledSetting(ComponentName(ctx, it.aliasClass)) }
+        } catch (e: Exception) {
+            Log.w("AppIconRepository", "Unable to read launcher icon state", e)
+            return false
+        }
         try {
-            for (variant in Variant.entries) {
-                val component = ComponentName(ctx, variant.aliasClass)
-                val desiredState = if (variant == target) {
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                } else {
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-                }
-                pm.setComponentEnabledSetting(
-                    component,
-                    desiredState,
-                    PackageManager.DONT_KILL_APP,
+            switchAliases(target) { variant, enabled ->
+                val desired = if (enabled) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                    else PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                val old = previous.getValue(variant)
+                val wasEnabled = old == PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
+                    (old == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && variant == Variant.Gpt)
+                if (wasEnabled != enabled) pm.setComponentEnabledSetting(
+                    ComponentName(ctx, variant.aliasClass), desired, PackageManager.DONT_KILL_APP,
                 )
             }
-            prefs(ctx).edit().putString(KEY_SELECTED_ID, target.id).apply()
-            Log.i(TAG, "icon switched ${current.id} → ${target.id}")
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_SELECTED_ID, target.id).apply()
+            selected.value = target
             return true
-        } catch (t: Throwable) {
-            Log.w(TAG, "icon switch failed: ${t.message}", t)
+        } catch (e: Exception) {
+            previous.entries.sortedBy { (_, state) -> state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED }
+                .forEach { (variant, state) ->
+                    runCatching { pm.setComponentEnabledSetting(ComponentName(ctx, variant.aliasClass), state, PackageManager.DONT_KILL_APP) }
+                }
+            Log.w("AppIconRepository", "Unable to change launcher icon", e)
             return false
         }
     }

@@ -1917,10 +1917,13 @@ class ChatViewModel(
                 if (b.kind != "tool_use") continue
                 if (!com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(b.toolName)) continue
                 val o = runCatching { JSONObject(b.content) }.getOrNull() ?: continue
-                if (o.optString("status") != "running") continue
                 val childId = o.optString("child_session_id", "")
                 if (childId.isEmpty() || childId in out) continue
-                if (registry.jobForSession(childId) != null) continue
+                val latestJob = registry.jobForSession(childId)
+                if (!com.openminis.app.agent.jobs.HelperRunner.canResumeChild(
+                        o.optString("status"), latestJob?.state,
+                        latestJob?.let { registry.isCompleting(it.id) } == true,
+                    )) continue
                 out.add(childId)
             }
         }
@@ -13116,6 +13119,7 @@ Tool call style:
 
 Tone and style:
 - Reply in the language that best matches the user's input. Only switch languages when the user explicitly asks.
+- Keep internal execution terminology separate from user-facing language. Explain progress and results in natural language suited to the user's topic; do not carry programming metaphors into everyday answers. Use technical terms when the user needs them, without enforcing word blacklists.
 - Be concise. Prefer action over explanation — when the user asks for something that can be done via shell, do it directly.
 
 Android-only tools (android-* CLIs):
@@ -13131,7 +13135,7 @@ CLI tools at /usr/local/bin with the `android-` prefix give you access to Androi
 - android-photos — `list [--max N] | stats | near <lat> <lon> [--radius KM] [--max N]` — query the device photo library via MediaStore.
 - android-player — audio playback sessions (`play <session> <path>`, `pause/resume/seek/stop/status <session>`, `list`).
 - android-speak — device TTS (`<text> [--rate F] [--pitch F] [--volume F]`; `--stop | --status`).
-- android-speech — microphone transcription (`listen [--language BCP47] [--max N] [--timeout SEC]`; `status`). Requires RECORD_AUDIO.
+- android-speech — transcribe microphone or local audio (`transcribe --source mic|PATH [--engine auto|system|provider] [--language BCP47] [--duration SEC] [--timeout SEC]`; `status`; `languages`). Uses the configured Voice Input provider when available; microphone capture requires RECORD_AUDIO, file transcription does not. Run --help for file limits and backend selection.
 - android-weather <latitude> <longitude> — Open-Meteo forecast (current + hourly + daily). No API key needed.
 - android-shizuku-cli — invoke privileged Android system APIs (package management, settings, system commands) via Shizuku when granted. Curated subcommands return structured JSON; for anything not covered, fall back to `android-shizuku-cli exec <any shell command>` which runs the command via `sh -c` with Shizuku privilege (same surface as `adb shell`). Run with no args (or --help) for the subcommand list.
 - android-a11y-cli — drive system UI (read screen, tap, type, swipe, scroll) via the Android AccessibilityService when enabled. Run with no args (or --help) for the subcommand list.
@@ -13174,7 +13178,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // tool surface and SOUL.md is part of identity, both orthogonal
         // to the memory feature.
         val globalMemoryFragment = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
-        val dailyMemoryFragment = if (memoryOn) memoryRepository?.loadRecentDailyMemoryFragment() else null
+        val dailyMemoryFragment = if (memoryOn && com.openminis.app.data.MemoryGlobalPrefs.isDailyInjectionEnabled(context)) {
+            memoryRepository?.loadRecentDailyMemoryFragment()
+        } else null
         // [XSessionDiag] Hypothesis 3: ties the memory-injection sizes to a
         // SESSION id. MemoryRepository itself has no session context, so its own
         // `memory/daily-inject` line (which names the source files) cannot say who
@@ -13971,19 +13977,19 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         temperature = null,
                         thinkingLevel = ThinkingLevel.OFF,
                     )
-                    parseTitleResponse(response.text).takeIf { it.title.isNotBlank() }
+                    parseGeneratedTitle(response.text, response.stopReason)
                 }
                 if (result == null) {
                     titleGenerationAttempts = TITLE_MAX_ATTEMPTS
                     applyFallbackTitleFromFirstMessage("all title candidates failed")
                     return@launch
                 }
-                val existing = chatRepository.getSession(titleSid)?.title?.trim()
-                if (!existing.isNullOrEmpty() && existing != "New Chat") return@launch
+                val existing = chatRepository.getSession(titleSid)?.title
+                if (!existing.isNullOrBlank() && existing.trim() != "New Chat") return@launch
                 val (title, category, folderName) = result
                 if (title.isNotEmpty()) {
                     val sid = realSessionId.ifEmpty { sessionId }
-                    chatRepository.updateSessionTitleAndCategory(sid, title, category)
+                    if (!chatRepository.updateSessionTitleIfUnchanged(sid, existing, title, category)) return@launch
                     withContext(Dispatchers.Main) {
                         _sessionTitle.value = title
                         _sessionCategory.value = category
@@ -14092,8 +14098,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      */
     private suspend fun applyFallbackTitleFromFirstMessage(reason: String) {
         val sidForCheck = realSessionId.ifEmpty { sessionId }
-        val existing = chatRepository.getSession(sidForCheck)?.title?.trim()
-        if (!existing.isNullOrEmpty() && existing != "New Chat") {
+        val existing = chatRepository.getSession(sidForCheck)?.title
+        if (!existing.isNullOrBlank() && existing.trim() != "New Chat") {
             AppLogger.info(
                 "TitleGen",
                 "outcome=fallback-skipped session=${sidForCheck.take(8)} reason=already-titled",
@@ -14125,7 +14131,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             return
         }
         val fallbackTitle = if (cleaned.length > 30) cleaned.take(30).trimEnd() + "…" else cleaned
-        chatRepository.updateSessionTitle(sidForCheck, fallbackTitle)
+        if (!chatRepository.updateSessionTitleIfUnchanged(sidForCheck, existing, fallbackTitle)) return
         withContext(Dispatchers.Main) {
             _sessionTitle.value = fallbackTitle
         }
@@ -14136,47 +14142,6 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         )
     }
 
-    /** Parse LLM response for title/category JSON. Multiple fallback strategies. */
-    private fun parseTitleResponse(text: String): TitleGenResult {
-        val cleaned = text.trim()
-            .removePrefix("```json").removePrefix("```")
-            .removeSuffix("```").trim()
-        // Try JSON parse
-        try {
-            val json = JSONObject(cleaned)
-            val title = json.optString("title", "").trim()
-            val category = json.optString("category", "").trim().ifEmpty { null }
-            // [T-android-auto-grouping] `folder` is absent whenever
-            // auto-grouping is off, and JSON null when the model declined to
-            // file the chat — optString maps both to "" → null here.
-            val folder = json.optString("folder", "").trim()
-                .takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
-            if (title.isNotEmpty()) return TitleGenResult(title, category, folder)
-        } catch (_: Exception) {}
-        // Regex fallback: extract "title" value
-        val titleMatch = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(cleaned)
-        val catMatch = Regex("\"category\"\\s*:\\s*\"([^\"]+)\"").find(cleaned)
-        val folderMatch = Regex("\"folder\"\\s*:\\s*\"([^\"]+)\"").find(cleaned)
-        if (titleMatch != null) {
-            return TitleGenResult(
-                titleMatch.groupValues[1].trim(),
-                catMatch?.groupValues?.getOrNull(1)?.trim(),
-                folderMatch?.groupValues?.getOrNull(1)?.trim()
-                    ?.takeIf { !it.equals("null", ignoreCase = true) },
-            )
-        }
-        // Plain text fallback: use first line
-        val firstLine = cleaned.lines().firstOrNull()?.trim() ?: ""
-        return TitleGenResult(firstLine.take(50), null, null)
-    }
-
-    /** Parsed title-generation payload. [folder] is non-null only when
-     *  auto-grouping asked for it AND the model named an existing group. */
-    private data class TitleGenResult(
-        val title: String,
-        val category: String?,
-        val folder: String?,
-    )
 
     /**
      * [T-android-overlay-reply-status-34599] Pull the most recent

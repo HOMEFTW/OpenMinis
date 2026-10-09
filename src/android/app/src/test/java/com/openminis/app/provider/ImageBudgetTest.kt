@@ -9,6 +9,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImageBudgetTest {
+    @Test
+    fun transportDimensionsAreIndependentOfCompressedByteSize() {
+        assertFalse(ImageBudget.requiresDimensionResize(8192, 900))
+        assertFalse(ImageBudget.requiresDimensionResize(900, 8192))
+        assertTrue(ImageBudget.requiresDimensionResize(8193, 900))
+        assertTrue(ImageBudget.requiresDimensionResize(900, 8193))
+        assertTrue(ImageBudget.requiresDimensionResize(200, 9000))
+    }
+
     private fun image(size: Int, path: String? = null) = ImageBudget.BudgetImage(
         data = ByteArray(size),
         linuxPath = path,

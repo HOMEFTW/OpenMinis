@@ -195,7 +195,7 @@ class NotificationOffloadHandler(private val context: Context) : NativeOffloadHa
         val id = UUID.randomUUID().toString()
         val notifId = id.hashCode() and 0x7FFFFFFF
         val n = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(com.openminis.app.data.repository.AppIconRepository.current(context).notificationRes)
             .setContentTitle(title)
             .setContentText(body)
             .setAutoCancel(true)

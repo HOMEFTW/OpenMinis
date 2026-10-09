@@ -7,9 +7,19 @@
 
 OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手机上使用 Linux 沙箱、文件工作区、浏览器、技能和记忆。本 fork 保留原项目架构，仅增加 Android 端改动；它不是上游官方发行版。
 
-**[下载 Android 1.15 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.15/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.15) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+**[下载 Android 1.16 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
 
-**1.15 · 2026-10-08**：新增 DeepSeek 官方 API Key 独立接入和随模型切换的 AI 背景，整合此前 Android 子代理、定时任务、浏览器及备份更新。源码以 [1.15 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.15) 为准。
+**1.16 · 2026-10-09**：新增 GPT / DeepSeek / Claude 品牌图标切换，修复自动标题、长对话渲染、图片尺寸和子代理超时恢复；补齐音频文件转写、端点证书配置及近期记忆日志开关。源码以 [1.16 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16) 为准。
+
+## 应用品牌图标
+
+默认使用 **GPT 龙娘**。在 **设置 → 外观** 中可切换 GPT、DeepSeek、Claude 三套图标，桌面入口、关于页、最近任务、通知和悬浮入口使用对应品牌素材。图标选择独立于随模型切换的对话背景；已固定的旧网页快捷方式不会自动替换图标。
+
+| GPT（默认） | DeepSeek | Claude |
+| --- | --- | --- |
+| <img src="src/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" width="100" alt="GPT 龙娘图标"> | <img src="src/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground_light.png" width="100" alt="DeepSeek 图标"> | <img src="src/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground_dark.png" width="100" alt="Claude 图标"> |
+
+[品牌素材来源](src/android/app/src/main/assets/brand_icons/SOURCES.txt)
 
 ## AI 对话背景
 
@@ -52,6 +62,12 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 | 上游同步 | 同步公开 Android 源码中的模型刷新、浏览器生命周期、语音重试、子会话备份、存储清理及 PRoot 沙箱更新，保留本 fork 的上下文、图片预算与会话通信能力。详见 [同步记录](docs/superpowers/plans/2026-10-08-remaining-sync.md)。 |
 | 日常使用 | 新增任务中心、跨会话作品库、保留原历史的编辑分支、分类错误建议、Markdown 导出和备份预览。 |
 | 任务工具 | 新增任务成果列表、轮数预算、上限及重试提醒，以及服务商实际调用自检。 |
+| 长对话稳定性 | 限制 Markdown 解析、嵌套与缓存，优化流式更新；超长内容保留原文，支持分块全文查看和导出。图片发送同时检查文件大小与像素尺寸。 |
+| 标题与反馈 | 自动标题严格解析并限制等待时间，不覆盖手动改名；关于页与反馈统一指向本 fork，反馈仅保留 GitHub Issues。 |
+| 超时恢复 | 子代理超时后可恢复原子会话，等待旧任务收尾，避免新旧运行互相覆盖。 |
+| 语音转写 | `android-speech` 支持麦克风或授权目录中的音频文件，复用系统或已配置的语音服务商，处理超时、取消及资源限制。 |
+| 端点证书 | 为指定 HTTPS 主机与端口配置 PEM CA，保留证书链和主机名校验；可清除恢复默认信任。 |
+| 记忆与兼容性 | 近期记忆日志可独立关闭；统一 Claude 认证与聊天请求头；识别特定 PRoot 断言后，对后续 Shell 使用兼容模式，不自动重放命令。 |
 
 ## 安装与使用
 
@@ -73,6 +89,11 @@ DeepSeek 官方 Key：添加服务商时选择 **DeepSeek** 并填写密钥。�
 - **聊天菜单 → 任务预算**：10 / 25 / 50 / 100 / 200 轮，默认 200。这是执行轮数限制，不是金额限额。
 - **服务商设置 → 测试调用**：选择模型并点击发送后进行实际文本调用，可取消，可能消耗接口用量。
 - **模型列表 → 更多模型与分组**：原有详细选择器、分组管理和模型测试。
+- **设置 → 服务商详情 → 自定义服务器证书**：粘贴 PEM CA，仅对配置的 HTTPS 主机与端口生效；同端点账号共享配置，留空可移除。
+- **设置 → 记忆 → 自动加入近期记忆日志**：默认开启，关闭后从下一轮生效，不影响全局记忆和记忆工具。
+- **设置 → 反馈问题**：[本 fork 的 GitHub Issues](https://github.com/HOMEFTW/OpenMinis/issues)。
+
+音频工具示例：`android-speech transcribe --source /var/minis/workspace/audio.wav --engine provider`。`--source mic` 使用麦克风，`--engine auto|system|provider` 选择引擎；文件须位于授权目录，最多 25 MiB、300 秒。系统文件转写依赖 Android 13+ 及设备识别服务支持。
 
 不同签名的官方版或第三方 APK 不保证能够覆盖安装，请先通过应用备份功能保留数据。本 fork 的同签名测试版可尝试直接更新。
 
@@ -113,16 +134,20 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
-2026-10-08 本机验证：通过项目构建脚本运行 **2304 项 JVM 单元测试**，2302 通过、0 失败、0 错误、2 跳过。跳过项为 Windows 不支持的 POSIX 目录权限测试；背景功能的 24 项测试通过。APK 构建及 v2 签名校验通过。
+2026-10-09 本机验证：通过项目构建脚本运行 **2368 项 JVM 单元测试**，2366 通过、0 失败、0 错误、2 项既有 Windows 平台相关跳过。覆盖长文本、图片尺寸、标题保护、图标切换、语音取消、证书握手和子代理异步收尾。APK 构建及 v2 签名校验通过。
 
-安装包 SHA-256 见 [1.15 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.15) 附带的校验文件。
+安装包 SHA-256 见 [1.16 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16) 附带的校验文件。
 
 历史设备测试记录：分支功能的设备测试曾单独编译通过；整套既有设备测试曾因过期的 `mountedSessionId` 引用无法编译，本轮未重新验证该问题。
 
 这是本地执行记录，不代表 GitHub CI 或真机验收。尚未完成真机界面、跨会话真实模型互通、后台运行及 Keystore 异常验证；开发验证使用模拟接口，没有自动调用用户的付费 API。上下文 Token 预算仍为校准估算，不是精确 tokenizer 计数。
 
+本轮也未进行真实 Claude OAuth、外部语音服务及设备录音/解码验收。PRoot 改动只缓解明确的 seccomp 断言，不代表修复所有挂载/FUSE 问题；iOS 问题不在本 fork 的修复范围。
+
 ## 更多说明
 
+- [2026-10-09 上游问题修复及验证边界](docs/superpowers/plans/2026-10-09-upstream-issues.md)
+- [三套品牌图标实施记录](docs/superpowers/plans/2026-10-09-brand-icons.md)
 - [会话通信：手动转发、AI 请求、排队与权限](docs/android-session-communication.md)
 - [日常使用增强：八项功能、入口及限制](docs/android-daily-use.md)
 - [日常使用实施计划](docs/superpowers/plans/2026-09-14-android-daily-use.md)

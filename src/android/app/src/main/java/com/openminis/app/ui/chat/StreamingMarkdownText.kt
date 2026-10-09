@@ -61,6 +61,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -105,6 +106,11 @@ import coil.request.ImageRequest
 import com.openminis.app.ui.DisplayBitmapLimits.limitDisplaySize
 import com.openminis.app.sandbox.PRootKernel
 import com.openminis.app.ui.theme.ChatColors
+import com.openminis.app.ui.markdown.MarkdownCache
+import com.openminis.app.ui.markdown.MarkdownWorkLimits
+import com.openminis.app.ui.markdown.throttleMarkdownUpdates
+import com.openminis.app.ui.markdown.BoundedMarkdownText
+import com.openminis.app.ui.markdown.MarkdownPlainTextDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -742,16 +748,6 @@ private fun MdText(
 // line on dense streams while keeping short replies responsive.
 //   < 500  : 200ms   < 2000 : 300ms   < 32K : 500ms
 //   < 64K  : 1000ms  < 128K : 1500ms  else  : 2000ms
-private fun streamingThrottleFor(content: String): Long = when {
-    content.length < 500 -> 200L
-    content.length < 2_000 -> 300L
-    content.length < 32_000 -> 500L
-    content.length < 64_000 -> 1_000L
-    content.length < 128_000 -> 1_500L
-    else -> 2_000L
-}
-
-
 @Composable
 fun StreamingMarkdownText(
     content: String,
@@ -775,21 +771,25 @@ private fun StreamingMarkdownTextBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    if (!MarkdownWorkLimits.canParseBlocks(content)) {
+        BoundedMarkdownText(content, modifier)
+        return
+    }
     // While streaming, sample `content` at the adaptive throttle interval.
     // produceState + snapshotFlow.conflate() makes the upstream value collection
     // suspend-safe and frees the runtime to drop intermediate values when the
     // collector falls behind. When streaming ends, emit the final value
     // unconditionally so we don't render a stale half-block.
-    val displayContent by produceState(initialValue = content, content, isStreaming) {
+    val latestContent by rememberUpdatedState(content)
+    val displayContent by produceState(initialValue = content, isStreaming) {
         if (!isStreaming) {
-            value = content
+            snapshotFlow { latestContent }.collect { value = it }
             return@produceState
         }
-        snapshotFlow { content }
-            .conflate()
+        snapshotFlow { latestContent }
+            .throttleMarkdownUpdates()
             .collect { latest ->
                 value = latest
-                delay(streamingThrottleFor(latest))
             }
     }
     // [T-android-inline-parse-offmain] Theme snapshot for off-main prewarm.
@@ -872,6 +872,10 @@ fun MarkdownDocument(
     contentPadding: androidx.compose.foundation.layout.PaddingValues =
         androidx.compose.foundation.layout.PaddingValues(0.dp),
 ) {
+    if (!MarkdownWorkLimits.canParseBlocks(content)) {
+        MarkdownPlainTextDocument(content, modifier, contentPadding)
+        return
+    }
     // [T-android-inline-parse-offmain] Theme snapshot for off-main prewarm —
     // the doc viewer benefits the same way: per-block inline scans become
     // cache hits as blocks scroll into view.
@@ -1093,6 +1097,10 @@ private fun MarkdownBlockBody(
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    if (!MarkdownWorkLimits.canParseBlocks(rawText)) {
+        BoundedMarkdownText(rawText, modifier)
+        return
+    }
     // [T-android-freeze-edge-carryover] The live branch's most recent parse
     // and the text it was for, held ABOVE the live/frozen switch. The list key
     // (mdblock:<msg>:<block>:<index>) does not include isStreaming, so this
@@ -1448,6 +1456,7 @@ private fun parseMarkdownBlocksBlocking(content: String): List<MdBlock> =
 // ─── Block model ────────────────────────────────────────────────────────────
 
 private sealed class MdBlock(val raw: String) {
+    class PlainText(raw: String) : MdBlock(raw)
     class Paragraph(raw: String) : MdBlock(raw)
     class Heading(raw: String, val level: Int, val text: String) : MdBlock(raw)
     class CodeBlock(raw: String, val language: String, val code: String) : MdBlock(raw)
@@ -1536,6 +1545,7 @@ private fun isBlockquoteLine(trimmed: String): Boolean {
  * `[alt]` link — no preview card, no tap-to-play.
  */
 private fun splitParagraphOnInlineMedia(text: String): List<MdBlock> {
+    if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) return listOf(MdBlock.Paragraph(text))
     val matches = inlineMediaRegex.findAll(text).toList()
     if (matches.isEmpty()) return listOf(MdBlock.Paragraph(text))
 
@@ -1613,6 +1623,7 @@ private fun looksLikeWideMath(latex: String): Boolean {
  * with the inline parser.
  */
 private fun splitParagraphOnWideMath(text: String): List<MdBlock> {
+    if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) return listOf(MdBlock.Paragraph(text))
     if (!text.contains('\\') && !text.contains('$')) return listOf(MdBlock.Paragraph(text))
 
     data class Span(val start: Int, val end: Int, val latex: String)
@@ -1784,26 +1795,8 @@ private val markdownParseGate = Semaphore(1)
 private class IncrementalParseState {
     var prefixLength: Int = 0
     var prefixBlocks: List<MdBlock> = emptyList()
-    /**
-     * Cheap fingerprint of the frozen prefix, to detect that growth really was
-     * append-only (a retry / edit / shorter re-render must invalidate).
-     *
-     * Deliberately NOT the prefix text itself: holding a copy would retain a
-     * second full-size String per live composable and make the check O(n) on
-     * every tick — reintroducing exactly the memory and CPU pressure this
-     * change exists to remove. A length + hash of the boundary region is
-     * O(1)-ish and false-positives only if an edit preserved both.
-     */
-    var prefixHash: Int = 0
-}
-
-/** Fingerprint over the tail of [content] up to [end] (bounded work). */
-private fun prefixFingerprint(content: String, end: Int): Int {
-    if (end <= 0) return 0
-    val from = (end - 512).coerceAtLeast(0)
-    var h = end
-    for (i in from until end) h = h * 31 + content[i].code
-    return h
+    // Keep the bounded source reference, without copying, for exact prefix validation.
+    var prefixSource: String = ""
 }
 
 /**
@@ -1944,14 +1937,20 @@ private suspend fun parseMarkdownIncremental(
     content: String,
     state: IncrementalParseState,
 ): List<MdBlock> = markdownParseGate.withPermit {
+    if (!MarkdownWorkLimits.canParseBlocks(content)) {
+        state.prefixLength = 0
+        state.prefixBlocks = emptyList()
+        state.prefixSource = ""
+        return@withPermit listOf(MdBlock.PlainText(content))
+    }
     // Growth must be append-only for the cached prefix to remain valid. Any
     // other edit (retry, edit-message, a shorter re-render) resets the state.
     val reusable = state.prefixLength in 1..content.length &&
-        prefixFingerprint(content, state.prefixLength) == state.prefixHash
+        content.regionMatches(0, state.prefixSource, 0, state.prefixLength)
     if (!reusable) {
         state.prefixLength = 0
         state.prefixBlocks = emptyList()
-        state.prefixHash = 0
+        state.prefixSource = ""
     }
 
     val head = state.prefixLength
@@ -1973,12 +1972,15 @@ private suspend fun parseMarkdownIncremental(
     if (sealedEnd > head) {
         state.prefixBlocks = state.prefixBlocks + sealedTail
         state.prefixLength = sealedEnd
-        state.prefixHash = prefixFingerprint(content, sealedEnd)
+        state.prefixSource = content
     }
     state.prefixBlocks + liveTail
 }
 
-private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
+private suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<MdBlock> {
+    if (depth >= MarkdownWorkLimits.MAX_NESTING || !MarkdownWorkLimits.canParseBlocks(content)) {
+        return listOf(MdBlock.PlainText(content))
+    }
     val blocks = mutableListOf<MdBlock>()
     val lines = content.lines()
     var i = 0
@@ -2143,7 +2145,7 @@ private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     innerLines.add(lines[i].trimStart().removePrefix(">").removePrefix(" "))
                     i++
                 }
-                val innerBlocks = parseMarkdownBlocks(innerLines.joinToString("\n"))
+                val innerBlocks = parseMarkdownBlocks(innerLines.joinToString("\n"), depth + 1)
                 blocks.add(MdBlock.BlockQuote(rawLines.joinToString("\n"), innerBlocks))
             }
 
@@ -2318,6 +2320,12 @@ internal fun parseTable(lines: List<String>): ParsedTable {
 
 @Composable
 private fun RenderBlock(block: MdBlock) {
+    if (block.raw.length > MarkdownWorkLimits.MAX_INLINE_CHARS &&
+        (block is MdBlock.Paragraph || block is MdBlock.CodeBlock || block is MdBlock.MathDisplay)
+    ) {
+        BoundedMarkdownText(block.raw)
+        return
+    }
     val colors = currentMdColors()
     // [T-android-streaming-incremental-inline] The live streaming tail block
     // re-parses its growing paragraph every throttle tick; route it through the
@@ -2325,6 +2333,7 @@ private fun RenderBlock(block: MdBlock) {
     // blocks (false) keep the plain per-block cache — no behavior change there.
     val liveIncremental = LocalLiveIncremental.current
     when (block) {
+        is MdBlock.PlainText -> BoundedMarkdownText(block.raw, color = colors.text)
         is MdBlock.Paragraph -> {
             MdText(
                 text = if (liveIncremental) MarkdownParseCaches.inlineIncremental(block.raw, colors)
@@ -3775,75 +3784,16 @@ private object MarkdownParseCaches {
     //     33 KB tail of the distribution.
     private const val CHAR_BUDGET_PER_CACHE = 2_000_000
 
-    /**
-     * Access-order LinkedHashMap with eviction driven by a running
-     * character total rather than entry count. [sizer] returns the number
-     * of source characters each (key, value) pair contributes (we count
-     * source-side bytes — the canonical input — rather than
-     * AnnotatedString output, because output sizes are not easily
-     * computable and source length is the dominant correlate anyway).
-     *
-     * `get` continues to refresh recency via LinkedHashMap's accessOrder;
-     * `put` is overridden to maintain [totalChars] and trim trailing
-     * eldest entries until the running total fits in [budget], while
-     * always keeping at least one entry — see the put loop guard. This
-     * preserves the "single oversized message lands in the cache without
-     * an infinite eviction loop" invariant required by the spec.
-     */
-    private class Lru<K, V>(
-        private val budget: Int,
-        private val sizer: (K, V) -> Int,
-    ) : LinkedHashMap<K, V>(64, 0.75f, true) {
-        var totalChars: Int = 0
-            private set
-
-        override fun put(key: K, value: V): V? {
-            val prior = super.put(key, value)
-            // The map call above may have replaced an existing entry —
-            // adjust the running total by the difference, not the new
-            // value alone. Also defends against accidental double-count
-            // when the same key is re-put with a different value.
-            if (prior != null) totalChars -= sizer(key, prior).coerceAtLeast(0)
-            totalChars += sizer(key, value).coerceAtLeast(0)
-            // Trim eldest entries until under budget. Always keep at
-            // least one entry alive so a single message larger than
-            // budget still gets cached (its first parse is the
-            // expensive one; we eat the over-budget transient until
-            // any other put displaces it).
-            while (totalChars > budget && size > 1) {
-                val eldest = entries.iterator().next()
-                totalChars -= sizer(eldest.key, eldest.value).coerceAtLeast(0)
-                entries.remove(eldest)
-            }
-            return prior
-        }
-
-        override fun remove(key: K): V? {
-            val v = super.remove(key) ?: return null
-            totalChars -= sizer(key, v).coerceAtLeast(0)
-            return v
-        }
-
-        override fun clear() {
-            super.clear()
-            totalChars = 0
-        }
-
-        // Suppress the count-based eviction path inherited from
-        // LinkedHashMap; our own put() does the work and removeEldestEntry
-        // would race with our totalChars bookkeeping if both fired.
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean = false
-    }
-
-    private val inlineLru = Lru<Pair<String, MdColors>, AnnotatedString>(
+    // Strict character AND entry budgets; oversized results stay local to their caller.
+    private val inlineLru = MarkdownCache<Pair<String, MdColors>, AnnotatedString>(
         budget = CHAR_BUDGET_PER_CACHE,
         sizer = { k, _ -> k.first.length },
     )
-    private val mathLru = Lru<String, List<String>>(
+    private val mathLru = MarkdownCache<String, List<String>>(
         budget = CHAR_BUDGET_PER_CACHE,
         sizer = { k, _ -> k.length },
     )
-    private val blocksLru = Lru<String, List<MdBlock>>(
+    private val blocksLru = MarkdownCache<String, List<MdBlock>>(
         budget = CHAR_BUDGET_PER_CACHE,
         sizer = { k, _ -> k.length },
     )
@@ -3895,6 +3845,7 @@ private object MarkdownParseCaches {
      *  parse of the closed prefix and only scans the unclosed suffix. Falls back
      *  to the plain cached path for short text or when no safe boundary exists. */
     fun inlineIncremental(text: String, colors: MdColors): AnnotatedString {
+        if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) return inline(text, colors)
         // Exact-match cache hit (e.g. a re-publish of the same content) — free.
         synchronized(inlineLru) { inlineLru[text to colors] }?.let { return it }
         if (text.length < INCREMENTAL_MIN_CHARS) return inline(text, colors)
@@ -3915,6 +3866,7 @@ private object MarkdownParseCaches {
     /** Incremental math-latex collection for the live streaming tail. Same
      *  contract as `mathLatex(text)`; reuses the closed prefix's list. */
     fun mathLatexIncremental(text: String): List<String> {
+        if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) return emptyList()
         synchronized(mathLru) { mathLru[text] }?.let { return it }
         if (text.length < INCREMENTAL_MIN_CHARS) return mathLatex(text)
         val split = safeInlineSplitOffset(text)
@@ -4128,6 +4080,7 @@ internal fun safeInlineSplitOffset(text: String): Int {
 }
 
 private fun parseInline(text: String, colors: MdColors): AnnotatedString {
+    if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) return AnnotatedString(text)
     return buildAnnotatedString {
         var i = 0
         while (i < text.length) {
@@ -4454,6 +4407,7 @@ internal fun estimateInlineMathSize(latex: String, fontSize: TextUnit): Pair<Tex
  * each unique latex BEFORE the AnnotatedString is laid out.
  */
 internal fun collectInlineMathLatex(text: String): List<String> {
+    if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) return emptyList()
     val out = mutableListOf<String>()
     var i = 0
     while (i < text.length) {

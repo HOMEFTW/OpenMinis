@@ -4,15 +4,11 @@ import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.offload.OffloadPermissionManager
@@ -20,244 +16,257 @@ import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import com.openminis.app.sandbox.PRootKernel
+import com.openminis.app.speech.ProviderSpeechRecognitionEngine
+import com.openminis.app.speech.RecognitionError
+import com.openminis.app.speech.RecognitionState
+import com.openminis.app.speech.SpeechAudioDecoder
+import com.openminis.app.speech.SpeechAudioFile
+import com.openminis.app.speech.SpeechRecognitionEngine
+import com.openminis.app.speech.SpeechRecognitionManager
+import com.openminis.app.speech.SystemSpeechRecognitionEngine
+import com.openminis.app.speech.VoiceOutputState
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
-/**
- * android-speech — speech recognition (audio → text).
- *
- * T61: re-aligned with iOS `apple-speech` (NativeOffloads/SpeechOffload.m).
- * Subcommand model:
- *
- *   android-speech transcribe [--source mic|<path>] [--language tag] [--duration N]
- *   android-speech listen [...]              # legacy alias for transcribe
- *   android-speech languages
- *   android-speech status
- *
- * What changed from the pre-T61 surface:
- *   - `transcribe` is the new canonical subcommand; `listen` is an alias kept
- *     for back-compat with prompts that learned the old form.
- *   - `--source <mic|path>` mirrors apple-speech: defaults to system mic,
- *     also accepts a Linux file path under /var/minis/... resolved via
- *     [PRootKernel.resolveHostPath]. **Audio-file transcription is not
- *     yet wired through the recognizer** — Android's [SpeechRecognizer]
- *     only exposes microphone input on most vendor implementations
- *     (the API 31 `EXTRA_AUDIO_SOURCE` extension is not honoured by
- *     Google's recogniser on Pixel-class devices and is absent on most
- *     OEM ROMs). When the user passes a file path we currently return a
- *     structured `not_supported` error; the path is validated and
- *     reported back so future versions can route through a streaming
- *     decoder + an alternative engine without changing the CLI.
- *   - `languages` enumerates installed recognition locales via the
- *     [RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS] ordered broadcast.
- *     Mirrors iOS `[SFSpeechRecognizer supportedLocales]`.
- *
- * Permission flow: when a transcribe attempt needs RECORD_AUDIO and the
- * user has already permanently denied it, we route through the same
- * 3-stage flow the chat composer's mic button uses (T67).
- */
+/** android-speech reuses the same system/provider adapters as voice input, with private callbacks. */
 class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler {
-    override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
-        val args = OffloadArgs(request.argv.drop(1))
-        if (args.hasFlag("h", "help") || args.positional.isEmpty()) {
-            return NativeOffloadResult(if (args.positional.isEmpty()) 2 else 0, HELP)
-        }
+    private val micBusy = AtomicBoolean(false)
 
+    override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
+        val args = OffloadArgs(request.argv.drop(1), booleanFlags = setOf("on-device"))
+        if (args.hasFlag("h", "help") || args.positional.isEmpty()) {
+            return NativeOffloadResult(if (args.hasFlag("h", "help")) 0 else 2, HELP)
+        }
         return try {
             when (val sub = args.positional[0]) {
                 "status" -> cmdStatus(args)
                 "languages" -> cmdLanguages(args)
-                "transcribe", "listen" -> cmdTranscribe(args)
-                else -> NativeOffloadResult(2, "android-speech: unknown subcommand '$sub'\n$HELP")
+                "transcribe", "listen" -> cmdTranscribe(args, request)
+                else -> error(args, "invalid_argument", "Unknown subcommand '$sub'", 2)
             }
-        } catch (e: Throwable) {
-            AppLogger.warning(TAG, "uncaught: ${e.message}")
-            val body = JSONObject()
-                .put("error", "internal")
-                .put("message", e.message ?: "unknown")
-                .toString()
-            NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            error(args, "cancelled", "Speech transcription was interrupted", 130)
+        } catch (e: IllegalArgumentException) {
+            error(args, "invalid_argument", e.message ?: "Invalid argument", 2)
+        } catch (e: Exception) {
+            AppLogger.warning(TAG, "speech failed: ${e.javaClass.simpleName}")
+            error(args, "internal", e.message ?: "Speech transcription failed")
         }
     }
-
-    // ── Subcommands ──────────────────────────────────────────────────────────
 
     private fun cmdStatus(args: OffloadArgs): NativeOffloadResult {
-        val ok = try { SpeechRecognizer.isRecognitionAvailable(context) } catch (_: Throwable) { false }
-        val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        val body = JSONObject()
-            .put("available", ok)
-            .put("has_record_audio_permission", hasMic)
-            .toString(2)
-        return NativeOffloadResult(0, OffloadOutput.formatBody(body, args) + "\n")
+        val system = SystemSpeechRecognitionEngine(context).isAvailable
+        val provider = ProviderSpeechRecognitionEngine(context).isAvailable
+        val microphone = context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)
+        return output(args, JSONObject()
+            .put("available", system || provider)
+            .put("system_available", system)
+            .put("provider_available", provider)
+            .put("has_record_audio_permission", hasMic())
+            .put("has_microphone", microphone)
+            .put("mic_available", (system || provider) && microphone && hasMic())
+            .put("file_available", provider)
+            .put("system_file_input", if (system && Build.VERSION.SDK_INT >= 33) "best_effort" else "unsupported")
+            .put("availability_check", "Local service/configuration only; network, credentials and language support are verified when transcribing."))
     }
 
-    private fun cmdTranscribe(args: OffloadArgs): NativeOffloadResult {
-        val available = try { SpeechRecognizer.isRecognitionAvailable(context) } catch (_: Throwable) { false }
-        if (!available) {
-            val body = JSONObject()
-                .put("error", "recognizer_unavailable")
-                .put(
-                    "message",
-                    "No speech recognition service is registered on this device. " +
-                        "This is common on devices without Google Mobile Services " +
-                        "(Huawei HMS-only, some stripped China ROMs). Ask the user " +
-                        "to install a speech recognition engine (e.g. Google, or an " +
-                        "OEM-provided alternative).",
-                )
-                .toString()
-            return NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
+    private fun cmdTranscribe(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
+        val source = args.get("source") ?: "mic"
+        val mic = source.trim().lowercase(Locale.ROOT) in setOf("", "mic", "system-mic", "system_mic", "microphone")
+        val duration = numberOption(args, "duration", 30, 1..60)
+        val timeout = numberOption(args, "timeout", 120, 1..300)
+        // Keep accepting the legacy flag; engine adapters expose one best transcript.
+        numberOption(args, "max", 3, 1..20)
+        val language = args.get("language")?.let {
+            Locale.Builder().setLanguageTag(it.replace('_', '-')).build().also { locale ->
+                require(locale.language.isNotEmpty()) { "Invalid recognition language" }
+            }
+        } ?: SpeechRecognitionManager.locale.value
+        val requestedEngine = args.get("engine") ?: "auto"
+        require(!args.hasFlag("engine", "source", "language")) { "--engine, --source and --language require values" }
+        require(requestedEngine in setOf("auto", "system", "provider")) { "--engine must be auto, system or provider" }
+        val onDevice = args.hasFlag("on-device") || args.getBool("on-device") == true
+        require(!onDevice || requestedEngine != "provider") { "--on-device requires the system engine" }
+        val provider = ProviderSpeechRecognitionEngine(context).apply { useVad = false }
+        val systemPreference = provider.selectedSystemPreferOffline
+        val system = SystemSpeechRecognitionEngine(context).apply { preferOffline = onDevice || systemPreference == true }
+        val engine = when {
+            onDevice || requestedEngine == "system" -> system
+            requestedEngine == "provider" -> provider
+            requestedEngine == "auto" && mic && systemPreference != null -> system
+            provider.isAvailable -> provider
+            else -> system
         }
-
-        // --source: default mic, accept "mic" / "system-mic" / any /var/minis/... path.
-        val source = args.get("source")
-        if (source != null && !sourceIsMic(source)) {
-            // T61: file-source path. Validate the path resolves and the
-            // file exists, but bail with `not_supported` because Android
-            // SpeechRecognizer doesn't accept arbitrary audio file inputs
-            // on the platforms we ship to. Reported path is what the
-            // future implementation would consume.
-            val resolved = resolveSourcePath(source)
-            val exists = resolved?.exists() == true
-            AppLogger.warning(
-                TAG,
-                "transcribe --source=$source resolved=${resolved?.absolutePath} exists=$exists — file source not yet wired",
-            )
-            val body = JSONObject()
-                .put("error", "not_supported")
-                .put(
-                    "message",
-                    "Audio-file transcription is not yet supported on Android. " +
-                        "Only microphone source works today. The given path was " +
-                        "${if (exists) "found" else "not found"} on the host. Use " +
-                        "`android-speech transcribe --source mic` or omit --source.",
-                )
-                .put("requested_path", source)
-                .put("resolved_host_path", resolved?.absolutePath ?: "")
-                .put("file_exists", exists)
-                .toString()
-            return NativeOffloadResult(2, OffloadOutput.formatBody(body, args) + "\n")
+        if (!engine.isAvailable) {
+            return error(args, "recognizer_unavailable", if (engine === provider) {
+                "No usable provider ASR model/credential is configured in Voice Input."
+            } else {
+                "No usable system recognition service. Configure a provider ASR model in Voice Input or install a system recognition service."
+            })
         }
-
-        // Mic path. Permission gate first.
-        ensureMicPermission(args)?.let { return it }
-
-        // iOS-style flag names: --language, --duration, --on-device.
-        // Pre-T61 callers also passed --max / --timeout; preserve those.
-        val lang = args.get("language")
-        val maxResults = args.getInt("max") ?: 3
-        val durationSec = args.getInt("duration") ?: args.getInt("timeout") ?: 30
-        val text = recognize(lang, maxResults, durationSec.toLong())
-        return NativeOffloadResult(0, OffloadOutput.formatBody(text, args) + "\n")
+        if (!mic) {
+            if (engine === system && Build.VERSION.SDK_INT < 33) {
+                return error(args, "not_supported", "System file input needs Android 13+; configure a provider ASR model for file transcription.", 2)
+            }
+            val file = SpeechAudioFile.resolve(source, request.cwd) { root ->
+                if (root == "/var/minis/shared") PRootKernel.resolveHostPath(root)
+                else request.sessionId?.let { PRootKernel.resolveSessionHostPath(it, root, context) }
+            }
+            val wav = try {
+                SpeechAudioDecoder.decode(file)
+            } catch (e: InterruptedException) {
+                throw e
+            } catch (e: Exception) {
+                return error(args, "invalid_audio", e.message ?: "Audio could not be decoded", 2)
+            }
+            return recognize(args, engine, language, wav, duration, timeout, source)
+        }
+        if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)) {
+            return error(args, "audio_error", "This device has no microphone")
+        }
+        if (!micBusy.compareAndSet(false, true)) return error(args, "recognizer_busy", "Another tool is using the microphone")
+        var sessionStarted = false
+        try {
+            if (SpeechRecognitionManager.state.value != RecognitionState.IDLE) {
+                return error(args, "recognizer_busy", "Voice input is already using the microphone")
+            }
+            ensureMicPermission(args)?.let { return it }
+            if (SpeechRecognitionManager.state.value != RecognitionState.IDLE) {
+                return error(args, "recognizer_busy", "Voice input is already using the microphone")
+            }
+            sessionStarted = true
+            return recognize(args, engine, language, null, duration, timeout, "mic")
+        } finally {
+            if (!sessionStarted) micBusy.set(false)
+        }
     }
 
-    /**
-     * Enumerate recognition locales installed on the device. Uses the
-     * [RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS] ordered broadcast — the
-     * standard non-deprecated way to get the supported language list on
-     * Android. Times out at 3s if no recognizer responds (which happens on
-     * devices without GMS).
-     *
-     * Mirrors iOS `[SFSpeechRecognizer supportedLocales]`. Output schema
-     * matches: `{ locales: [{locale, display_name}, ...], count: N }`.
-     */
-    private fun cmdLanguages(args: OffloadArgs): NativeOffloadResult {
+    private fun numberOption(args: OffloadArgs, name: String, default: Int, range: IntRange): Int {
+        require(!args.hasFlag(name)) { "--$name requires an integer" }
+        val value = args.get(name)?.let { requireNotNull(it.toIntOrNull()) { "--$name requires an integer" } } ?: default
+        require(value in range) { "--$name must be in ${range.first}..${range.last}" }
+        return value
+    }
+
+    private fun recognize(
+        args: OffloadArgs,
+        engine: SpeechRecognitionEngine,
+        locale: Locale,
+        wav: ByteArray?,
+        duration: Int,
+        timeout: Int,
+        source: String,
+    ): NativeOffloadResult {
+        check(Looper.myLooper() != Looper.getMainLooper()) { "Speech tool must run off the main thread" }
+        val main = Handler(Looper.getMainLooper())
         val latch = CountDownLatch(1)
-        val resultRef = java.util.concurrent.atomic.AtomicReference<List<String>>(emptyList())
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, intent: Intent?) {
-                val extras = getResultExtras(false)
-                @Suppress("DEPRECATION")
-                val langs: ArrayList<String>? = extras?.getStringArrayList(
-                    RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES,
-                )
-                resultRef.set(langs?.toList() ?: emptyList())
+        val finished = AtomicBoolean(false)
+        val leasedMicrophone = AtomicBoolean(false)
+        val result = AtomicReference<NativeOffloadResult>()
+        fun complete(body: JSONObject, exit: Int = 0) {
+            synchronized(finished) {
+                if (finished.get()) return
+                result.set(output(args, body.put("engine", engine.id).put("source", source), exit))
+                finished.set(true)
                 latch.countDown()
             }
         }
-        try {
-            // sendOrderedBroadcast with our resultReceiver — the recogniser
-            // populates resultExtras with EXTRA_SUPPORTED_LANGUAGES.
-            context.sendOrderedBroadcast(
-                Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS),
-                null,
-                receiver,
-                Handler(Looper.getMainLooper()),
-                0,
-                null,
-                null,
-            )
-        } catch (e: Throwable) {
-            AppLogger.warning(TAG, "languages broadcast failed: ${e.message}")
+        val stop = Runnable { if (!finished.get()) engine.stop() }
+        val start = Runnable {
+            // A request that timed out while the main thread was busy must never open the mic later.
+            if (finished.get()) return@Runnable
+            try {
+                val listener = object : SpeechRecognitionEngine.Listener {
+                    override fun onPartial(text: String) {}
+                    override fun onFinal(text: String) {
+                        if (text.isBlank()) onError(RecognitionError.NO_MATCH, "No speech recognized")
+                        else complete(JSONObject().put("text", text))
+                    }
+                    override fun onError(error: RecognitionError, message: String?) {
+                        complete(JSONObject().put("error", error.name.lowercase(Locale.ROOT))
+                            .put("message", message ?: error.name), 1)
+                    }
+                    override fun onReadyForSpeech() {
+                        if (wav == null && !finished.get()) main.postDelayed(stop, duration * 1_000L)
+                    }
+                }
+                if (wav == null) {
+                    if (!SpeechRecognitionManager.acquireToolMicrophone()) {
+                        listener.onError(RecognitionError.RECOGNIZER_BUSY, "Voice input is already using the microphone")
+                        return@Runnable
+                    }
+                    leasedMicrophone.set(true)
+                    VoiceOutputState.suspendAllForCapture()
+                    engine.start(locale, listener)
+                } else engine.transcribeRetained(wav, locale, listener)
+            } catch (e: Exception) {
+                complete(JSONObject().put("error", "recognition_failed").put("message", e.message), 1)
+            }
         }
-        latch.await(3, TimeUnit.SECONDS)
+        main.post(start)
+        try {
+            // Capture has its own duration; timeout bounds warmup and transcription as well.
+            val waitSeconds = timeout.toLong() + if (wav == null) duration else 0
+            if (!latch.await(waitSeconds, TimeUnit.SECONDS)) {
+                complete(JSONObject().put("error", "timed_out").put("message", "Speech transcription timed out"), 1)
+            }
+            return result.get()
+        } finally {
+            finished.set(true)
+            main.removeCallbacks(start)
+            main.removeCallbacks(stop)
+            main.post {
+                try { engine.cancel() } finally {
+                    if (leasedMicrophone.get()) {
+                        SpeechRecognitionManager.releaseToolMicrophone()
+                        VoiceOutputState.resumeAllAfterCapture()
+                    }
+                    if (wav == null) micBusy.set(false)
+                }
+            }
+        }
+    }
 
+    /** List only locales actually returned by the system; provider ASR can auto-detect. */
+    private fun cmdLanguages(args: OffloadArgs): NativeOffloadResult {
+        val latch = CountDownLatch(1)
+        val tags = AtomicReference<List<String>>(emptyList())
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                tags.set(getResultExtras(false)?.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES).orEmpty())
+                latch.countDown()
+            }
+        }
+        context.sendOrderedBroadcast(Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS), null,
+            receiver, Handler(Looper.getMainLooper()), 0, null, null)
+        val reported = latch.await(3, TimeUnit.SECONDS)
         val prefix = args.get("language")
         val items = JSONArray()
-        for (tag in resultRef.get().sorted()) {
-            if (!prefix.isNullOrBlank() && !tag.startsWith(prefix)) continue
-            val locale = java.util.Locale.forLanguageTag(tag.replace('_', '-'))
-            items.put(
-                JSONObject()
-                    .put("locale", tag)
-                    .put("display_name", locale.displayName.ifEmpty { tag }),
-            )
+        for (tag in tags.get().distinct().sorted()) {
+            if (!prefix.isNullOrBlank() && !tag.startsWith(prefix, ignoreCase = true)) continue
+            items.put(JSONObject().put("locale", tag)
+                .put("display_name", Locale.forLanguageTag(tag.replace('_', '-')).displayName.ifEmpty { tag }))
         }
-        val body = JSONObject()
-            .put("locales", items)
-            .put("count", items.length())
-            .toString()
-        return NativeOffloadResult(0, OffloadOutput.formatBody(body, args) + "\n")
+        return output(args, JSONObject().put("locales", items).put("count", items.length())
+            .put("system_languages_reported", reported && tags.get().isNotEmpty())
+            .put("provider_auto_detect", ProviderSpeechRecognitionEngine(context).isAvailable))
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    private fun sourceIsMic(source: String): Boolean {
-        val s = source.trim().lowercase()
-        return s.isEmpty() || s == "mic" || s == "system-mic" || s == "system_mic" || s == "microphone"
-    }
-
-    /**
-     * Resolve a `/var/minis/...`-style Linux path to a host File via
-     * [PRootKernel]'s global bind-mount table. Per-session paths
-     * (attachments / offloads / workspace / browser) work as long as the
-     * owning session is the most-recent shell to boot — last-writer-wins
-     * per the kernel's documentation.
-     */
-    private fun resolveSourcePath(source: String): File? {
-        val trimmed = source.trim()
-        if (trimmed.isEmpty()) return null
-        return try {
-            if (trimmed.startsWith("/")) {
-                PRootKernel.resolveHostPath(trimmed) ?: File(trimmed)
-            } else {
-                File(trimmed)
-            }
-        } catch (e: Throwable) {
-            AppLogger.warning(TAG, "resolveSourcePath('$trimmed') failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun hasMic() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-        PackageManager.PERMISSION_GRANTED
+    private fun hasMic() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun ensureMicPermission(args: OffloadArgs): NativeOffloadResult? {
         if (hasMic()) return null
-        AppLogger.warning(TAG, "RECORD_AUDIO not granted — routing through permission flow")
         val result = runBlocking {
-            var r = OffloadPermissionManager.requestAndroidPermission(
-                listOf(Manifest.permission.RECORD_AUDIO),
-            )
+            var r = OffloadPermissionManager.requestAndroidPermission(listOf(Manifest.permission.RECORD_AUDIO))
             if (r == OffloadPermissionManager.AndroidPermissionResult.DENIED &&
-                OffloadPermissionManager.pollForPermissionGrant({ hasMic() })
-            ) {
-                AppLogger.info(TAG, "Mic permission granted during post-DENY poll")
+                OffloadPermissionManager.pollForPermissionGrant({ hasMic() })) {
                 r = OffloadPermissionManager.AndroidPermissionResult.GRANTED
             }
             if (r == OffloadPermissionManager.AndroidPermissionResult.DENIED) {
@@ -269,197 +278,52 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
                         settingsAction = android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                         requiresPackageUri = true,
                         positiveLabel = "Open Settings",
-                    ),
-                    check = { hasMic() },
+                    ), check = { hasMic() },
                 )
             }
             r
         }
         return when (result) {
             OffloadPermissionManager.AndroidPermissionResult.GRANTED -> null
-            OffloadPermissionManager.AndroidPermissionResult.DENIED -> NativeOffloadResult(
-                77,
-                OffloadOutput.formatBody(
-                    JSONObject().put("error", "permission_denied")
-                        .put("message", "The user declined the microphone permission.")
-                        .toString(),
-                    args,
-                ) + "\n",
-            )
-            OffloadPermissionManager.AndroidPermissionResult.TIMEOUT -> NativeOffloadResult(
-                77,
-                OffloadOutput.formatBody(
-                    JSONObject().put("error", "timeout")
-                        .put("message", "Timed out waiting for the user to grant the microphone permission.")
-                        .toString(),
-                    args,
-                ) + "\n",
-            )
+            OffloadPermissionManager.AndroidPermissionResult.DENIED -> error(args, "permission_denied", "The user declined the microphone permission.", 77)
+            OffloadPermissionManager.AndroidPermissionResult.TIMEOUT -> error(args, "timeout", "Timed out waiting for microphone permission.", 77)
         }
     }
 
-    private fun recognize(language: String?, maxResults: Int, timeoutSec: Long): String {
-        val latch = CountDownLatch(1)
-        val resultRef = java.util.concurrent.atomic.AtomicReference("""{"error": "no result"}""")
-        val mainHandler = Handler(Looper.getMainLooper())
+    private fun output(args: OffloadArgs, body: JSONObject, exit: Int = 0) =
+        NativeOffloadResult(exit, OffloadOutput.formatBody(body.toString(), args) + "\n")
 
-        // [T-android-speech-error10] C4: every exit path must destroy the
-        // recognizer exactly once. Previously destroy() only ran in the
-        // onResults/onError callbacks — a latch timeout ORPHANED the
-        // recognizer, and repeated runs exhausted the system recognizer
-        // service quota, after which every listen failed with
-        // ERROR_TOO_MANY_REQUESTS (10). Destroy always runs on the main
-        // looper (the creation thread, as SpeechRecognizer requires).
-        val recognizerRef = java.util.concurrent.atomic.AtomicReference<SpeechRecognizer?>(null)
-        val destroyed = java.util.concurrent.atomic.AtomicBoolean(false)
-        fun destroyRecognizerOnce() {
-            if (!destroyed.compareAndSet(false, true)) return
-            val r = recognizerRef.getAndSet(null) ?: return
-            try {
-                r.destroy()
-            } catch (e: Throwable) {
-                AppLogger.warning(TAG, "recognizer destroy threw: ${e.message}")
-            }
-        }
-
-        mainHandler.post {
-            val recognizer = try {
-                // [T-android-speech-error10] Prefer the on-device recognizer
-                // on S+ (mirrors SystemSpeechRecognitionEngine): it avoids
-                // the shared cloud recognizer service whose request quota
-                // the orphaned sessions were exhausting. Fall back to the
-                // regular recognizer when on-device isn't supported.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    try {
-                        SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-                    } catch (_: Throwable) {
-                        SpeechRecognizer.createSpeechRecognizer(context)
-                    }
-                } else {
-                    SpeechRecognizer.createSpeechRecognizer(context)
-                }
-            } catch (e: Throwable) {
-                resultRef.set(
-                    JSONObject().put("error", "recognizer_creation_failed")
-                        .put("message", "Could not create SpeechRecognizer: ${e.message}")
-                        .toString(),
-                )
-                latch.countDown()
-                return@post
-            }
-            recognizerRef.set(recognizer)
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, maxResults)
-                if (language != null) putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            }
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val confs = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
-                    val json = JSONObject()
-                    json.put("text", matches?.firstOrNull() ?: "")
-                    if (matches != null && matches.size > 1) {
-                        val alts = JSONArray()
-                        for (i in matches.indices) {
-                            val a = JSONObject().put("text", matches[i])
-                            if (confs != null && i < confs.size) a.put("confidence", String.format("%.2f", confs[i]))
-                            alts.put(a)
-                        }
-                        json.put("alternatives", alts)
-                    }
-                    resultRef.set(json.toString(2))
-                    destroyRecognizerOnce()
-                    latch.countDown()
-                }
-
-                override fun onError(error: Int) {
-                    val requestedLang = language ?: "default"
-                    val msg = when (error) {
-                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
-                        SpeechRecognizer.ERROR_CLIENT -> "Client error"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions (RECORD_AUDIO required)"
-                        SpeechRecognizer.ERROR_NETWORK -> "Network error"
-                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized"
-                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
-                        SpeechRecognizer.ERROR_SERVER -> "Server error"
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input detected"
-                        // [T-android-speech-error10] Codes below use literal
-                        // ints: their constants need API 31/33 while we
-                        // compile against older listener call sites too.
-                        // 10 = ERROR_TOO_MANY_REQUESTS (API 31)
-                        10 -> "Too many recognition requests — the system recognizer service is saturated (orphaned sessions?)"
-                        // 11 = ERROR_SERVER_DISCONNECTED (API 31)
-                        11 -> "Recognition service disconnected"
-                        // 12 = ERROR_LANGUAGE_NOT_SUPPORTED (API 33)
-                        12 -> "Language not supported by the recognizer (requested: $requestedLang)"
-                        // 13 = ERROR_LANGUAGE_UNAVAILABLE (API 33)
-                        13 -> "Language not currently available — model may need downloading (requested: $requestedLang)"
-                        else -> "Unknown error ($error)"
-                    }
-                    resultRef.set(JSONObject().put("error", msg).toString(2))
-                    destroyRecognizerOnce()
-                    latch.countDown()
-                }
-
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            recognizer.startListening(intent)
-        }
-
-        if (!latch.await(timeoutSec, TimeUnit.SECONDS)) {
-            // [T-android-speech-error10] The timeout path previously leaked
-            // the recognizer (see destroyRecognizerOnce above). Destroy on
-            // the main handler — the thread that created it.
-            mainHandler.post { destroyRecognizerOnce() }
-            return """{"error": "speech recognition timed out after ${timeoutSec}s"}"""
-        }
-        return resultRef.get()
-    }
+    private fun error(args: OffloadArgs, kind: String, message: String, exit: Int = 1) =
+        output(args, JSONObject().put("error", kind).put("message", message), exit)
 
     companion object {
         private const val TAG = "SpeechOffload"
         private const val HELP = """android-speech — speech recognition (audio → text)
 
-Usage:
-  android-speech <command> [options]
+Usage: android-speech <transcribe|listen|languages|status> [options]
 
-COMMANDS:
-  transcribe   Transcribe from system mic (file source coming later)
-  listen       Alias for transcribe (legacy)
-  languages    List available recognition locales
-  status       Check speech recognition availability
+  --source <mic|path>       Microphone (default) or sandbox audio file
+  --engine <auto|provider|system>  Use configured Voice Input ASR; keep system recognition available
+  --duration <1..60>       Maximum mic capture seconds (default: 30)
+  --timeout <1..300>       Warmup/transcription deadline seconds, plus mic duration (default: 120)
+  --language <locale>      Language hint (e.g. en-US, zh-CN)
+  --on-device             Prefer offline system recognition; language packs may be required
+  --max <1..20>            Legacy option accepted; adapters return the best transcript
+  --compact, -q, --quiet   Shape JSON output
+  --help, -h              Show help
 
-OPTIONS:
-  --help, -h           Show this help message
-  --compact            Minimize JSON output
-  -q, --quiet          Output only data field
-  --source <mic|path>  Source: system mic (default) or audio file path
-  --duration <sec>     Recording duration for mic source (default: 30)
-  --language <locale>  Recognition locale (e.g. en-US, zh-CN)
-  --max <N>            Maximum number of result candidates (default: 3)
-
-EXAMPLES:
+Examples:
   android-speech transcribe --duration 5
-  android-speech transcribe --source mic --language zh-CN --duration 15
   android-speech transcribe --source /var/minis/attachments/meeting.m4a
-  android-speech languages
-  android-speech languages --language en
+  android-speech transcribe --engine system --language zh-CN
   android-speech status
 
-Notes:
-  - Requires RECORD_AUDIO permission for mic transcription.
-  - Audio-file transcription returns `error: not_supported` on Android
-    today; the path is validated and reported back so future engine work
-    can wire through without changing the CLI.
+Mic input requires RECORD_AUDIO. File input does not request it.
+Files: up to 25 MiB / 300 seconds, using installed Android audio decoders.
+Paths must stay within /var/minis/{attachments,offloads,workspace,browser,shared};
+relative paths use the shell cwd. Private paths require the requesting session.
+System file input is best-effort on Android 13+; vendor services may reject it.
+Availability checks service/configuration locally; they do not prove network or API credentials work.
 """
     }
 }

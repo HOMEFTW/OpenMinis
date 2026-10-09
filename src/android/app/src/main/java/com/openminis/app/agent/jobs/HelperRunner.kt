@@ -148,6 +148,11 @@ object HelperRunner {
      */
     const val QUEUED_RESUME_CHILD_KEY = "__resume_child"
 
+    /** Resume lost or timed-out work, never duplicate a live or completed run. */
+    fun canResumeChild(payloadStatus: String, latestState: AgentJobState?, completing: Boolean = false): Boolean =
+        !completing && if (latestState != null) latestState == AgentJobState.TIMEOUT && payloadStatus == "timeout"
+        else payloadStatus == "running" || payloadStatus == "timeout"
+
     /**
      * [T-subagent-steer-continues-loop] Restarts an idle child's loop so a
      * pending course correction is actually delivered. Byte-identical to iOS

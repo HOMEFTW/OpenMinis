@@ -38,11 +38,11 @@ object SyntaxHighlighter {
 
     // Token regex: strings, comments, numbers, words
     private val TOKEN_REGEX = Regex(
-        """(//[^\n]*|#[^\n]*|/\*[\s\S]*?\*/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b\d+\.?\d*\b)|(\b[a-zA-Z_]\w*\b)|([^\s\w]+|\s+)"""
+        """(//[^\n]*|#[^\n]*|/\*[\s\S]*?\*/)|("(?:\\.|[^"\\])*+"|'(?:\\.|[^'\\])*+'|`(?:\\.|[^`\\])*+`)|(\b\d+\.?\d*\b)|(\b[a-zA-Z_]\w*\b)|([^\s\w]+|\s+)"""
     )
 
     fun highlight(code: String, language: String): AnnotatedString = buildAnnotatedString {
-        if (language.isEmpty()) {
+        if (language.isEmpty() || code.length > MarkdownWorkLimits.MAX_INLINE_CHARS) {
             pushStyle(SpanStyle(color = defaultColor))
             append(code)
             pop()

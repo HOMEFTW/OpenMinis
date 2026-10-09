@@ -25,10 +25,8 @@ import okhttp3.Request
  * so adding it would widen the gap between what we advertise and what we send
  * rather than close it.
  *
- * **Keep in lockstep with `AnthropicProvider.buildHeaders`'s `isOAuth` block**
- * — the values are one registered client identity, and a fingerprint that
- * matches on one path but not the other is the exact shape of this bug.
- * `ClaudeCliMimicryHeadersTest` fails if the two drift apart.
+ * Also used directly by AnthropicProvider for OAuth chat requests, so auth
+ * and chat cannot silently drift to different CLI versions.
  *
  * Mirrors the iOS set in `OAuthHTTPClient`'s interceptor.
  */

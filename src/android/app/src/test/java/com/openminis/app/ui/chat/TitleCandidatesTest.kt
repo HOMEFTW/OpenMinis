@@ -137,6 +137,39 @@ class TitleCandidatesTest {
     // ---- the walk ---------------------------------------------------------
 
     @Test
+    fun `a stalled candidate times out and the next one can succeed`() = runTest {
+        val asked = mutableListOf<String>()
+        val result = TitleCandidates.walk(listOf(a, b), origin = "test", perAttemptTimeoutMs = 100,
+            totalTimeoutMs = 500) { e ->
+            asked += e.id
+            if (e.id == "A") kotlinx.coroutines.delay(1_000)
+            "title"
+        }
+        assertEquals("title", result)
+        assertEquals(listOf("A", "B"), asked)
+        assertEquals(100L, currentTime)
+    }
+
+    @Test
+    fun `total deadline bounds all attempts and does not cancel the caller`() = runTest {
+        val result = TitleCandidates.walk(listOf(a, b, c), origin = "test", perAttemptTimeoutMs = 100,
+            totalTimeoutMs = 150) { kotlinx.coroutines.delay(1_000); "late" }
+        assertNull(result)
+        assertEquals(150L, currentTime)
+        assertTrue(coroutineContext[kotlinx.coroutines.Job]!!.isActive)
+    }
+
+    @Test
+    fun `total deadline includes pauses between models`() = runTest {
+        var tries = 0
+        val result = TitleCandidates.walk(listOf(a, b), origin = "test", pauseMs = 1_000,
+            totalTimeoutMs = 50) { tries++; null }
+        assertNull(result)
+        assertEquals(1, tries)
+        assertEquals(50L, currentTime)
+    }
+
+    @Test
     fun `a failing model moves on to the next, with the pause between tries`() = runTest {
         val asked = mutableListOf<String>()
         val r = TitleCandidates.walk(listOf(a, b, c), origin = "t", pauseMs = 1_500) { e ->

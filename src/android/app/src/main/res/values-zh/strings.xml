@@ -682,7 +682,11 @@
     <string name="appearance_section_language">语言</string>
     <string name="appearance_language_footer">自定义此 App 的显示语言。选择「系统」将跟随设备语言设置。</string>
     <string name="appearance_section_app_icon">应用图标</string>
-    <string name="appearance_app_icon_footer">更换桌面图标。切换后桌面图标可能需要几秒钟才会刷新。</string>
+    <string name="appearance_app_icon_footer">切换桌面图标及应用内品牌形象，默认使用 GPT 龙娘。桌面图标可能需要几秒钟才会刷新。</string>
+    <string name="brand_icon_gpt">GPT 龙娘</string>
+    <string name="brand_icon_deepseek">DeepSeek</string>
+    <string name="brand_icon_claude">Claude</string>
+    <string name="brand_icon_change_failed">图标切换失败，请重试。</string>
     <string name="appearance_app_icon_auto">自动</string>
     <string name="appearance_app_icon_light">浅色</string>
     <string name="appearance_app_icon_dark">深色</string>
@@ -2188,4 +2192,11 @@
     <string name="chat_wallpaper_override">当前透明度仅适用于此对话。</string>
     <string name="chat_wallpaper_restore_default">恢复默认透明度</string>
     <string name="chat_wallpaper_unavailable">当前模型暂无背景，切换到支持的模型后会应用你的设置。</string>
+    <string name="settings_memory_daily_injection_title">自动加入近期记忆日志</string>
+    <string name="settings_memory_daily_injection_subtitle">对所有会话的下一轮生效。关闭后不再自动注入每日日志，减少提示词变化；全局记忆和记忆工具仍可使用。</string>
+    <string name="provider_ca_title">自定义服务器证书</string>
+    <string name="provider_ca_description">粘贴已保存 HTTPS 服务器的 CA 证书（PEM）。仅用于该主机与端口，包括使用同一地址的其他账号。留空保存可移除。新连接生效，请先停止正在进行的回复。使用自定义证书的连接不自动跟随重定向。</string>
+    <string name="provider_ca_pem">CA 证书（PEM）</string>
+    <string name="provider_ca_saved">证书设置已保存。</string>
+    <string name="provider_ca_invalid">保存失败，请检查 HTTPS 地址和有效、未过期的 CA 证书。</string>
 </resources>

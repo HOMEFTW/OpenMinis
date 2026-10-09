@@ -46,7 +46,7 @@ class GeminiProvider(
     override val name = "Google"
     override var imageNormalizer: (ByteArray, String) -> ImageBudget.NormalizedImage? = ImageBudget::normalizeImage
 
-    private val client = OkHttpClient.Builder()
+    private val baseClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -54,6 +54,7 @@ class GeminiProvider(
         // Network-transition eviction must reach provider connections.
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .build()
+    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, basePath)
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>,

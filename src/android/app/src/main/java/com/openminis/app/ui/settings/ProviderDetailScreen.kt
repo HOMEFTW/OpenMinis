@@ -363,6 +363,13 @@ fun ProviderDetailScreen(
         }
 
         // ─── API Format (OpenAI API-key only) ───────────────────────
+        if (!instance.customBaseURL.isNullOrBlank() && instance.providerType in setOf(
+                ProviderType.openAI, ProviderType.openAIResponses, ProviderType.anthropic,
+                ProviderType.gemini, ProviderType.deepSeek,
+            )) {
+            EndpointCertificateSettings(instance.customBaseURL!!)
+        }
+
         if (instance.providerType == ProviderType.openAI &&
             instance.credentialType != com.openminis.app.data.model.ProviderCredential.oauth
         ) {

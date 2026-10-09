@@ -91,7 +91,7 @@ class ScheduledNotificationReceiver : BroadcastReceiver() {
 
         val notifId = id.hashCode() and 0x7FFFFFFF
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(com.openminis.app.data.repository.AppIconRepository.current(context).notificationRes)
             .setContentTitle(title)
             .setContentText(body)
             .setAutoCancel(true)

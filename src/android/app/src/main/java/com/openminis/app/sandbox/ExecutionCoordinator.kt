@@ -57,13 +57,19 @@ object ExecutionCoordinator {
         suspend fun attempt(noSeccomp: Boolean): Pair<String, Int> =
             FreshProcessShell(appContext, sessionId, mounts, noSeccomp)
                 .execute(command, timeout, env, lineCallback)
-        var result = attempt(false)
+        val compatibility = SeccompFallbackPolicy.compatibilityRequired
+        var result = attempt(compatibility)
         val firstMs = (System.nanoTime() - started) / 1_000_000
-        if (SeccompFallbackPolicy.shouldRetryWithoutSeccomp(result.second, firstMs, result.first.isNotEmpty(), false)) {
+        if (SeccompFallbackPolicy.shouldRetryWithoutSeccomp(result.second, firstMs, result.first.isNotEmpty(), compatibility)) {
             currentCoroutineContext().ensureActive()
             result = attempt(true)
         }
-        val text = TerminalSanitizer.truncateIfNeeded(TerminalSanitizer.sanitize(result.first))
+        val tracerFailed = SeccompFallbackPolicy.observeTracerFailure(result.second, result.first)
+        val compatibilityNote = if (tracerFailed) {
+            "\nPRoot syscall tracing failed. Future shell launches in this app process will use compatibility mode. " +
+                "This command was not replayed; inspect partial results before retrying."
+        } else ""
+        val text = TerminalSanitizer.truncateIfNeeded(TerminalSanitizer.sanitize(result.first)) + compatibilityNote
         val output = if (result.second != 0 && result.second != 124) ShellExitCode.ensureSuffix(text, result.second) else text
         return CommandResult(output, result.second, (System.nanoTime() - started) / 1_000_000)
     }

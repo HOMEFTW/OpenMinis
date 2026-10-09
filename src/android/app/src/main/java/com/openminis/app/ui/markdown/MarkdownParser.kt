@@ -58,6 +58,16 @@ object MarkdownParser {
 
     /** Regex for a standalone `![alt](url)` node on its own line. */
     private val standaloneImageRegex = Regex("""^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$""")
+    private val headingRegex = Regex("^(#{1,6})\\s+(.+)$")
+    private val bulletRegex = Regex("^\\s{0,3}[-*+]\\s+(.*)$")
+    private val bulletContinuationRegex = Regex("^\\s{0,3}[-*+]\\s")
+    private val bulletStartRegex = Regex("^\\s{0,3}[-*+]\\s+")
+    private val numberedRegex = Regex("^\\s{0,3}(\\d{1,2})[.)\\s]\\s*(.*)$")
+    private val numberedStartRegex = Regex("^\\s{0,3}\\d{1,2}[.)\\s]\\s")
+    private val tableCellSeparatorRegex = Regex("^:?-+:?$")
+    private val blankMathLineRegex = Regex("\\n[ \\t]*\\n")
+    private val mathTrailingLineRegex = Regex("\\n[ \\t]*$")
+    private val mathPlaceholderRegex = Regex("${ORC}MATH(\\d+)${ORC}")
 
     /**
      * Classify a media URL by file extension. Extracts the extension from the
@@ -88,14 +98,22 @@ object MarkdownParser {
      * KaTeX. Mirrors iOS MarkdownMathExtractor.extract → cmark → restore.
      */
     fun parseWithMath(markdown: String): ParseResult {
+        if (!MarkdownWorkLimits.canParseBlocks(markdown)) {
+            return ParseResult(listOf(Block.Paragraph(markdown)), emptyList())
+        }
         val (cleaned, spans) = extractMath(markdown)
-        val rawBlocks = parse(cleaned)
+        val rawBlocks = parseBlocks(cleaned, 0)
         val restored = restoreMath(rawBlocks, spans)
         return ParseResult(restored, spans)
     }
 
     fun parse(markdown: String): List<Block> {
-        android.util.Log.d("MdParser", "parse() len=${markdown.length} preview=${markdown.take(160).replace("\n","\\n")}")
+        if (!MarkdownWorkLimits.canParseBlocks(markdown)) return listOf(Block.Paragraph(markdown))
+        return parseBlocks(markdown, 0)
+    }
+
+    private fun parseBlocks(markdown: String, depth: Int): List<Block> {
+        if (depth >= MarkdownWorkLimits.MAX_NESTING) return listOf(Block.Paragraph(markdown))
         val lines = markdown.lines()
         val blocks = mutableListOf<Block>()
         var i = 0
@@ -124,14 +142,14 @@ object MarkdownParser {
             }
 
             // Thematic break
-            if (line.matches(Regex("^\\s{0,3}([-*_])\\s*\\1\\s*\\1(\\s*\\1)*\\s*$"))) {
+            if (isThematicBreak(line)) {
                 blocks.add(Block.ThematicBreak)
                 i++
                 continue
             }
 
             // ATX Heading
-            val headingMatch = Regex("^(#{1,6})\\s+(.+)$").find(line)
+            val headingMatch = headingRegex.find(line)
             if (headingMatch != null) {
                 val level = headingMatch.groupValues[1].length
                 val content = headingMatch.groupValues[2].trimEnd().removeSuffix("#").trimEnd()
@@ -148,7 +166,7 @@ object MarkdownParser {
                     quoteLines.add(if (ql == ">") "" else ql.removePrefix("> "))
                     i++
                 }
-                val inner = parse(quoteLines.joinToString("\n"))
+                val inner = parseBlocks(quoteLines.joinToString("\n"), depth + 1)
                 blocks.add(Block.Blockquote(inner))
                 continue
             }
@@ -164,17 +182,17 @@ object MarkdownParser {
             }
 
             // Bullet list (-, *, +)
-            val bulletMatch = Regex("^\\s{0,3}[-*+]\\s+(.*)$").find(line)
+            val bulletMatch = bulletRegex.find(line)
             if (bulletMatch != null) {
                 val items = mutableListOf<ListItem>()
                 while (i < lines.size) {
-                    val bm = Regex("^\\s{0,3}[-*+]\\s+(.*)$").find(lines[i])
+                    val bm = bulletRegex.find(lines[i])
                     if (bm == null) break
                     val content = bm.groupValues[1]
                     items.add(parseListItem(content))
                     i++
                     // Collect continuation lines (indented)
-                    while (i < lines.size && lines[i].startsWith("  ") && !Regex("^\\s{0,3}[-*+]\\s").matches(lines[i])) {
+                    while (i < lines.size && lines[i].startsWith("  ") && !bulletContinuationRegex.matches(lines[i])) {
                         items[items.lastIndex] = items.last().copy(
                             content = items.last().content + "\n" + lines[i].trimStart()
                         )
@@ -190,12 +208,12 @@ object MarkdownParser {
             // misparsed as ordered-list item #2020 (user report). Real lists
             // rarely exceed 99 items; CommonMark itself caps markers at 9
             // digits, we deliberately go tighter.
-            val numMatch = Regex("^\\s{0,3}(\\d{1,2})[.)\\s]\\s*(.*)$").find(line)
+            val numMatch = numberedRegex.find(line)
             if (numMatch != null) {
                 val startNum = numMatch.groupValues[1].toIntOrNull() ?: 1
                 val items = mutableListOf<ListItem>()
                 while (i < lines.size) {
-                    val nm = Regex("^\\s{0,3}(\\d{1,2})[.)\\s]\\s*(.*)$").find(lines[i])
+                    val nm = numberedRegex.find(lines[i])
                     if (nm == null) break
                     items.add(ListItem(nm.groupValues[2]))
                     i++
@@ -233,10 +251,10 @@ object MarkdownParser {
                 val pl = lines[i]
                 if (pl.isBlank() || pl.trimStart().startsWith("```") ||
                     pl.trimStart().startsWith("# ") || pl.trimStart().startsWith("> ") ||
-                    Regex("^\\s{0,3}[-*+]\\s+").containsMatchIn(pl) ||
+                    bulletStartRegex.containsMatchIn(pl) ||
                     // Keep in sync with the numbered-list marker above (≤2 digits).
-                    Regex("^\\s{0,3}\\d{1,2}[.)\\s]\\s").containsMatchIn(pl) ||
-                    pl.matches(Regex("^\\s{0,3}([-*_])\\s*\\1\\s*\\1(\\s*\\1)*\\s*$")) ||
+                    numberedStartRegex.containsMatchIn(pl) ||
+                    isThematicBreak(pl) ||
                     standaloneImageRegex.containsMatchIn(pl)
                 ) break
                 paraLines.add(pl)
@@ -246,6 +264,21 @@ object MarkdownParser {
         }
 
         return blocks
+    }
+
+    // The repeated backreference regex used to recurse once per marker on a long rule.
+    private fun isThematicBreak(line: String): Boolean {
+        fun regexWhitespace(ch: Char) = ch == ' ' || ch in '\t'..'\r'
+        var i = 0
+        while (i < line.length && regexWhitespace(line[i]) && i < 3) i++
+        if (i >= line.length || line[i] !in "-*_") return false
+        val marker = line[i]
+        var count = 0
+        while (i < line.length) {
+            val ch = line[i++]
+            if (ch == marker) count++ else if (!regexWhitespace(ch)) return false
+        }
+        return count >= 3
     }
 
     private fun parseListItem(content: String): ListItem {
@@ -263,7 +296,7 @@ object MarkdownParser {
         val trimmed = line.trim()
         if (!trimmed.contains('-')) return false
         val cells = trimmed.split('|').filter { it.isNotBlank() }
-        return cells.all { it.trim().matches(Regex("^:?-+:?$")) }
+        return cells.all { tableCellSeparatorRegex.matches(it.trim()) }
     }
 
     private fun parseTable(lines: List<String>, startIdx: Int): Pair<Block.Table, Int>? {
@@ -363,6 +396,11 @@ object MarkdownParser {
         fun atLineStart(idx: Int): Boolean = idx == 0 || chars[idx - 1] == '\n' || chars[idx - 1] == '\r'
 
         while (i < n) {
+            // Avoid creating thousands of math tiles from a single hostile fragment.
+            if (spans.size >= 256) {
+                out.append(chars, i, n)
+                break
+            }
             // Detect opening fence at line start
             if (!inFence && atLineStart(i)) {
                 val c = chars[i]
@@ -404,7 +442,8 @@ object MarkdownParser {
                 while (j < n && chars[j] == '`') { run++; j++ }
                 var k = j
                 var found = false
-                while (k <= n - run) {
+                val searchEnd = minOf(n, j + MarkdownWorkLimits.MAX_INLINE_CHARS)
+                while (k <= searchEnd - run) {
                     var match = 0
                     while (k + match < n && chars[k + match] == '`') match++
                     if (match == run) {
@@ -529,7 +568,7 @@ object MarkdownParser {
     }
 
     private fun findClose(chars: String, from: Int, close: String): Int? {
-        val n = chars.length
+        val n = minOf(chars.length, from + MarkdownWorkLimits.MAX_INLINE_CHARS)
         var i = from
         while (i <= n - close.length) {
             var match = true
@@ -607,7 +646,8 @@ object MarkdownParser {
                 while (j < n && chars[j] == '`') { run++; j++ }
                 var k = j
                 var closed = -1
-                while (k < n) {
+                val searchEnd = minOf(n, j + MarkdownWorkLimits.MAX_INLINE_CHARS)
+                while (k < searchEnd) {
                     if (chars[k] == '`') {
                         var r2 = 0
                         var m = k
@@ -635,20 +675,20 @@ object MarkdownParser {
     private fun isPlausibleDisplayBody(body: String): Boolean {
         if (!body.contains('\n')) return true
         // A blank line means a paragraph break — prose, not one formula.
-        if (Regex("\\n[ \\t]*\\n").containsMatchIn(body)) return false
+        if (blankMathLineRegex.containsMatchIn(body)) return false
         // The conventional block shape puts the closing `$$` alone on its own
         // line, i.e. the body ends with a newline (plus optional indent). That
         // is a strong enough signal on its own — requiring a LaTeX glyph here
         // too would wrongly demote glyph-free but valid math such as
         // "$$\n1 + 2 = 3\n$$" to plain text.
-        if (Regex("\\n[ \\t]*$").containsMatchIn(body)) return true
+        if (mathTrailingLineRegex.containsMatchIn(body)) return true
         // Otherwise the closer is mid-line, which is the shape a stray
         // delimiter in prose produces — require a LaTeX-ish glyph.
         return body.any { it == '\\' || it == '^' || it == '_' || it == '{' || it == '}' }
     }
 
     private fun findDoubleDollar(chars: String, from: Int, codeMask: BooleanArray?): Int? {
-        val n = chars.length
+        val n = minOf(chars.length, from + MarkdownWorkLimits.MAX_INLINE_CHARS)
         var i = from
         while (i < n - 1) {
             if (chars[i] == '$' && chars[i + 1] == '$' &&
@@ -660,7 +700,7 @@ object MarkdownParser {
     }
 
     private fun findSingleDollar(chars: String, from: Int, codeMask: BooleanArray?): Int? {
-        val n = chars.length
+        val n = minOf(chars.length, from + MarkdownWorkLimits.MAX_INLINE_CHARS)
         var i = from
         while (i < n) {
             if (chars[i] == '\\' && i + 1 < n) { i += 2; continue }
@@ -745,9 +785,8 @@ object MarkdownParser {
 
         val out = mutableListOf<Block>()
         val buf = StringBuilder()
-        val regex = Regex("$ORC" + "MATH(\\d+)" + "$ORC")
         var lastEnd = 0
-        for (match in regex.findAll(content)) {
+        for (match in mathPlaceholderRegex.findAll(content)) {
             val full = match.value
             val span = map[full] ?: continue
             // Append text before this placeholder.

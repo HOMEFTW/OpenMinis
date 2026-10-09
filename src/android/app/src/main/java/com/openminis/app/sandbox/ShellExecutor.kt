@@ -48,7 +48,8 @@ object ShellExecutor {
     ): ShellResult = withContext(Dispatchers.IO) {
         check(PRootKernel.isBooted) { "PRootKernel must be booted before executing commands" }
 
-        val first = runOnce(context, command, timeout, environment, lineCallback, noSeccomp = false)
+        val compatibility = SeccompFallbackPolicy.compatibilityRequired
+        val first = runOnce(context, command, timeout, environment, lineCallback, noSeccomp = compatibility)
 
         // [T-android-seccomp-selfheal / GH#186] If the child died on an early
         // fatal signal with no output at all, the host kernel's seccomp fast
@@ -58,7 +59,7 @@ object ShellExecutor {
                 exitCode = first.exitCode,
                 durationMs = first.durationMs,
                 producedOutput = first.output.isNotEmpty(),
-                alreadyRetried = false,
+                alreadyRetried = compatibility,
             )
         ) {
             return@withContext first

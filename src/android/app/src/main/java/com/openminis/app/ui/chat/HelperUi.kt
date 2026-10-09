@@ -534,7 +534,7 @@ internal fun HelperToolBlock(
     // [T-android-subagent-card-resume] iOS `resuming`. Once a resume starts, the
     // block flips to Running and the button leaves on its own; a queued one
     // stays interrupted until a slot frees, so the tap must not be repeatable.
-    var resuming by remember(block.id) { mutableStateOf(false) }
+    var resuming by remember(block.id, block.content, block.toolStatus) { mutableStateOf(false) }
     val accent = helperAccent()
     val shape = RoundedCornerShape(12.dp)
     Row(
@@ -619,7 +619,7 @@ internal fun HelperToolBlock(
                 )
             }
             Spacer(Modifier.width(8.dp))
-        } else if (info.finished?.status == "interrupted" && onResume != null) {
+        } else if (info.finished?.status in setOf("interrupted", "timeout") && onResume != null) {
             // [T-android-subagent-card-resume] Same slot as Stop, and its
             // counterpart: an accent disc with a restart arrow (iOS
             // arrow.clockwise). Once the run is going again the card turns

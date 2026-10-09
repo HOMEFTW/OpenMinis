@@ -139,6 +139,9 @@ interface ChatDao {
     @Query("UPDATE sessions SET title = :title, category = COALESCE(:category, category), updated_at = :updatedAt WHERE id = :id")
     suspend fun updateSessionTitleAndCategory(id: String, title: String, category: String?, updatedAt: Long)
 
+    @Query("UPDATE sessions SET title = :title, category = COALESCE(:category, category), updated_at = :updatedAt WHERE id = :id AND title IS :expectedTitle")
+    suspend fun updateSessionTitleIfUnchanged(id: String, expectedTitle: String?, title: String, category: String?, updatedAt: Long): Int
+
     @Query("UPDATE sessions SET updated_at = :updatedAt WHERE id = :id")
     suspend fun touchSession(id: String, updatedAt: Long)
 

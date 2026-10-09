@@ -117,6 +117,9 @@ class ChatRepository(internal val dao: ChatDao) {
         dao.updateSessionTitleAndCategory(id, title, category, System.currentTimeMillis())
     }
 
+    suspend fun updateSessionTitleIfUnchanged(id: String, expectedTitle: String?, title: String, category: String? = null): Boolean =
+        dao.updateSessionTitleIfUnchanged(id, expectedTitle, title, category, System.currentTimeMillis()) == 1
+
     suspend fun updateSessionModel(sessionId: String, modelId: String) {
         dao.updateSessionModel(sessionId, modelId)
     }

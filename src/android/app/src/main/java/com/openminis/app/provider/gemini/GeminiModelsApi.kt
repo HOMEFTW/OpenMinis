@@ -56,7 +56,9 @@ object GeminiModelsApi {
 
         // [T-android-default-ua] brand outbound /v1beta/models request.
         builder.applyUserAgentOverride(null)
-        val response = client.newCall(builder.build()).execute()
+        val request = builder.build()
+        val response = com.openminis.app.network.EndpointCertificates.configure(client.newBuilder(), request.url.toString())
+            .build().newCall(request).execute()
         val body = response.body?.string() ?: return@withContext LLMModel.allGemini
 
         if (!response.isSuccessful) {

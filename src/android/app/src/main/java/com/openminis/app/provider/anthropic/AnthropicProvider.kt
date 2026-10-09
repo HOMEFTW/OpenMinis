@@ -83,7 +83,7 @@ class AnthropicProvider(
     /** Use Bearer auth for custom (non-Anthropic) base URLs or OAuth. */
     private val isCustomEndpoint: Boolean = basePath != "https://api.anthropic.com"
 
-    private val client = OkHttpClient.Builder()
+    private val baseClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -91,6 +91,7 @@ class AnthropicProvider(
         // Network-transition eviction must reach provider connections.
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .build()
+    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, basePath)
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>,
@@ -989,7 +990,7 @@ class AnthropicProvider(
      * inspects fields like `thinking`. See OpenAIProvider.buildRequest
      * for the same pattern.
      */
-    private fun buildRequest(bodyStr: String, body: JSONObject): Request {
+    internal fun buildRequest(bodyStr: String, body: JSONObject): Request {
         // T192: `basePath` may already end in `/v1` because
         // `ProviderInstance.effectiveBaseURL` appends `/v1` when
         // `appendV1Suffix=true` and the user-entered base doesn't end in `/v1`.
@@ -1064,17 +1065,9 @@ class AnthropicProvider(
         // Stainless / CLI fingerprint headers — only on OAuth; bump in lockstep
         // with sub2api when the real CLI version moves.
         if (isOAuth) {
-            builder.header("User-Agent", "claude-cli/2.1.195 (external, cli)")
-            builder.header("X-Stainless-Lang", "js")
-            builder.header("X-Stainless-Package-Version", "0.106.0")
-            builder.header("X-Stainless-OS", "Linux")
-            builder.header("X-Stainless-Arch", "arm64")
-            builder.header("X-Stainless-Runtime", "node")
-            builder.header("X-Stainless-Runtime-Version", "v24.18.0")
-            builder.header("X-Stainless-Retry-Count", "0")
-            builder.header("X-Stainless-Timeout", "600")
-            builder.header("X-App", "cli")
-            builder.header("Anthropic-Dangerous-Direct-Browser-Access", "true")
+            for ((name, value) in com.openminis.app.auth.ClaudeCliMimicryHeaders.ALL) {
+                builder.header(name, value)
+            }
         }
 
         if (isOAuth) {
@@ -1094,7 +1087,7 @@ class AnthropicProvider(
         // [T-provider-custom-user-agent] Applied last so a non-blank override
         // wins over the OAuth claude-cli UA above. null/blank → fall back to
         // the branded Minis UA on the regular apiKey path, but on the OAuth
-        // path keep the claude-cli/2.1.195 fingerprint set at line ~779 (the
+        // path keep the shared Claude CLI fingerprint (the
         // Anthropic OAuth backend pairs UA + X-Stainless-* and rejects calls
         // whose UA doesn't match the registered client identity). T-android-
         // default-ua: pass defaultUserAgent=null on OAuth, branded default

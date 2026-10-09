@@ -30,7 +30,7 @@ object ShortcutPinner {
 
         val icon: IconCompat = when {
             iconBitmap == null -> IconCompat.createWithResource(
-                context, R.mipmap.ic_launcher,
+                context, com.openminis.app.data.repository.AppIconRepository.current(context).iconRes,
             )
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
                 IconCompat.createWithAdaptiveBitmap(iconBitmap)

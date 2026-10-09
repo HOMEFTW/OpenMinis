@@ -86,7 +86,19 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
 
     /** Cheap check only: is a provider ASR selection resolvable right now? */
     override val isAvailable: Boolean
-        get() = !degraded && repository()?.resolveVoiceInputEntry() != null
+        get() = !degraded && repository()?.let { repo ->
+            repo.resolveVoiceInputCandidates().any { (instance, entry) ->
+                val key = repo.loadApiKey(instance.id)
+                (instance.allowsEmptyAPIKey || !key.isNullOrBlank()) &&
+                    VoiceProviderFactory.make(instance, key)?.let { provider ->
+                        provider.supportsVoiceInput || provider.usesChatBasedASR(entry.model)
+                    } == true
+            }
+        } == true
+
+    /** Preserve an explicit built-in/offline selection when the tool chooses automatically. */
+    internal val selectedSystemPreferOffline: Boolean?
+        get() = repository()?.resolveVoiceInputChoice()?.systemPreferOffline
 
     /** Cloud ASR is language-agnostic (auto-detect); no fixed locale list. */
     override val supportedLocales: List<Locale> = emptyList()
@@ -99,6 +111,8 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     private var holdFlushJob: Job? = null
     private val recording = AtomicBoolean(false)
     private val cancelled = AtomicBoolean(false)
+    private val recorderLock = Any()
+    private var activeRecorder: AudioRecord? = null
     private var degraded = false
 
     // [T-android-voice-system-fallback-cancel] One number per take. The System
@@ -276,7 +290,11 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             val buf = ByteArray(minBuf)
             val maxBytes = SAMPLE_RATE * 2 * MAX_RECORD_SECONDS
             try {
-                recorder.startRecording()
+                synchronized(recorderLock) {
+                    if (cancelled.get() || !recording.get()) return@launch
+                    activeRecorder = recorder
+                    recorder.startRecording()
+                }
                 listener.onReadyForSpeech()
                 // [T-voice-mic-preempted] Same silenced-capture check as the VAD.
                 var nextSilenceCheckAtMs = System.currentTimeMillis() + 400L
@@ -291,24 +309,34 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         }
                     }
                     val n = recorder.read(buf, 0, buf.size)
-                    if (n <= 0) continue
+                    if (n < 0) {
+                        if (!recording.get() || cancelled.get()) break
+                        throw java.io.IOException("AudioRecord read failed ($n)")
+                    }
+                    if (n == 0) continue
                     pcm.write(buf, 0, n)
                     listener.onRmsDb(rmsDb(buf, n))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "capture failed: ${e.message}", e)
                 recording.set(false)
-                listener.onError(MicInUse.captureFailure(appContext, recorder.audioSessionId), e.message)
+                if (!cancelled.get()) {
+                    listener.onError(MicInUse.captureFailure(appContext, recorder.audioSessionId), e.message)
+                }
                 return@launch
             } finally {
-                runCatching { recorder.stop() }
-                recorder.release()
+                synchronized(recorderLock) {
+                    if (activeRecorder === recorder) activeRecorder = null
+                    runCatching { recorder.stop() }
+                    recorder.release()
+                }
             }
 
             if (cancelled.get()) {
                 VoicePipelineLog.event("engine.capture.cancelled")
                 return@launch
             }
+            recording.set(false)
             val audio = pcm.toByteArray()
             VoicePipelineLog.event("engine.capture.end", "bytes" to audio.size)
             if (audio.isEmpty()) {
@@ -542,7 +570,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             val (instance, entry) = pair
             if (cancelled.get()) return
             val provider = VoiceProviderFactory.make(instance, repo.loadApiKey(instance.id))
-            if (provider == null) {
+            if (provider == null || (!provider.supportsVoiceInput && !provider.usesChatBasedASR(entry.model))) {
                 Log.w(TAG, "candidate ${instance.label} cannot serve voice input — skipping")
                 if (logEvents) VoicePipelineLog.event("engine.transcribe.skip", "model" to entry.baseModel.id)
                 continue
@@ -816,6 +844,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         // then hands the take to the transcription step itself, which delivers
         // onFinal/onError.
         recording.set(false)
+        synchronized(recorderLock) { runCatching { activeRecorder?.stop() } }
         // [T-android-vad-manual-stop] The VAD path has no such coroutine: its
         // audio only ever leaves through the detector's onVoiceEnd callback,
         // so it must be flushed explicitly BEFORE the detector is destroyed.
@@ -838,6 +867,8 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         supersedeTake()
         cancelled.set(true)
         recording.set(false)
+        synchronized(recorderLock) { runCatching { activeRecorder?.stop() } }
+        captureJob?.cancel()
         transcribeJob?.cancel()
         holdFlushJob?.cancel()
         holdFlushJob = null
@@ -847,6 +878,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         // Drop held audio: a cancelled session's partial utterance must never
         // surface in a later one.
         pendingSegments.clear()
+        stopVad()
     }
 
     /** Rough dB estimate over the chunk for the UI waveform. */

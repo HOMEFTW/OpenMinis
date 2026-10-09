@@ -458,7 +458,7 @@ class OpenAIProvider private constructor(
     // identity hash so concurrent streams can be disambiguated.
     var responseTimeoutSeconds: Int? = null
     private val responseWaitMs: Long get() = responseTimeoutSeconds?.coerceIn(30, 3600)?.times(1000L) ?: STREAM_TTFB_TIMEOUT_MS
-    private val client by lazy { OkHttpClient.Builder()
+    private val baseClient by lazy { OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(responseTimeoutSeconds?.coerceIn(30, 3600)?.toLong() ?: 600L, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -469,6 +469,7 @@ class OpenAIProvider private constructor(
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .eventListenerFactory { OkHttpNetTraceListener() }
         .build() }
+    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, basePath)
 
     /** Detect OpenRouter base URL. */
     private val isOpenRouter: Boolean = basePath.contains("openrouter.ai")
@@ -2002,7 +2003,8 @@ class OpenAIProvider private constructor(
                 if (urlStr.isNotEmpty()) {
                     try {
                         val dlReq = Request.Builder().url(urlStr).get().build()
-                        client.newCall(dlReq).execute().use { dlResp ->
+                        com.openminis.app.network.EndpointCertificates.client(baseClient, urlStr)
+                            .newCall(dlReq).execute().use { dlResp ->
                             if (!dlResp.isSuccessful) throw java.io.IOException("HTTP ${dlResp.code}")
                             val ctMime = dlResp.header("Content-Type")?.substringBefore(';')
                             if (ctMime == "text/html" || ctMime == "application/json") {

@@ -52,6 +52,11 @@ object ImageBudget {
 
     /** Default re-encode target longest edge in pixels. */
     const val MAX_EDGE_PX = 2000
+    /** Transport limit also applies to small, highly compressed screenshots. */
+    const val MAX_TRANSPORT_EDGE_PX = 8192
+
+    internal fun requiresDimensionResize(width: Int, height: Int): Boolean =
+        width > MAX_TRANSPORT_EDGE_PX || height > MAX_TRANSPORT_EDGE_PX
 
     /** Default re-encode JPEG quality (0-100). */
     const val JPEG_QUALITY = 80
@@ -99,6 +104,17 @@ object ImageBudget {
                 when (cachedValidationMime(data)) {
                     INVALID_MIME -> return null
                     magicMime -> return NormalizedImage(data, magicMime)
+                }
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                    cacheValidation(data, INVALID_MIME)
+                    return null
+                }
+                if (requiresDimensionResize(bounds.outWidth, bounds.outHeight)) {
+                    // Never cache the over-limit original as ready to send.
+                    return compressUnderBudgetOrNull(data, MAX_PER_IMAGE_BYTES, forceReencode = true)
+                        ?.let { NormalizedImage(it, "image/jpeg") }
                 }
                 if (!decodeSample(data)) {
                     cacheValidation(data, INVALID_MIME)

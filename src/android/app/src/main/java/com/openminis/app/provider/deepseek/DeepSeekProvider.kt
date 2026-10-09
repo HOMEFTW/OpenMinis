@@ -29,13 +29,14 @@ class DeepSeekProvider(
     override val defaultMaxOutputTokens = 256_000
     private val endpoint = messagesEndpoint(baseURL)
     private val idleTimeoutMs = responseTimeoutSeconds?.takeIf { it > 0 }?.toLong()?.times(1000) ?: 300_000L
-    private val client = OkHttpClient.Builder()
+    private val baseClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(idleTimeoutMs, TimeUnit.MILLISECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
         .connectionPool(NetworkMonitor.sharedLLMConnectionPool)
         .build()
+    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, endpoint)
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>, systemPrompt: String?, maxTokens: Int, temperature: Double?,

@@ -43,6 +43,19 @@ package com.openminis.app.sandbox
  * commands.
  */
 object SeccompFallbackPolicy {
+    /** Exact GH#427 tracer assertion: use the existing compatibility path on future launches. */
+    @Volatile var compatibilityRequired: Boolean = false
+        private set
+
+    internal fun isTracerAssertion(output: String): Boolean =
+        output.contains("tracee/event.c") && output.contains("tracee->restart_how != PTRACE_CONT") &&
+            output.contains("assert") && output.contains("failed")
+
+    fun observeTracerFailure(exitCode: Int, output: String): Boolean {
+        if (exitCode == 0 || !isTracerAssertion(output)) return false
+        compatibilityRequired = true
+        return true
+    }
 
     /** Env var proot reads to skip installing its seccomp filter. */
     const val NO_SECCOMP_ENV = "PROOT_NO_SECCOMP"

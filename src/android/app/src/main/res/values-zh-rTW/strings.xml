@@ -662,7 +662,11 @@
     <string name="appearance_section_language">語言</string>
     <string name="appearance_language_footer">覆寫本應用程式的顯示語言。「系統」會跟隨您的裝置語言。</string>
     <string name="appearance_section_app_icon">應用程式圖示</string>
-    <string name="appearance_app_icon_footer">變更啟動器圖示。點擊後，主畫面上的圖示可能需要幾秒鐘才會更新。</string>
+    <string name="appearance_app_icon_footer">切換桌面圖示及應用程式內品牌形象，預設使用 GPT 龍娘。桌面圖示可能需要幾秒鐘才會更新。</string>
+    <string name="brand_icon_gpt">GPT 龍娘</string>
+    <string name="brand_icon_deepseek">DeepSeek</string>
+    <string name="brand_icon_claude">Claude</string>
+    <string name="brand_icon_change_failed">圖示切換失敗，請重試。</string>
     <string name="appearance_app_icon_auto">自動</string>
     <string name="appearance_app_icon_light">淺色</string>
     <string name="appearance_app_icon_dark">深色</string>
@@ -2115,4 +2119,11 @@
     <string name="chat_wallpaper_override">目前透明度僅適用於此對話。</string>
     <string name="chat_wallpaper_restore_default">還原預設透明度</string>
     <string name="chat_wallpaper_unavailable">目前模型暫無背景，切換到支援的模型後會套用你的設定。</string>
+    <string name="settings_memory_daily_injection_title">自動加入近期記憶日誌</string>
+    <string name="settings_memory_daily_injection_subtitle">對所有對話的下一輪生效。關閉後不再自動注入每日日誌，減少提示詞變化；全域記憶和記憶工具仍可使用。</string>
+    <string name="provider_ca_title">自訂伺服器憑證</string>
+    <string name="provider_ca_description">貼上已儲存 HTTPS 伺服器的 CA 憑證（PEM）。僅用於該主機與連接埠，包括使用相同位址的其他帳號。留空儲存可移除。新連線生效，請先停止進行中的回覆。使用自訂憑證的連線不自動跟隨重新導向。</string>
+    <string name="provider_ca_pem">CA 憑證（PEM）</string>
+    <string name="provider_ca_saved">憑證設定已儲存。</string>
+    <string name="provider_ca_invalid">儲存失敗，請檢查 HTTPS 位址和有效、未過期的 CA 憑證。</string>
 </resources>

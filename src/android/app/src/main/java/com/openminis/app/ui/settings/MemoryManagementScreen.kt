@@ -74,6 +74,9 @@ fun MemoryManagementScreen(
     var globalMemoryOn by remember {
         mutableStateOf(com.openminis.app.data.MemoryGlobalPrefs.isGlobalEnabled(context))
     }
+    var dailyInjectionOn by remember {
+        mutableStateOf(com.openminis.app.data.MemoryGlobalPrefs.isDailyInjectionEnabled(context))
+    }
 
     LaunchedEffect(Unit) {
         files = memoryRepository.listAllFiles()
@@ -93,6 +96,16 @@ fun MemoryManagementScreen(
                 onCheckedChange = { newValue ->
                     globalMemoryOn = newValue
                     com.openminis.app.data.MemoryGlobalPrefs.setGlobalEnabled(context, newValue)
+                },
+                showDivider = true,
+            )
+            SettingsSwitchRow(
+                title = stringResource(R.string.settings_memory_daily_injection_title),
+                subtitle = stringResource(R.string.settings_memory_daily_injection_subtitle),
+                checked = dailyInjectionOn,
+                onCheckedChange = { enabled ->
+                    dailyInjectionOn = enabled
+                    com.openminis.app.data.MemoryGlobalPrefs.setDailyInjectionEnabled(context, enabled)
                 },
                 showDivider = false,
             )

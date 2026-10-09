@@ -62,6 +62,25 @@ class AnthropicProviderTest {
     // -- sendMessage response parsing --
 
     @Test
+    fun `OAuth chat uses the same fingerprint as token refresh`() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"""))
+        val oauth = AnthropicProvider(
+            apiKey = "test-oauth", model = LLMModel.claudeHaiku45,
+            basePath = server.url("/").toString().trimEnd('/'), isOAuth = true,
+        )
+        // Exercise the production request builder without requiring the private
+        // OAuth identifier prompt, which is deliberately absent in this build.
+        okhttp3.OkHttpClient().newCall(oauth.buildRequest("{}", JSONObject())).execute().use {
+            assertEquals(200, it.code)
+        }
+        val request = server.takeRequest()
+        for ((name, value) in com.openminis.app.auth.ClaudeCliMimicryHeaders.ALL) {
+            assertEquals(name, value, request.getHeader(name))
+        }
+        assertEquals("Bearer test-oauth", request.getHeader("Authorization"))
+    }
+
+    @Test
     fun `sendMessage parses response correctly`() = runBlocking {
         val responseBody = """
         {

@@ -9,6 +9,19 @@ import org.junit.Test
 
 /** [T-p1-delegate-task] Argument parsing / clamping and result JSON shape, aligned with iOS HelperRunner. */
 class HelperRunnerArgsTest {
+    @Test
+    fun `timed out child can resume without duplicating a live or completed run`() {
+        assertTrue(HelperRunner.canResumeChild("timeout", AgentJobState.TIMEOUT))
+        assertFalse(HelperRunner.canResumeChild("timeout", AgentJobState.TIMEOUT, completing = true))
+        assertFalse(HelperRunner.canResumeChild("running", AgentJobState.TIMEOUT))
+        assertTrue(HelperRunner.canResumeChild("timeout", null))
+        assertTrue(HelperRunner.canResumeChild("running", null))
+        assertFalse(HelperRunner.canResumeChild("timeout", AgentJobState.RUNNING))
+        assertFalse(HelperRunner.canResumeChild("timeout", AgentJobState.PENDING))
+        assertFalse(HelperRunner.canResumeChild("timeout", AgentJobState.DONE))
+        assertFalse(HelperRunner.canResumeChild("cancelled", AgentJobState.CANCELLED))
+        assertFalse(HelperRunner.canResumeChild("completed", null))
+    }
 
     @Test
     fun `defaults match iOS — primary tier, 10 minutes, wait=false (background)`() {

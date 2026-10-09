@@ -245,6 +245,8 @@ class MinisApp : Application(), ImageLoaderFactory {
     @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
     override fun onCreate() {
         super.onCreate()
+        com.openminis.app.data.repository.AppIconRepository.initialize(this)
+        com.openminis.app.network.EndpointCertificates.initialize(this)
         // [T-android-content-capture-off] Opt every Compose window out of
         // Android content capture, before any of them exists.
         //

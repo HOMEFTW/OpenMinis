@@ -892,10 +892,12 @@ class SessionListViewModel(
                             temperature = null,
                             thinkingLevel = ThinkingLevel.OFF,
                         )
-                        val (title, category) = parseTitleResponse(response.text)
+                        val parsed = com.openminis.app.ui.chat.parseGeneratedTitle(response.text, response.stopReason)
+                        val title = parsed?.title.orEmpty()
+                        val category = parsed?.category
                         if (title.isNotEmpty()) {
                             if (chatRepository.getSession(id)?.title != session.title) return@walk false
-                            chatRepository.updateSessionTitleAndCategory(id, title, category)
+                            if (!chatRepository.updateSessionTitleIfUnchanged(id, session.title, title, category)) return@walk false
                             AppLogger.info(
                                 "TitleGen",
                                 "outcome=set origin=$origin session=${id.take(8)} " +
@@ -940,8 +942,8 @@ class SessionListViewModel(
      * while the LLM call was in flight, which can be tens of seconds.
      */
     private suspend fun applyFallbackTitle(id: String, firstUserRaw: String?, origin: String): Boolean {
-        val current = chatRepository.getSession(id)?.title?.trim()
-        if (!current.isNullOrEmpty() && current != NEW_CHAT_TITLE) {
+        val current = chatRepository.getSession(id)?.title
+        if (!current.isNullOrBlank() && current.trim() != NEW_CHAT_TITLE) {
             AppLogger.info(
                 "TitleGen",
                 "outcome=fallback-skipped origin=$origin session=${id.take(8)} reason=already-titled",
@@ -957,7 +959,7 @@ class SessionListViewModel(
             )
             return false
         }
-        chatRepository.updateSessionTitle(id, cleaned)
+        if (!chatRepository.updateSessionTitleIfUnchanged(id, current, cleaned)) return false
         // Length only — never the prompt text itself.
         AppLogger.info(
             "TitleGen",
@@ -1022,24 +1024,6 @@ class SessionListViewModel(
         }
     }
 
-    private fun parseTitleResponse(text: String): Pair<String, String?> {
-        val cleaned = text.trim()
-            .removePrefix("```json").removePrefix("```")
-            .removeSuffix("```").trim()
-        try {
-            val json = JSONObject(cleaned)
-            val title = json.optString("title", "").trim()
-            val category = json.optString("category", "").trim().ifEmpty { null }
-            if (title.isNotEmpty()) return title to category
-        } catch (_: Exception) {}
-        val titleMatch = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(cleaned)
-        val catMatch = Regex("\"category\"\\s*:\\s*\"([^\"]+)\"").find(cleaned)
-        if (titleMatch != null) {
-            return titleMatch.groupValues[1].trim() to catMatch?.groupValues?.getOrNull(1)?.trim()
-        }
-        val firstLine = cleaned.lines().firstOrNull()?.trim() ?: ""
-        return firstLine.take(50) to null
-    }
 
     fun duplicateSession(id: String) {
         viewModelScope.launch {

@@ -116,7 +116,8 @@ object OpenAIModelsApi {
             .applyUserAgentOverride(customUserAgent)
             .build()
 
-        val response = client.newCall(request).execute()
+        val endpointClient = com.openminis.app.network.EndpointCertificates.configure(client.newBuilder(), url).build()
+        val response = endpointClient.newCall(request).execute()
         val body = response.body?.string() ?: return@withContext fallback
 
         if (!response.isSuccessful) {

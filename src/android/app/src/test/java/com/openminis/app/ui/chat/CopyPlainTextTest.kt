@@ -2,6 +2,7 @@ package com.openminis.app.ui.chat
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
@@ -15,6 +16,23 @@ import org.junit.Test
  * paste target.
  */
 class CopyPlainTextTest {
+    @Test(timeout = 2_000)
+    fun `giant malformed markdown falls back without losing text and HTML stays escaped`() {
+        val md = "<script>" + "[".repeat(2_000_000) + "tail</script>"
+        assertEquals(md, plain(md))
+        val html = MarkdownClipboard.markdownToHtml(md)
+        assertTrue(html.startsWith("<html><body><pre>&lt;script&gt;"))
+        assertTrue(html.endsWith("tail&lt;/script&gt;</pre></body></html>"))
+        assertFalse(html.contains("<script>"))
+    }
+
+    @Test
+    fun `ordinary rich copy retains formatting and code contents`() {
+        val html = MarkdownClipboard.markdownToHtml("# Title\nSome **bold** and `a < b`.")
+        assertTrue(html.contains("<h1>Title</h1>"))
+        assertTrue(html.contains("<strong>bold</strong>"))
+        assertTrue(html.contains("<code>a &lt; b</code>"))
+    }
 
     private fun plain(md: String) = MarkdownClipboard.markdownToPlainText(md)
 

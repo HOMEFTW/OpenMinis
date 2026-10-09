@@ -92,10 +92,11 @@ object AnthropicModelsApi {
             }
 
             val request = requestBuilder.build()
-            android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url} isOAuth=$isOAuth headers=${request.headers}")
+            android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url} isOAuth=$isOAuth")
 
             val response: Response = try {
-                client.newCall(request).execute()
+                com.openminis.app.network.EndpointCertificates.configure(client.newBuilder(), url)
+                    .build().newCall(request).execute()
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
                 continue

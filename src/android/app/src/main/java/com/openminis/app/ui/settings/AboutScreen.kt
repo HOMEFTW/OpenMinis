@@ -18,6 +18,8 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,10 +51,11 @@ fun AboutScreen(onBack: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val iconPainter = remember(context) {
+            val brand by com.openminis.app.data.repository.AppIconRepository.selection.collectAsState()
+            val iconPainter = remember(context, brand) {
                 // painterResource() can't load adaptive-icon XML drawables (mipmap-anydpi-v26),
                 // so fetch the launcher icon as a Drawable and convert to a Bitmap.
-                val drawable = context.packageManager.getApplicationIcon(context.packageName)
+                val drawable = requireNotNull(androidx.core.content.res.ResourcesCompat.getDrawable(context.resources, brand.iconRes, context.theme))
                 BitmapPainter(drawable.toBitmap(width = 192, height = 192).asImageBitmap())
             }
             Box(
@@ -118,7 +121,7 @@ fun AboutScreen(onBack: () -> Unit) {
                 // LocalInAppBrowserLauncher ambient defaults to a no-op when
                 // no InAppBrowserHost is in the tree above this screen — and
                 // nothing wraps Settings, so the row used to be a dead tap.
-                onClick = { openExternalUrl(context, "https://github.com/OpenMinis/OpenMinis") },
+                onClick = { openExternalUrl(context, "https://github.com/HOMEFTW/OpenMinis") },
                 trailing = { ExternalLinkIcon() },
                 showDivider = false,
             )

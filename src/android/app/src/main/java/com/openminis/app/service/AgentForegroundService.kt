@@ -449,6 +449,7 @@ class AgentForegroundService : Service() {
             }
         }
         val backgroundRepo = app.backgroundSettingsRepository
+        var lastBrand = com.openminis.app.data.repository.AppIconRepository.selection.value
 
         overlayScope.launch {
             combine(
@@ -480,6 +481,7 @@ class AgentForegroundService : Service() {
                 // [T-android-live-update-content] Thinking vs generating for
                 // the capsule's streaming row.
                 SessionActivityTracker.isThinking,
+                com.openminis.app.data.repository.AppIconRepository.selection,
             ) { values: Array<Any?> ->
                 @Suppress("UNCHECKED_CAST")
                 val activeSessions = values[13] as Set<String>
@@ -501,8 +503,15 @@ class AgentForegroundService : Service() {
                     dynamicIslandEnabled = values[14] as Boolean,
                     soulIdentity = (values[15] as SoulMetadata).let { it.name to it.icon },
                     isThinking = values[16] as Boolean,
+                    brand = values[17] as com.openminis.app.data.repository.AppIconRepository.Variant,
                 )
-            }.distinctUntilChanged().collect { state -> applyOverlayState(state) }
+            }.distinctUntilChanged().collect { state ->
+                applyOverlayState(state)
+                if (lastBrand != state.brand) {
+                    lastBrand = state.brand
+                    if (SessionActivityTracker.activeSessions.value.isNotEmpty()) refreshOngoingNotification()
+                }
+            }
         }
     }
 
@@ -544,6 +553,7 @@ class AgentForegroundService : Service() {
          * survive the filter.
          */
         val soulIdentity: Pair<String, String>,
+        val brand: com.openminis.app.data.repository.AppIconRepository.Variant,
         // [T-android-live-update-content] Model is emitting reasoning, no
         // visible text yet for this turn.
         val isThinking: Boolean,
@@ -1121,7 +1131,7 @@ class AgentForegroundService : Service() {
             isThinking = SessionActivityTracker.isThinking.value,
             hasActiveSessions = hasActiveSessions,
         )
-        val smallIcon = notificationSmallIconFor(phase, toolName)
+        val smallIcon = notificationSmallIconFor(phase, toolName, com.openminis.app.data.repository.AppIconRepository.current(this).notificationRes)
         val soulName = SoulStore.cachedMetadata.value.name.ifBlank { SoulMetadata.DEFAULT.name }
         val titleText = when (phase) {
             AgentPhase.COMPLETED -> getString(R.string.bg_service_notification_title_completed)

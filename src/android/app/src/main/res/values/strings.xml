@@ -753,7 +753,11 @@
     <string name="appearance_language_footer">Override the display language for this app. \"System\" follows your device language.</string>
     <!-- T-android-dynamic-app-icon: launcher-icon picker section. -->
     <string name="appearance_section_app_icon">App Icon</string>
-    <string name="appearance_app_icon_footer">Change the launcher icon. The home-screen icon may take a few seconds to refresh after a tap.</string>
+    <string name="appearance_app_icon_footer">Choose the app identity for the launcher and in-app branding. GPT is the default. Your launcher may take a few seconds to refresh.</string>
+    <string name="brand_icon_gpt">GPT</string>
+    <string name="brand_icon_deepseek">DeepSeek</string>
+    <string name="brand_icon_claude">Claude</string>
+    <string name="brand_icon_change_failed">Could not change the app icon. Please try again.</string>
     <string name="appearance_app_icon_auto">Automatic</string>
     <string name="appearance_app_icon_light">Light</string>
     <string name="appearance_app_icon_dark">Dark</string>
@@ -2352,4 +2356,11 @@
     <string name="chat_wallpaper_override">This transparency applies only to this chat.</string>
     <string name="chat_wallpaper_restore_default">Use default transparency</string>
     <string name="chat_wallpaper_unavailable">No background for this model. Your choice will apply when you switch to a supported model.</string>
+    <string name="settings_memory_daily_injection_title">Include recent daily memories</string>
+    <string name="settings_memory_daily_injection_subtitle">Applies to all chats on the next turn. Turn off to keep daily log changes out of the prompt; global memory and memory tools remain available.</string>
+    <string name="provider_ca_title">Custom server certificate</string>
+    <string name="provider_ca_description">Paste the CA certificate (PEM) for the saved HTTPS server. It applies only to this host and port, including other accounts using that endpoint. Save an empty value to remove it. New connections use the change; stop an active reply first. Custom-certificate connections do not follow redirects.</string>
+    <string name="provider_ca_pem">CA certificate (PEM)</string>
+    <string name="provider_ca_saved">Certificate setting saved.</string>
+    <string name="provider_ca_invalid">Could not save. Check the HTTPS address and a valid, unexpired CA certificate.</string>
 </resources>

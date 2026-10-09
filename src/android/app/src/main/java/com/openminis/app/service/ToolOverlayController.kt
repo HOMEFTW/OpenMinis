@@ -496,7 +496,7 @@ class ToolOverlayController(private val context: Context) {
             // rendering. While a tool runs, applyLogoFor() swaps in that
             // tool's glyph; see it for why the scaleType and padding have to
             // change along with the drawable.
-            setImageResource(R.mipmap.ic_launcher)
+            setImageResource(com.openminis.app.data.repository.AppIconRepository.current(context).iconRes)
             scaleType = ImageView.ScaleType.CENTER_CROP
             // Clip to a circle. `clipToOutline = true` + a circular
             // outline provider is the standard API-21+ recipe and avoids
@@ -1238,7 +1238,7 @@ class ToolOverlayController(private val context: Context) {
         iv.setPadding(0, 0, 0, 0)
         iv.scaleType = ImageView.ScaleType.CENTER_CROP
         iv.clearColorFilter()
-        iv.setImageResource(R.mipmap.ic_launcher)
+        iv.setImageResource(com.openminis.app.data.repository.AppIconRepository.current(context).iconRes)
         applyPlate(null)
     }
 

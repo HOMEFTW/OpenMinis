@@ -52,6 +52,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -268,7 +269,7 @@ fun AppearanceScreen(
     var messageLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_MESSAGE, 0)) }
     var appBaseLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_APP_BASE, 0)) }
     var selectedLanguage by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "") ?: "") }
-    var selectedAppIcon by remember { mutableStateOf(AppIconRepository.current(context)) }
+    val selectedAppIcon by AppIconRepository.selection.collectAsState()
 
     val fontsModified = chatInputLevel != 0 || messageLevel != 0 || appBaseLevel != 0
 
@@ -601,18 +602,18 @@ fun AppearanceScreen(
             )
             val iconOptions = listOf(
                 IconOption(
-                    AppIconRepository.Variant.Auto,
-                    R.string.appearance_app_icon_auto,
+                    AppIconRepository.Variant.Gpt,
+                    R.string.brand_icon_gpt,
                     R.mipmap.ic_launcher,
                 ),
                 IconOption(
-                    AppIconRepository.Variant.ClassicLight,
-                    R.string.appearance_app_icon_light,
+                    AppIconRepository.Variant.DeepSeek,
+                    R.string.brand_icon_deepseek,
                     R.mipmap.ic_launcher_classic_light,
                 ),
                 IconOption(
-                    AppIconRepository.Variant.ClassicDark,
-                    R.string.appearance_app_icon_dark,
+                    AppIconRepository.Variant.Claude,
+                    R.string.brand_icon_claude,
                     R.mipmap.ic_launcher_classic_dark,
                 ),
             )
@@ -673,8 +674,9 @@ fun AppearanceScreen(
                             .widthIn(max = APP_ICON_TILE_MAX_WIDTH)
                             .clickable {
                                 if (selectedAppIcon != option.variant) {
-                                    selectedAppIcon = option.variant
-                                    AppIconRepository.apply(context, option.variant)
+                                    if (!AppIconRepository.apply(context, option.variant)) {
+                                        android.widget.Toast.makeText(context, R.string.brand_icon_change_failed, android.widget.Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             },
                         horizontalAlignment = Alignment.CenterHorizontally,

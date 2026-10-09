@@ -32,6 +32,15 @@ object SpeechRecognitionManager {
     private lateinit var appContext: Context
     private lateinit var prefs: SharedPreferences
     private val engines = mutableListOf<SpeechRecognitionEngine>()
+    private val toolMicrophone = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Main-thread lease: tool capture must not race the composer's independent engine session. */
+    internal fun acquireToolMicrophone(): Boolean =
+        _state.value == RecognitionState.IDLE && toolMicrophone.compareAndSet(false, true)
+
+    internal fun releaseToolMicrophone() {
+        toolMicrophone.set(false)
+    }
 
     private val _state = MutableStateFlow(RecognitionState.IDLE)
     val state: StateFlow<RecognitionState> = _state.asStateFlow()
@@ -364,6 +373,10 @@ object SpeechRecognitionManager {
         // engine kept (instead of [onError]). Null keeps the old behaviour.
         onFailedAudio: ((FailedAudio) -> Unit)? = null,
     ) {
+        if (toolMicrophone.get()) {
+            onError(RecognitionError.RECOGNIZER_BUSY, "A speech tool is using the microphone.")
+            return
+        }
         if (_state.value != RecognitionState.IDLE) {
             Log.d(TAG, "startRecording ignored; state=${_state.value}")
             VoicePipelineLog.event("manager.start.rejected", "state" to _state.value)

@@ -27,6 +27,8 @@ import androidx.compose.runtime.setValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.core.graphics.drawable.toBitmap
+import kotlinx.coroutines.flow.collect
 import com.openminis.app.offload.OffloadPermissionManager
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
@@ -147,6 +149,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lifecycleScope.launch {
+            com.openminis.app.data.repository.AppIconRepository.selection.collect { brand ->
+                runCatching {
+                    val drawable = requireNotNull(androidx.core.content.res.ResourcesCompat.getDrawable(resources, brand.iconRes, theme))
+                    @Suppress("DEPRECATION")
+                    setTaskDescription(android.app.ActivityManager.TaskDescription(getString(R.string.app_name), drawable.toBitmap(192, 192)))
+                }
+            }
+        }
 
         // Register the crash-share "Save to..." launcher BEFORE the
         // safe-mode early-return below — ActivityResultLauncher must be

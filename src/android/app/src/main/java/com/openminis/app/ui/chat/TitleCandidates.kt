@@ -12,6 +12,7 @@ import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * [T-titlegen-group-order] Which models title generation tries, and in what
@@ -261,34 +262,40 @@ internal object TitleCandidates {
         origin: String,
         maxTries: Int = MAX_TRIES,
         pauseMs: Long = 0L,
+        perAttemptTimeoutMs: Long = 20_000L,
+        totalTimeoutMs: Long = 60_000L,
         shouldStop: suspend () -> Boolean = { false },
         tryOne: suspend (ModelEntry) -> T?,
-    ): T? {
+    ): T? = withTimeoutOrNull(totalTimeoutMs) {
         val tries = candidates.take(maxTries)
         for ((idx, entry) in tries.withIndex()) {
             if (shouldStop()) {
                 AppLogger.info("TitleGen", "walk origin=$origin stopped before candidate ${idx + 1}/${tries.size}")
-                return null
+                return@withTimeoutOrNull null
             }
             AppLogger.info("TitleGen", "walk origin=$origin candidate ${idx + 1}/${tries.size} model=${entry.model.id}")
-            val result = try {
-                tryOne(entry)
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException && isRealCancellation(e)) throw e
-                AppLogger.warning(
-                    "TitleGen",
-                    "walk origin=$origin FAILED ${idx + 1}/${tries.size} model=${entry.model.id} " +
-                        "${e.javaClass.simpleName}: ${e.message?.take(200)}",
-                )
-                null
+            val result = withTimeoutOrNull(perAttemptTimeoutMs) {
+                try {
+                    tryOne(entry)
+                } catch (e: Exception) {
+                    // Inspect cancellation inside the attempt's scope, before its timeout
+                    // child has unwound; the enclosing walk may still be active.
+                    if (e is kotlinx.coroutines.CancellationException && isRealCancellation(e)) throw e
+                    AppLogger.warning(
+                        "TitleGen",
+                        "walk origin=$origin FAILED ${idx + 1}/${tries.size} model=${entry.model.id} " +
+                            "${e.javaClass.simpleName}: ${e.message?.take(200)}",
+                    )
+                    null
+                }
             }
             if (result != null) {
                 if (idx > 0) AppLogger.info("TitleGen", "walk origin=$origin succeeded on fallback candidate ${idx + 1} (${entry.model.id})")
-                return result
+                return@withTimeoutOrNull result
             }
             if (pauseMs > 0 && idx + 1 < tries.size) delay(pauseMs)
         }
         AppLogger.warning("TitleGen", "walk origin=$origin all ${tries.size} candidate(s) failed (of ${candidates.size})")
-        return null
+        null
     }
 }

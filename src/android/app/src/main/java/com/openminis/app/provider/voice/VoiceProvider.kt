@@ -3,17 +3,24 @@ package com.openminis.app.provider.voice
 import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * [T-android-provider-voice] VoiceProvider base class — Android port of iOS
@@ -209,17 +216,30 @@ open class VoiceProvider(
     open fun isAuthFailure(code: Int, body: ByteArray?): Boolean = code == 401 || code == 403
 
     suspend fun executeRequest(request: Request): ByteArray = withContext(Dispatchers.IO) {
-        httpClient.newCall(request).execute().use { response ->
-            val body = response.body?.bytes()
-            if (!response.isSuccessful) {
-                if (isAuthFailure(response.code, body)) {
-                    Log.e(TAG, "Voice auth failed: HTTP ${response.code}")
-                    throw VoiceProviderException.Auth()
+        suspendCancellableCoroutine { continuation ->
+            val call = httpClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
                 }
-                Log.e(TAG, "Voice request failed: HTTP ${response.code}")
-                throw VoiceProviderException.Http(response.code, body)
-            }
-            body ?: ByteArray(0)
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val data = response.use {
+                            val body = it.body?.bytes()
+                            if (!it.isSuccessful) {
+                                if (isAuthFailure(it.code, body)) throw VoiceProviderException.Auth()
+                                throw VoiceProviderException.Http(it.code, body)
+                            }
+                            body ?: ByteArray(0)
+                        }
+                        if (continuation.isActive) continuation.resume(data)
+                    } catch (e: Exception) {
+                        if (continuation.isActive) continuation.resumeWithException(e)
+                    }
+                }
+            })
         }
     }
 

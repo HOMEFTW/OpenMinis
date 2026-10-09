@@ -14,6 +14,26 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentJobRegistryTest {
 
+    @Test fun `timeout cannot resume until its asynchronous result is durable`() = kotlinx.coroutines.runBlocking {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val job = child()
+        AgentJobRegistry.setCompletionHookAsync(job.id) {
+            entered.complete(Unit)
+            release.await()
+        }
+        try {
+            AgentJobRegistry.finish(job.id, AgentJobState.TIMEOUT, "partial")
+            kotlinx.coroutines.withTimeout(5_000) { entered.await() }
+            assertTrue(AgentJobRegistry.isCompleting(job.id))
+            assertFalse(HelperRunner.canResumeChild("timeout", AgentJobState.TIMEOUT, AgentJobRegistry.isCompleting(job.id)))
+        } finally { release.complete(Unit) }
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (AgentJobRegistry.isCompleting(job.id)) kotlinx.coroutines.delay(1)
+        }
+        assertTrue(HelperRunner.canResumeChild("timeout", AgentJobState.TIMEOUT, AgentJobRegistry.isCompleting(job.id)))
+    }
+
     @Before fun reset() = AgentJobRegistry.resetForTest()
 
     private fun child(parent: String = "P") = AgentJobRegistry.register(

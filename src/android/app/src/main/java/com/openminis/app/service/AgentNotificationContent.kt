@@ -44,11 +44,11 @@ internal fun resolveAgentPhase(
  * what the ColorOS chip in the user's recording showed.
  */
 @DrawableRes
-internal fun notificationSmallIconFor(phase: AgentPhase, toolName: String?): Int = when (phase) {
+internal fun notificationSmallIconFor(phase: AgentPhase, toolName: String?, brandIcon: Int = R.drawable.ic_launcher_monochrome): Int = when (phase) {
     AgentPhase.COMPLETED -> R.drawable.ic_notification_completed
     AgentPhase.TOOL -> toolIconResFor(toolName)
     AgentPhase.THINKING -> R.drawable.ic_tool_psychology
-    AgentPhase.GENERATING, AgentPhase.IDLE -> R.drawable.ic_launcher_monochrome
+    AgentPhase.GENERATING, AgentPhase.IDLE -> brandIcon
 }
 
 /**

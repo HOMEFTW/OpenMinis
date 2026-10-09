@@ -90,6 +90,10 @@ fun MarkdownText(
     color: Color = MaterialTheme.colorScheme.onSurface,
     style: TextStyle = MaterialTheme.typography.bodyMedium,
 ) {
+    if (!MarkdownWorkLimits.canParseBlocks(markdown)) {
+        BoundedMarkdownText(markdown, modifier, color, style)
+        return
+    }
     val parsed = remember(markdown) { MarkdownParser.parseWithMath(markdown) }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -115,7 +119,10 @@ private fun BlockContent(
         is MarkdownParser.Block.BulletList -> BulletListView(block, color, baseStyle)
         is MarkdownParser.Block.NumberedList -> NumberedListView(block, color, baseStyle)
         is MarkdownParser.Block.Table -> TableView(block, color, baseStyle, mathSpans)
-        is MarkdownParser.Block.MathBlock -> MathBlockView(latex = block.latex)
+        is MarkdownParser.Block.MathBlock -> {
+            if (block.latex.length > MarkdownWorkLimits.MAX_INLINE_CHARS) BoundedMarkdownText(block.latex)
+            else MathBlockView(latex = block.latex)
+        }
         is MarkdownParser.Block.ThematicBreak -> HorizontalDivider(
             modifier = Modifier.padding(vertical = 4.dp),
             color = color.copy(alpha = 0.3f),
@@ -200,6 +207,10 @@ private fun ParagraphBlock(
 
 @Composable
 private fun CodeBlockView(block: MarkdownParser.Block.CodeBlock) {
+    if (block.code.length > MarkdownWorkLimits.MAX_INLINE_CHARS) {
+        BoundedMarkdownText(block.code)
+        return
+    }
     val context = LocalContext.current
     val codeColor = Color(0xFF4EC9B0) // Green code text
     val bgColor = MaterialTheme.colorScheme.surfaceContainerHighest
@@ -499,6 +510,10 @@ private fun InlineContent(
     style: TextStyle,
     modifier: Modifier = Modifier,
 ) {
+    if (text.length > MarkdownWorkLimits.MAX_INLINE_CHARS) {
+        BoundedMarkdownText(text, modifier, color, style)
+        return
+    }
     val inlineCodeBg = MaterialTheme.colorScheme.surfaceContainerHighest
     val inlineCodeColor = MaterialTheme.colorScheme.primary
     val linkColor = MaterialTheme.colorScheme.primary

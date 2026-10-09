@@ -10,6 +10,17 @@ import org.junit.Test
  * cleanup. Uses the default English link phrases so no Context is needed.
  */
 class VoiceTextSanitizerTest {
+    @Test(timeout = 2_000)
+    fun `huge malformed source keeps text and still cleans glyphs without syntax matching`() {
+        val text = "[".repeat(2_000_000) + "🔥tail"
+        assertEquals("[".repeat(2_000_000) + " tail", clean(text))
+    }
+
+    @Test(timeout = 2_000)
+    fun `long underscore identifier survives without retrying every underscore suffix`() {
+        val identifier = "a" + "_".repeat(7_000) + "b"
+        assertEquals(identifier, clean(identifier))
+    }
 
     private fun clean(s: String) = VoiceTextSanitizer.sanitize(s)
 

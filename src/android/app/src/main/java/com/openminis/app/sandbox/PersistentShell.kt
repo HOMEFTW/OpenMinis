@@ -250,6 +250,7 @@ class PersistentShell(
 
         // [T-android-seccomp-selfheal / GH#186] Applied last so nothing above
         // can clobber it once this device is known to need it.
+        if (SeccompFallbackPolicy.compatibilityRequired) useNoSeccomp = true
         if (useNoSeccomp) {
             env[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
         }

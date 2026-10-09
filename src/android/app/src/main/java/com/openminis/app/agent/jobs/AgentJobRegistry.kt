@@ -181,6 +181,10 @@ object AgentJobRegistry {
      *  to write the final payload into the parent's tool block. */
     private val completionHooks = HashMap<String, (AgentJob) -> Unit>()
     private val asyncCompletionHooks = HashMap<String, suspend (AgentJob) -> Unit>()
+    private val completingJobs = HashSet<String>()
+
+    @Synchronized
+    fun isCompleting(jobId: String): Boolean = jobId in completingJobs
 
     /**
      * [T-p2-agent-series] How `then = FollowUpParent` reaches the parent
@@ -238,7 +242,9 @@ object AgentJobRegistry {
         wasResumed: Boolean = false,
     ): AgentJob? {
         if (!canStartChildJob) return null
-        if (runSessionId != null && _jobs.value.values.any { it.isActive && it.runSessionId == runSessionId }) return null
+        if (runSessionId != null && _jobs.value.values.any {
+                it.runSessionId == runSessionId && (it.isActive || it.id in completingJobs)
+            }) return null
         return register(title = title, origin = origin, trigger = AgentJobTrigger.Immediate,
             target = target, prompt = prompt, then = then, agentName = agentName,
             runSessionId = runSessionId, wasResumed = wasResumed)
@@ -584,6 +590,7 @@ object AgentJobRegistry {
         require(state != AgentJobState.PENDING && state != AgentJobState.RUNNING)
         val cur = _jobs.value[jobId] ?: return
         if (!cur.isActive) return
+        completingJobs.add(jobId)
         val job = update(jobId) {
             it.copy(state = state, finishedAtMs = System.currentTimeMillis(), resultText = result)
         } ?: return
@@ -605,7 +612,8 @@ object AgentJobRegistry {
         // learns about success (the envelope carries `status`).
         val asyncHook = asyncCompletionHooks.remove(jobId)
         if (asyncHook == null && releaseTabs == null) {
-            runThen(_jobs.value[jobId] ?: job)
+            try { runThen(_jobs.value[jobId] ?: job) }
+            finally { completingJobs.remove(jobId) }
         } else {
             // The durable tool result must be updated before the parent wakes.
             registryScope.launch {
@@ -617,6 +625,8 @@ object AgentJobRegistry {
                     runThen(_jobs.value[jobId] ?: job)
                 } catch (e: Exception) {
                     AppLogger.warning(TAG, "completion persistence failed for ${jobId.take(8)}: ${e.message}")
+                } finally {
+                    synchronized(this@AgentJobRegistry) { completingJobs.remove(jobId) }
                 }
             }
         }
@@ -730,7 +740,7 @@ object AgentJobRegistry {
     /** Test hook. */
     @Synchronized
     internal fun resetForTest() {
-        _jobs.value = emptyMap(); cancelHooks.clear(); completionHooks.clear(); asyncCompletionHooks.clear()
+        _jobs.value = emptyMap(); cancelHooks.clear(); completionHooks.clear(); asyncCompletionHooks.clear(); completingJobs.clear()
         followUpDispatcher = null; mutedParents.clear()
         steerHooks.clear(); missedSteers.clear(); missedSteerDrains.clear(); tabReleases.clear()
         queuedStarters.clear(); interruptedCounters.clear()
