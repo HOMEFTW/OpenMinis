@@ -8,6 +8,7 @@ import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.db.MessageHeadRow
 import com.openminis.app.data.model.ModelAttributionSnapshot
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import java.util.UUID
 
 class ChatRepository(internal val dao: ChatDao) {
@@ -354,7 +355,7 @@ class ChatRepository(internal val dao: ChatDao) {
     }
 
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>> =
-        dao.observeMessages(sessionId)
+        dao.observeMessages(sessionId).map { rows -> rows.map { it.withReadableAssistantParts() } }
 
     /**
      * Load all messages for a session in bounded pages instead of a
@@ -367,12 +368,12 @@ class ChatRepository(internal val dao: ChatDao) {
      * This paginated loader keeps each underlying query small enough that
      * the CursorWindow can hold a normal-shaped page. If a single page
      * still contains an individual >2MB row we fall back to fetching
-     * that range row-by-row and substitute a proxy MessageEntity for
-     * any single row that genuinely can't be materialised — the
-     * transcript stays continuous instead of crashing the load.
+     * that range row-by-row and reconstruct a large body with bounded
+     * SQLite substring reads. Row identity, tool pairing and the full
+     * original content survive; errors are never silently skipped.
      *
-     * Existing oversized rows are not migrated; new oversized inserts
-     * are prevented by the cap in [appendMessage].
+     * Existing rows and signed replay are read intact; unsigned payloads
+     * use a structure-preserving size cap in [appendMessage].
      */
     suspend fun loadMessages(sessionId: String): List<MessageEntity> {
         // T-android-crash-safe-mode-v2: defensive guard. ChatViewModel.loadSession
@@ -411,7 +412,7 @@ class ChatRepository(internal val dao: ChatDao) {
                 }
             }
             if (page.isEmpty()) break
-            out.addAll(page)
+            out.addAll(page.map { it.withReadableAssistantParts() })
             offset += limit
         }
         return out
@@ -422,18 +423,9 @@ class ChatRepository(internal val dao: ChatDao) {
         baseOffset: Int,
         limit: Int,
     ): List<MessageEntity> {
-        val result = ArrayList<MessageEntity>(limit)
-        for (i in 0 until limit) {
-            val row = try {
-                dao.loadMessagesPage(sessionId, baseOffset + i, 1).firstOrNull()
-            } catch (e: SQLiteBlobTooBigException) {
-                null
-            } catch (e: IllegalStateException) {
-                if (e.message?.contains("CursorWindow", ignoreCase = true) == true) null else throw e
-            } ?: continue
-            result.add(row)
+        return readMessagePageSafely(dao, sessionId, baseOffset, limit) { offset, count ->
+            dao.loadMessagesPage(sessionId, offset, count)
         }
-        return result
     }
 
     suspend fun deleteMessagesAfter(sessionId: String, keepCount: Int) =
@@ -446,7 +438,7 @@ class ChatRepository(internal val dao: ChatDao) {
      * target tool_use. Mirrors iOS ChatStore.updateMessageParts.
      */
     suspend fun updateMessageParts(id: String, partsJson: String) =
-        dao.updateMessageParts(id, partsJson)
+        dao.updateMessageParts(id, boundedMessagePartsJson(partsJson))
 
     /** [T-error-persist-android] Set/clear the error sticker on a row by id. */
     suspend fun updateMessageErrorInfo(messageId: String, errorInfo: String?) =
@@ -560,17 +552,8 @@ class ChatRepository(internal val dao: ChatDao) {
     ): MessageEntity {
         val sortOrder = dao.nextSortOrder(sessionId)
         val now = System.currentTimeMillis()
-        // Cap the body so a runaway tool_result (e.g. a 13 MB browser_use
-        // dump — Issue #17) cannot land an oversize blob into a Room row
-        // that later fails CursorWindow's 2 MB ceiling on read. We keep
-        // the row in the same parts_json shape (text part) so downstream
-        // parsers — UI rendering and JSON-array consumers in DAO/search
-        // — never break on the truncated payload.
-        val capped = if (partsJson.length > MAX_MESSAGE_PARTS_JSON_LENGTH) {
-            buildTruncatedPartsJson(partsJson)
-        } else {
-            partsJson
-        }
+        // Bound payload strings while preserving tool pairing and media references.
+        val capped = boundedMessagePartsJson(partsJson)
         val message = MessageEntity(
             id = UUID.randomUUID().toString(),
             sessionId = sessionId,
@@ -584,7 +567,7 @@ class ChatRepository(internal val dao: ChatDao) {
             modelDisplayName = modelSnapshot?.displayName,
             providerType = modelSnapshot?.providerTypeRaw,
             providerInstanceId = modelSnapshot?.providerInstanceId,
-        )
+        ).forBoundedStorage()
         dao.insertMessage(message)
         // [T-android-preview-flicker-toolresult] Only overwrite the preview
         // when this row actually yields one. A tool-result row is
@@ -806,7 +789,7 @@ class ChatRepository(internal val dao: ChatDao) {
         } else {
             dao.loadMessagesPageInRange(sessionId, offset, limit, startMs, endMs)
         }
-        return rows.mapNotNull { e ->
+        return rows.map { it.withReadableAssistantParts() }.mapNotNull { e ->
             val text = extractTextForOffload(e.partsJson)
             if (text.isBlank()) return@mapNotNull null
             val tools = if (includeTools) decodeToolParts(e.partsJson) else null
@@ -846,7 +829,7 @@ class ChatRepository(internal val dao: ChatDao) {
         offset: Int,
         limit: Int,
     ): List<MessageEntity> =
-        dao.loadMessagesPage(sessionId, offset, limit)
+        dao.loadMessagesPage(sessionId, offset, limit).map { it.withReadableAssistantParts() }
 
     /**
      * Walk parts_json and concatenate every `{type:"text", value:...}`
@@ -857,7 +840,7 @@ class ChatRepository(internal val dao: ChatDao) {
      */
     private fun extractTextForOffload(partsJson: String): String {
         return try {
-            val arr = org.json.JSONArray(partsJson)
+            val arr = org.json.JSONArray(readablePartsJson(partsJson))
             val texts = mutableListOf<String>()
             var hasMedia = false
             val toolUses = mutableListOf<org.json.JSONObject>()
@@ -1086,7 +1069,7 @@ class ChatRepository(internal val dao: ChatDao) {
         // messages it just imported — see BackupImporter [T-android-restore-preview].
         internal fun extractTextPreview(partsJson: String): String? {
             try {
-                val array = org.json.JSONArray(partsJson)
+                val array = org.json.JSONArray(readablePartsJson(partsJson))
                 var hasMedia = false
                 // T-android-session-last-message-tool-call: also track the most
                 // recent tool_use so a mid-tool-call assistant turn (no text yet)
@@ -1143,7 +1126,7 @@ class ChatRepository(internal val dao: ChatDao) {
         internal fun decodeToolParts(partsJson: String): Pair<List<OffloadToolUse>, List<OffloadToolResult>> {
             val uses = mutableListOf<OffloadToolUse>()
             val results = mutableListOf<OffloadToolResult>()
-            val arr = try { org.json.JSONArray(partsJson) } catch (_: Exception) { return uses to results }
+            val arr = try { org.json.JSONArray(readablePartsJson(partsJson)) } catch (_: Exception) { return uses to results }
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 val v = o.optJSONObject("value") ?: continue
@@ -1176,27 +1159,11 @@ class ChatRepository(internal val dao: ChatDao) {
         // still amortising query overhead for long sessions.
         private const val LOAD_PAGE_SIZE = 200
 
-        // Issue #17 — hard cap on a single message's parts_json. 500_000
-        // chars ≈ 500 KB ASCII (worst case ~2 MB UTF-8 for 4-byte runs;
-        // still small enough that any single resulting row fits inside
-        // a single CursorWindow). New oversize payloads (browser_use
-        // dumps, paste-bomb tool_results) are truncated at insert time
-        // and replaced with a single text part carrying a marker, so
-        // they remain JSON-parseable downstream.
-        internal const val MAX_MESSAGE_PARTS_JSON_LENGTH = 500_000
+        // Keep each serialized body below CursorWindow's per-row budget.
+        internal const val MAX_MESSAGE_PARTS_JSON_LENGTH = MESSAGE_PARTS_CHAR_BUDGET
 
         internal fun buildTruncatedPartsJson(original: String): String {
-            val keep = original.take(MAX_MESSAGE_PARTS_JSON_LENGTH)
-            val marker = "\n\n[Content truncated at " +
-                "${MAX_MESSAGE_PARTS_JSON_LENGTH / 1000} KB — original length " +
-                "${original.length} chars]"
-            val combined = keep + marker
-            // Wrap in a single text part so JSONArray parsers (preview
-            // extractor, search, exporter) see a well-formed payload.
-            val textObj = org.json.JSONObject()
-                .put("type", "text")
-                .put("value", combined)
-            return org.json.JSONArray().put(textObj).toString()
+            return boundedMessagePartsJson(original)
         }
     }
 }

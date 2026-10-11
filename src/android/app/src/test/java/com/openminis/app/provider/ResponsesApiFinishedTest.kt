@@ -116,9 +116,11 @@ class ResponsesApiFinishedTest {
         // must surface tool_use, or the agent loop would end the turn instead of
         // dispatching the calls.
         val body = """
-            data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1","name":"shell_execute","arguments":"{}"}}
+            data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc1","call_id":"c1","name":"read_file"}}
 
-            data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call"}]}}
+            data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc1","call_id":"c1","name":"read_file","arguments":"{}"}}
+
+            data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc1","call_id":"c1","name":"read_file","arguments":"{}"}]}}
 
         """.trimIndent() + "\n"
 

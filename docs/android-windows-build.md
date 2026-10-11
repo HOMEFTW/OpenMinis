@@ -37,6 +37,16 @@
 .\scripts\build_android_windows.ps1
 ```
 
+排查安装包或资源异常时，可通过同一入口清理构建缓存后重新打包：
+
+```powershell
+.\scripts\build_android_windows.ps1 -Clean
+```
+
+`-Clean` 仅清理 Gradle 构建产物，不删除源码、原生依赖或手机上的应用数据；也可与 `-RunAllTests` 同时使用。
+
+加上 `-BuildAndroidTests` 会同时编译 Android 仪器测试 APK（`app/build/outputs/apk/androidTest/debug/`）。此选项只构建测试包，不连接设备、不执行真机测试。历史消息恢复的正则兼容性测试位于 `LegacyAssistantPartsInstrumentedTest`，需要 Android 的 ICU 引擎；桌面 JVM 单测不能替代该测试。
+
 需要运行 Astra/Image 2.5 回归测试时：
 
 ```powershell

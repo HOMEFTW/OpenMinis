@@ -234,7 +234,7 @@ class OpenAIProviderTest {
             appendLine()
             appendLine("data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}")
             appendLine()
-            appendLine("data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}")
+            appendLine("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}")
             appendLine()
             appendLine("data: [DONE]")
             appendLine()

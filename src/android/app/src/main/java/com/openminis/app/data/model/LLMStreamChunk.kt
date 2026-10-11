@@ -18,7 +18,12 @@ sealed class LLMStreamChunk {
     /** Opaque accumulated reasoning content (DeepSeek/Kimi/QwQ `reasoning_content` field).
      *  Unlike ThinkingDelta (real-time increments), this is the full accumulated blob
      *  echoed back on subsequent turns to preserve the model's chain of thought. */
-    data class ReasoningContent(val content: String, val deepSeekReplay: String? = null) : LLMStreamChunk()
+    data class ReasoningContent(
+        val content: String,
+        val deepSeekReplay: String? = null,
+        /** Original Anthropic signed/redacted thinking and block-order metadata. */
+        val anthropicReplay: String? = null,
+    ) : LLMStreamChunk()
 
     /** Tool use streaming events */
     data class ToolUseStart(val id: String, val name: String) : LLMStreamChunk()

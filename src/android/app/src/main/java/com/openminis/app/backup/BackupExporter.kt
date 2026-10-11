@@ -805,8 +805,12 @@ class BackupExporter(
             put("version", JsonPrimitive(c.version))
         }
 
-        private fun parseParts(partsJson: String): JsonElement =
-            parseJsonOrNull(partsJson) ?: BackupFormat.json.parseToJsonElement("[]")
+        private fun parseParts(partsJson: String): JsonElement {
+            val readable = com.openminis.app.data.repository.readablePartsJson(partsJson)
+            return requireNotNull(parseJsonOrNull(readable)?.takeIf { it is kotlinx.serialization.json.JsonArray }) {
+                "Cannot export malformed message parts; original database content was preserved"
+            }
+        }
 
         private fun parseJsonOrNull(raw: String): JsonElement? =
             runCatching { BackupFormat.json.parseToJsonElement(raw) }.getOrNull()

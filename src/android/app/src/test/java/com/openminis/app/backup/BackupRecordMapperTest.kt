@@ -248,9 +248,10 @@ class BackupRecordMapperTest {
     }
 
     @Test
-    fun `malformed stored parts still export as a valid empty array`() {
-        val rec = BackupExporter.messageRecord(message.copy(partsJson = "{not json")).jsonObject
-        assertEquals("[]", rec["parts"].toString())
+    fun `malformed stored parts fail export without discarding the original`() {
+        val damaged = message.copy(partsJson = "{not json")
+        assertTrue(runCatching { BackupExporter.messageRecord(damaged) }.isFailure)
+        assertEquals("{not json", damaged.partsJson)
     }
 
     // -- Compact markers --------------------------------------------------------

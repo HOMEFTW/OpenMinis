@@ -204,7 +204,7 @@ object SessionSearch {
         // why the session matched, which beats dropping the result.
         if (partsJson.startsWith(WINDOW_MARK)) return searchHitLine(partsJson.removePrefix(WINDOW_MARK), query)
         val parts = try {
-            val arr = JSONArray(partsJson)
+            val arr = JSONArray(readablePartsJson(partsJson))
             (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
         } catch (_: Exception) {
             return null

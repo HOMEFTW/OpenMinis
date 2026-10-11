@@ -8,6 +8,14 @@ import androidx.room.Query
 import androidx.room.RawQuery
 import androidx.sqlite.db.SupportSQLiteQuery
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import com.openminis.app.data.repository.boundedMessagePartsJson
+import com.openminis.app.data.repository.forBoundedStorage
+import com.openminis.app.data.repository.readablePartsJson
+import com.openminis.app.data.repository.readMessagePageSafely
+import com.openminis.app.data.repository.withReadableAssistantParts
+import com.openminis.app.data.repository.cursorWindowFallback
+import com.openminis.app.data.repository.readMessageFromChunks
 
 /**
  * Row projection for `ChatRepository.querySessionsMeta` (T188 — backing
@@ -93,7 +101,13 @@ interface ChatDao {
     }
 
     @Query("SELECT * FROM messages WHERE id = :id AND session_id = :sessionId LIMIT 1")
-    suspend fun branchMessage(id: String, sessionId: String): MessageEntity?
+    suspend fun branchMessageRaw(id: String, sessionId: String): MessageEntity?
+
+    @androidx.room.Transaction
+    suspend fun branchMessage(id: String, sessionId: String): MessageEntity? = cursorWindowFallback(
+        { branchMessageRaw(id, sessionId) },
+        { messageMetadataById(id, sessionId)?.let { readMessageFromChunks(this, it) } },
+    )?.withReadableAssistantParts()
 
     // Sessions
     @Query("SELECT * FROM sessions ORDER BY updated_at DESC")
@@ -196,11 +210,17 @@ interface ChatDao {
      * SessionSearch.LEGACY_SEARCH_SQL.
      */
     @RawQuery
-    suspend fun runSessionSearchQuery(query: SupportSQLiteQuery): List<SessionSearchRow>
+    suspend fun runSessionSearchQueryRaw(query: SupportSQLiteQuery): List<SessionSearchRow>
+
+    suspend fun runSessionSearchQuery(query: SupportSQLiteQuery): List<SessionSearchRow> =
+        runSessionSearchQueryRaw(query).map { it.copy(hitPartsJson = it.hitPartsJson?.let(::readablePartsJson)) }
 
     /** [T-android-search-visible-only] A session's older matching messages. */
     @RawQuery
-    suspend fun runPartsJsonQuery(query: SupportSQLiteQuery): List<PartsJsonRow>
+    suspend fun runPartsJsonQueryRaw(query: SupportSQLiteQuery): List<PartsJsonRow>
+
+    suspend fun runPartsJsonQuery(query: SupportSQLiteQuery): List<PartsJsonRow> =
+        runPartsJsonQueryRaw(query).map { it.copy(partsJson = readablePartsJson(it.partsJson)) }
 
     // ─── Folders (session groups) ──────────────────────────────────────────
     // [T-android-session-grouping] "Folder" in code, "Group" in the UI.
@@ -276,14 +296,28 @@ interface ChatDao {
     suspend fun clearFolderForSessions(folderId: String)
 
     // Messages
-    @Query("SELECT * FROM messages WHERE session_id = :sessionId ORDER BY sort_order ASC")
-    suspend fun loadMessages(sessionId: String): List<MessageEntity>
+    @androidx.room.Transaction
+    suspend fun loadMessages(sessionId: String): List<MessageEntity> {
+        val result = mutableListOf<MessageEntity>()
+        var offset = 0
+        while (true) {
+            val page = loadMessagesPage(sessionId, offset, 50)
+            result.addAll(page)
+            if (page.size < 50) return result
+            offset += page.size
+        }
+    }
 
-    @Query("SELECT * FROM messages WHERE session_id = :sessionId ORDER BY sort_order ASC")
-    fun observeMessages(sessionId: String): Flow<List<MessageEntity>>
+    @Query("SELECT id FROM messages WHERE session_id = :sessionId ORDER BY sort_order ASC")
+    fun observeMessageIds(sessionId: String): Flow<List<String>>
+
+    fun observeMessages(sessionId: String): Flow<List<MessageEntity>> =
+        observeMessageIds(sessionId).map { loadMessages(sessionId) }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertMessage(message: MessageEntity)
+    suspend fun insertMessageRaw(message: MessageEntity)
+
+    suspend fun insertMessage(message: MessageEntity) = insertMessageRaw(message.forBoundedStorage())
 
     /**
      * [T-android-voice-correction] User messages newer than [since] (epoch ms),
@@ -367,7 +401,12 @@ interface ChatDao {
         WHERE session_id = :sessionId
         ORDER BY sort_order DESC LIMIT 1
     """)
-    suspend fun lastMessageParts(sessionId: String): String?
+    suspend fun lastMessagePartsRaw(sessionId: String): String?
+
+    suspend fun lastMessageParts(sessionId: String): String? = cursorWindowFallback(
+        { lastMessagePartsRaw(sessionId) },
+        { messageHeadNewestFirst(sessionId, 0)?.partsJson },
+    )?.let(::readablePartsJson)
 
     /**
      * [T-android-session-paused-badge-hardkill] The last message (role +
@@ -384,7 +423,19 @@ interface ChatDao {
             SELECT MAX(m2.sort_order) FROM messages m2 WHERE m2.session_id = m.session_id
         )
     """)
-    suspend fun lastMessageTailPerSession(): List<SessionTailRow>
+    suspend fun lastMessageTailPerSessionRaw(): List<SessionTailRow>
+
+    suspend fun lastMessageTailPerSession(): List<SessionTailRow> = cursorWindowFallback(
+        { lastMessageTailPerSessionRaw() },
+        {
+            messageSessionIds().mapNotNull { sessionId ->
+                messageHeadNewestFirst(sessionId, 0)?.let { SessionTailRow(sessionId, it.role, it.partsJson) }
+            }
+        },
+    ).map { it.copy(partsJson = readablePartsJson(it.partsJson)) }
+
+    @Query("SELECT DISTINCT session_id FROM messages")
+    suspend fun messageSessionIds(): List<String>
 
     // Session: memory_enabled
     @Query("UPDATE sessions SET memory_enabled = :enabled, updated_at = :updatedAt WHERE id = :id")
@@ -414,7 +465,10 @@ interface ChatDao {
     // but the kept assistant row itself needs its parts trimmed to before the
     // target tool_use — that's an UPDATE of an existing row, not a delete.
     @Query("UPDATE messages SET parts_json = :partsJson, updated_at = :updatedAt WHERE id = :id")
-    suspend fun updateMessageParts(id: String, partsJson: String, updatedAt: Long = System.currentTimeMillis())
+    suspend fun updateMessagePartsRaw(id: String, partsJson: String, updatedAt: Long)
+
+    suspend fun updateMessageParts(id: String, partsJson: String, updatedAt: Long = System.currentTimeMillis()) =
+        updateMessagePartsRaw(id, boundedMessagePartsJson(partsJson), updatedAt)
 
     // [T-error-persist-android] Write/clear the terminal error sticker on a
     // specific message row by id. Used when the persisted DB id is known
@@ -461,7 +515,18 @@ interface ChatDao {
         WHERE session_id = :sessionId
         ORDER BY sort_order DESC LIMIT 1 OFFSET :offset
     """)
-    suspend fun messageHeadNewestFirst(sessionId: String, offset: Int): MessageHeadRow?
+    suspend fun messageHeadNewestFirstRaw(sessionId: String, offset: Int): MessageHeadRow?
+
+    @androidx.room.Transaction
+    suspend fun messageHeadNewestFirst(sessionId: String, offset: Int): MessageHeadRow? = cursorWindowFallback(
+        { messageHeadNewestFirstRaw(sessionId, offset) },
+        {
+            messageMetadataNewestFirst(sessionId, offset)?.let { meta ->
+                val row = readMessageFromChunks(this, meta)
+                MessageHeadRow(row.id, row.role, row.partsJson)
+            }
+        },
+    )?.let { it.copy(partsJson = readablePartsJson(it.partsJson)) }
 
     // Pinned sessions first, then by updated_at
     @Query("SELECT * FROM sessions ORDER BY CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END, pinned_at DESC, updated_at DESC")
@@ -507,7 +572,10 @@ interface ChatDao {
      * [SessionMetaRow].
      */
     @RawQuery
-    suspend fun runSessionsMetaQuery(query: SupportSQLiteQuery): List<SessionMetaRow>
+    suspend fun runSessionsMetaQueryRaw(query: SupportSQLiteQuery): List<SessionMetaRow>
+
+    suspend fun runSessionsMetaQuery(query: SupportSQLiteQuery): List<SessionMetaRow> =
+        runSessionsMetaQueryRaw(query).map { it.copy(firstUserMsg = it.firstUserMsg?.let(::readablePartsJson)) }
 
     /**
      * Same dynamic-SQL pattern as [runSessionsMetaQuery] but for the messages
@@ -515,7 +583,10 @@ interface ChatDao {
      * matching [MessageSearchRow].
      */
     @RawQuery
-    suspend fun runMessageSearchQuery(query: SupportSQLiteQuery): List<MessageSearchRow>
+    suspend fun runMessageSearchQueryRaw(query: SupportSQLiteQuery): List<MessageSearchRow>
+
+    suspend fun runMessageSearchQuery(query: SupportSQLiteQuery): List<MessageSearchRow> =
+        runMessageSearchQueryRaw(query).map { it.copy(partsJson = readablePartsJson(it.partsJson)) }
 
     /**
      * Paginated message page for `minis-sessions-cli messages --offset --limit`.
@@ -528,7 +599,13 @@ interface ChatDao {
         ORDER BY sort_order ASC, created_at ASC
         LIMIT :limit OFFSET :offset
     """)
-    suspend fun loadMessagesPage(sessionId: String, offset: Int, limit: Int): List<MessageEntity>
+    suspend fun loadMessagesPageRaw(sessionId: String, offset: Int, limit: Int): List<MessageEntity>
+
+    @androidx.room.Transaction
+    suspend fun loadMessagesPage(sessionId: String, offset: Int, limit: Int): List<MessageEntity> =
+        readMessagePageSafely(this, sessionId, offset, limit) { pageOffset, pageLimit ->
+            loadMessagesPageRaw(sessionId, pageOffset, pageLimit)
+        }
 
     /**
      * [T-android-sessions-cli-messages-daterange] GH#200 (iOS 8f3189a73).
@@ -548,13 +625,51 @@ interface ChatDao {
         ORDER BY sort_order ASC, created_at ASC
         LIMIT :limit OFFSET :offset
     """)
-    suspend fun loadMessagesPageInRange(
+    suspend fun loadMessagesPageInRangeRaw(
         sessionId: String,
         offset: Int,
         limit: Int,
         startMs: Long?,
         endMs: Long?,
     ): List<MessageEntity>
+
+    @androidx.room.Transaction
+    suspend fun loadMessagesPageInRange(
+        sessionId: String, offset: Int, limit: Int, startMs: Long?, endMs: Long?,
+    ): List<MessageEntity> = readMessagePageSafely(this, sessionId, offset, limit, startMs, endMs) { pageOffset, pageLimit ->
+        loadMessagesPageInRangeRaw(sessionId, pageOffset, pageLimit, startMs, endMs)
+    }
+
+    /** Parts and reasoning are read separately when a legacy row exceeds CursorWindow. */
+    @Query("""
+        SELECT id, session_id, role, '' AS parts_json, created_at, token_usage, sort_order,
+               NULL AS reasoning_content, stream_interrupt_count, updated_at, error_info,
+               model_id, model_display_name, provider_type, provider_instance_id
+        FROM messages WHERE session_id = :sessionId
+          AND (:startMs IS NULL OR created_at >= :startMs)
+          AND (:endMs IS NULL OR created_at <= :endMs)
+        ORDER BY sort_order ASC, created_at ASC LIMIT :limit OFFSET :offset
+    """)
+    suspend fun loadMessageMetadataPage(sessionId: String, offset: Int, limit: Int, startMs: Long?, endMs: Long?): List<MessageEntity>
+
+    @Query("""
+        SELECT id, session_id, role, '' AS parts_json, created_at, token_usage, sort_order,
+               NULL AS reasoning_content, stream_interrupt_count, updated_at, error_info,
+               model_id, model_display_name, provider_type, provider_instance_id
+        FROM messages WHERE id = :id AND session_id = :sessionId LIMIT 1
+    """)
+    suspend fun messageMetadataById(id: String, sessionId: String): MessageEntity?
+
+    @Query("""
+        SELECT id, session_id, role, '' AS parts_json, created_at, token_usage, sort_order,
+               NULL AS reasoning_content, stream_interrupt_count, updated_at, error_info,
+               model_id, model_display_name, provider_type, provider_instance_id
+        FROM messages WHERE session_id = :sessionId ORDER BY sort_order DESC LIMIT 1 OFFSET :offset
+    """)
+    suspend fun messageMetadataNewestFirst(sessionId: String, offset: Int): MessageEntity?
+
+    @Query("SELECT substr(CASE WHEN :reasoning THEN reasoning_content ELSE parts_json END, :start, :length) FROM messages WHERE id = :id")
+    suspend fun loadMessageColumnChunk(id: String, reasoning: Boolean, start: Int, length: Int): String?
 
     /** Used by `minis-sessions-cli messages` to surface the total count
      *  alongside the paginated slice so callers can compute `hasMore`. */

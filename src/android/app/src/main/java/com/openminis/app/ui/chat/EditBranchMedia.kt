@@ -4,6 +4,7 @@ import java.io.File
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
+import com.openminis.app.data.repository.readablePartsJson
 
 /** Give copied media references independent files so deleting the source cannot break the branch. */
 internal class EditBranchMedia(private val mediaRoot: File, branchId: String) {
@@ -14,7 +15,7 @@ internal class EditBranchMedia(private val mediaRoot: File, branchId: String) {
         require(directory.canonicalFile.toPath().startsWith(mediaRoot.canonicalFile.toPath()) && directory.canonicalFile == directory.absoluteFile)
     }
     fun rewrite(parts: String): String {
-        val array = JSONArray(parts)
+        val array = JSONArray(readablePartsJson(parts))
         fun visit(value: Any?) {
             when (value) {
                 is JSONObject -> {

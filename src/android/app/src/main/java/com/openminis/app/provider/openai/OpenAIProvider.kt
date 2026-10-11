@@ -20,6 +20,8 @@ import com.openminis.app.provider.cancelOnCancellation
 import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.SseEventReader
+import com.openminis.app.provider.parseToolInputObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -1036,60 +1038,23 @@ class OpenAIProvider private constructor(
         // the stream tail can emit Finished for streams that end WITHOUT a
         // `data: [DONE]` sentinel — see the emission site after the read loop.
         var finishReason: String? = null
-        // True once the [DONE] branch has emitted Finished, so the tail below
-        // does not send a second one.
-        var sentFinished = false
+        val events = SseEventReader(reader)
 
         try {
             sendChunk(LLMStreamChunk.Started)
-            var line: String?
 
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                // Tolerate `data:` with or without the optional space — the
-                // HTML5 SSE spec only treats one leading space as ignorable,
-                // and some OpenAI-compatible servers (e.g. China Telecom's
-                // eaichat.ctyun.cn deepseek-v4-oc endpoint) emit `data:{...}`
-                // with no space. Strict `data: ` matching dropped every
-                // chunk on those providers, surfacing as empty-stream errors.
-                if (!l.startsWith("data:")) continue
-                val payload = l.removePrefix("data:").let {
-                    if (it.startsWith(" ")) it.removePrefix(" ") else it
-                }
+            while (true) {
+                val payload = events.nextData() ?: break
                 if (payload == "[DONE]") {
-                    // [T-android-think-prefix-stream] Flush whatever the parser
-                    // still holds (a cross-chunk tag tail, or an unterminated
-                    // <think>). Idempotent, so the finish_reason path may also
-                    // call it. Withheld trailing whitespace is dropped by design.
-                    thinkParser.finishTurn().let { fin ->
-                        if (fin.thinking.isNotEmpty()) {
-                            reasoningAccum.append(fin.thinking)
-                            sendChunk(LLMStreamChunk.ThinkingDelta(fin.thinking))
-                        }
-                        if (fin.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(fin.visible))
-                    }
-                    // [T-android-think-prefix-stream] Persist reasoning captured
-                    // EITHER from the `reasoning_content` field or from a
-                    // `<think>` prefix. Gating solely on sawReasoningField would
-                    // stream think-tag reasoning live and then drop it — the
-                    // thinking bubble would vanish on session reload.
-                    if (sawReasoningField || reasoningAccum.isNotEmpty()) {
-                        sendChunk(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
-                    }
-                    sendChunk(LLMStreamChunk.Finished(finishReason))
-                    sentFinished = true
                     break
                 }
 
-                val event = try { JSONObject(payload) } catch (e: Exception) {
-                    com.openminis.app.logging.AppLogger.warning(
-                        "OpenAIProvider",
-                        "[T321] SSE JSON parse failed: ${e.message} payload=${payload.take(300)}"
-                    )
-                    continue
+                val event = parseToolInputObject(payload)
+                if (event.optString("type") == "error" || event.optJSONObject("error") != null) {
+                    throw mapStreamError(event.optJSONObject("error") ?: event)
                 }
                 com.openminis.app.logging.AppLogger.trace("ToolChain") { "SSE type=${event.optString("type")} bytes=${payload.length}" }
                 sseEventCount++
@@ -1176,6 +1141,9 @@ class OpenAIProvider private constructor(
                                 val itemId = item.optString("id", "")
                                 val callId = item.optString("call_id", "")
                                 val name = item.optString("name", "")
+                                if (itemId.isBlank() || callId.isBlank() || name.isBlank() || itemId in responsesToolCalls) {
+                                    throw LLMError.DecodingError(IllegalArgumentException("Invalid or duplicate Responses tool identity"))
+                                }
                                 if (itemId.isNotEmpty() && callId.isNotEmpty() && name.isNotEmpty()) {
                                     responsesToolCalls[itemId] = ResponsesToolCallAccumulator(callId = callId, name = name)
                                     val combined = combineResponsesAPIIds(callId, itemId)
@@ -1194,15 +1162,7 @@ class OpenAIProvider private constructor(
                                 val combined = combineResponsesAPIIds(acc.callId, itemId)
                                 sendChunk(LLMStreamChunk.ToolInputDelta(combined, acc.args.toString()))
                             } else if (acc == null) {
-                                // Pre-T107 this branch silently dropped the entire tool call
-                                // because no accumulator was set up — leaving the model with
-                                // no real tool channel and provoking <tool_call>{...} text
-                                // hallucinations. Keep a warn so any future regression here
-                                // surfaces in the daily log instead of a silent failure.
-                                com.openminis.app.logging.AppLogger.warning(
-                                    "OpenAIProvider",
-                                    "Responses API: function_call_arguments.delta for unknown item_id=$itemId — dropping"
-                                )
+                                throw LLMError.DecodingError(IllegalArgumentException("Arguments for unknown Responses tool item"))
                             }
                         }
                         // The accumulator is finalized at response.output_item.done, when the
@@ -1214,12 +1174,13 @@ class OpenAIProvider private constructor(
                             val itemType = item.optString("type", "")
                             if (itemType == "function_call") {
                                 val itemId = item.optString("id", "")
-                                val acc = responsesToolCalls.remove(itemId) ?: continue
+                                if (itemId.isBlank()) throw LLMError.DecodingError(IllegalArgumentException("Missing Responses tool item id"))
+                                val acc = responsesToolCalls.getOrPut(itemId) {
+                                    ResponsesToolCallAccumulator(callId = item.getString("call_id"), name = item.getString("name"))
+                                }
                                 val argsStr = item.optString("arguments", acc.args.toString())
-                                val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
-                                val combined = combineResponsesAPIIds(acc.callId, itemId)
-                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${args.toString().take(300)}")
-                                sendChunk(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
+                                acc.args.clear()
+                                acc.args.append(argsStr)
                             }
                         }
                         type == "response.failed" -> {
@@ -1239,12 +1200,7 @@ class OpenAIProvider private constructor(
                                 "OpenAIProvider",
                                 "Responses API response.failed — code=$code message=$message"
                             )
-                            if (code == "server_error" || code == "rate_limit_exceeded") {
-                                // Transient family: retry on the same model
-                                // rather than falling back through the group.
-                                throw LLMError.TransientError("[$code] $message")
-                            }
-                            throw LLMError.ProviderError("[$code] $message")
+                            throw mapStreamError(err ?: JSONObject().put("message", message))
                         }
                         type == "response.incomplete" -> {
                             // [T-responses-terminal-events] The server ended the
@@ -1329,6 +1285,25 @@ class OpenAIProvider private constructor(
                             progressWatchdog.markProgress()
                             val resp = event.optJSONObject("response")
                             val status = resp?.optString("status", "")
+                            if (status != "completed") {
+                                throw LLMError.DecodingError(IllegalArgumentException("response.completed has no completed status"))
+                            }
+                            // The terminal response is authoritative, including for relays
+                            // that omit output_item.done or stream no argument deltas.
+                            resp?.optJSONArray("output")?.let { output ->
+                                for (i in 0 until output.length()) {
+                                    val item = output.optJSONObject(i) ?: continue
+                                    if (item.optString("type") != "function_call") continue
+                                    val itemId = item.getString("id")
+                                    val acc = responsesToolCalls.getOrPut(itemId) { ResponsesToolCallAccumulator() }
+                                    acc.callId = item.getString("call_id")
+                                    acc.name = item.getString("name")
+                                    if (item.has("arguments")) {
+                                        acc.args.clear()
+                                        acc.args.append(item.getString("arguments"))
+                                    }
+                                }
+                            }
                             // When the model emitted tool calls the API returns status=completed
                             // with no stop_reason; surface "tool_use" so the agent loop knows to
                             // dispatch the calls instead of treating the turn as final.
@@ -1450,7 +1425,10 @@ class OpenAIProvider private constructor(
                                 val idx = tc.optInt("index", 0)
                                 val acc = toolCallAccumulators.getOrPut(idx) { ToolCallAccumulator() }
 
-                                tc.safeOptString("id", "").let { if (it.isNotEmpty()) acc.id = it }
+                                tc.safeOptString("id", "").let { if (it.isNotEmpty()) {
+                                    if (acc.id.isNotEmpty() && acc.id != it) throw LLMError.DecodingError(IllegalArgumentException("Tool index changed identity"))
+                                    acc.id = it
+                                } }
                                 tc.optJSONObject("function")?.let { fn ->
                                     fn.safeOptString("name", "").let { if (it.isNotEmpty()) acc.name = it }
                                     fn.safeOptString("arguments", "").let { if (it.isNotEmpty()) acc.args.append(it) }
@@ -1508,78 +1486,27 @@ class OpenAIProvider private constructor(
                 if (fin.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(fin.visible))
             }
 
-            // Emit ToolCallComplete for all accumulated tool calls
-            for ((_, acc) in toolCallAccumulators) {
-                if (acc.id.isNotEmpty() && acc.name.isNotEmpty()) {
-                    val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
-                    android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${args.toString().take(300)}")
-                    sendChunk(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, args))
-                }
+            if (!sawFinishReason && (toolCallAccumulators.isNotEmpty() || responsesToolCalls.isNotEmpty())) {
+                throw LLMError.TransientError("OpenAI stream ended before a terminal response")
             }
-            // Drain Responses-API tool accumulators that didn't get an output_item.done
-            // before the stream closed. Without this, mid-tool-call truncation (server
-            // closes connection while function_call_arguments is still streaming) leaves
-            // ChatViewModel.toolCalls empty: the agent loop sees no tool calls, exits,
-            // and the UI hangs with the tool thumbnail spinning while the stop button
-            // disappears (T247 root cause; same path hit by T237 DeepSeek truncation).
-            for ((itemId, acc) in responsesToolCalls) {
-                if (acc.callId.isNotEmpty() && acc.name.isNotEmpty()) {
-                    val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
-                    val combined = combineResponsesAPIIds(acc.callId, itemId)
-                    com.openminis.app.logging.AppLogger.warning(
-                        "OpenAIProvider",
-                        "Stream ended mid-tool-call id=$combined name=${acc.name} argsLen=${acc.args.length} — flushing as ToolCallComplete (T248)",
-                    )
-                    sendChunk(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
+            val discard = finishReason !in setOf("stop", "end_turn", "tool_calls", "tool_use", "function_call")
+            if (sawFinishReason && !discard) {
+                val calls = mutableListOf<LLMStreamChunk.ToolCallComplete>()
+                for (acc in toolCallAccumulators.values) {
+                    if (acc.id.isBlank() || acc.name.isBlank()) throw LLMError.DecodingError(IllegalArgumentException("Incomplete tool identity"))
+                    calls.add(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, parseToolInputObject(acc.args.toString())))
                 }
+                for ((itemId, acc) in responsesToolCalls) {
+                    if (acc.callId.isBlank() || acc.name.isBlank()) throw LLMError.DecodingError(IllegalArgumentException("Incomplete tool identity"))
+                    calls.add(LLMStreamChunk.ToolCallComplete(combineResponsesAPIIds(acc.callId, itemId), acc.name, parseToolInputObject(acc.args.toString())))
+                }
+                if (calls.map { it.id.substringBefore('|') }.toSet().size != calls.size) throw LLMError.DecodingError(IllegalArgumentException("Duplicate streamed tool id"))
+                // Validate every input before exposing the first executable call.
+                calls.forEach { sendChunk(it) }
             }
-            responsesToolCalls.clear()
-
-            // T321: stream ended — final tally + warning if we never saw a
-            // finish_reason. The latter is the strongest signal of a server-
-            // side truncation / connection-dropped scenario.
-            // [T-android-responses-missing-finished] Emit the terminal chunk for
-            // streams that end without a `data: [DONE]` sentinel.
-            //
-            // Finished was only ever sent from the [DONE] branch. Chat
-            // Completions always sends that sentinel, but the Responses API
-            // terminates with `response.completed` and many relays simply close
-            // the socket afterwards — no [DONE] ever arrives. The read loop then
-            // exits normally, the channel closes, and no Finished is emitted.
-            //
-            // Downstream, ChatViewModel.runAgentLoop only ever assigns
-            // turnFinishReason from a Finished chunk, so it stayed null and the
-            // turn was reported as "stream closed without a finish reason" —
-            // the red "连接中断，此回复可能不完整" banner on a reply that was in
-            // fact complete. It looked intermittent because it depends on the
-            // relay: those that do append [DONE] worked, the rest did not, which
-            // is why the same model on the same account failed only sometimes,
-            // and why Chat Completions models (deepseek) never showed it.
-            //
-            // Gated on sawFinishReason: reaching here WITHOUT one is a genuine
-            // truncation, and must keep falling through to the warning below so
-            // the interrupted-reply UI still fires for real drops.
-            if (sawFinishReason && !sentFinished) {
-                // Mirror the [DONE] branch's ordering: flush the think-tag
-                // parser and reasoning blob before the terminal chunk, or a
-                // trailing <think> tail would be dropped and reasoning would
-                // vanish on reload.
-                thinkParser.finishTurn().let { fin ->
-                    if (fin.thinking.isNotEmpty()) {
-                        reasoningAccum.append(fin.thinking)
-                        sendChunk(LLMStreamChunk.ThinkingDelta(fin.thinking))
-                    }
-                    if (fin.visible.isNotEmpty()) sendChunk(LLMStreamChunk.Text(fin.visible))
-                }
-                if (sawReasoningField || reasoningAccum.isNotEmpty()) {
-                    sendChunk(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
-                }
-                sendChunk(LLMStreamChunk.Finished(finishReason))
-                sentFinished = true
-                com.openminis.app.logging.AppLogger.info(
-                    "OpenAIProvider",
-                    "[T321] stream ended without [DONE] — emitted Finished(finishReason=$finishReason) from tail"
-                )
+            if (sawFinishReason) {
+                if (sawReasoningField || reasoningAccum.isNotEmpty()) sendChunk(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
+                sendChunk(LLMStreamChunk.Finished(finishReason, discardToolCalls = discard))
             }
 
             if (!sawFinishReason) {
@@ -1612,11 +1539,7 @@ class OpenAIProvider private constructor(
                     "(events=$sseEventCount contentLen=$contentLen reasoningLen=$reasoningLen)"
             )
             val timeout = progressWatchdog.timeoutException
-            cancel(
-                if (timeout == null) "Stream error" else "SSE stream idle timeout",
-                if (timeout == null) mapError(e)
-                else com.openminis.app.data.model.LLMError.NetworkError(timeout),
-            )
+            channel.close(if (timeout == null) mapError(e) else LLMError.NetworkError(timeout))
         } finally {
             reader.close()
             cleanupCall()
@@ -2221,6 +2144,7 @@ class OpenAIProvider private constructor(
                         val textParts = msg.contentParts.filterIsInstance<AgentContentPart.Text>()
                         val imageParts = msg.contentParts.filterIsInstance<AgentContentPart.ImageData>()
 
+                        val resultImageMessages = mutableListOf<JSONObject>()
                         for (tr in toolResults) {
                             messagesArray.put(JSONObject().apply {
                                 put("role", "tool")
@@ -2249,7 +2173,7 @@ class OpenAIProvider private constructor(
                                     tr.imageMimeType ?: "image/jpeg"
                                 } else "image/jpeg"
                                 val b64 = Base64.encodeToString(safeBytes, Base64.NO_WRAP)
-                                messagesArray.put(JSONObject().apply {
+                                resultImageMessages.add(JSONObject().apply {
                                     put("role", "user")
                                     put("content", JSONArray().apply {
                                         put(JSONObject().apply {
@@ -2269,6 +2193,8 @@ class OpenAIProvider private constructor(
                                 })
                             }
                         }
+                        // Complete the parallel tool-result batch before any ordinary user message.
+                        resultImageMessages.forEach { messagesArray.put(it) }
                         // T132: emit text + image_url parts as a structured user
                         // message. The previous structured-contentParts branch
                         // dropped AgentContentPart.ImageData entirely — only the
@@ -2476,12 +2402,13 @@ class OpenAIProvider private constructor(
      * assistant tool_calls on this provider).
      */
     private fun globallyDedupeToolCallIds(messagesArray: JSONArray) {
-        // raw id → max suffix already issued (0 = unused, 1 = raw kept,
-        // 2+ = renamed copies).
-        val seen = HashMap<String, Int>()
-        // raw id → latest renamed id, so the next role:"tool" reply
-        // claiming this raw id can pick up the same rewrite.
-        val renameForPendingResults = HashMap<String, String>()
+        val reserved = mutableSetOf<String>()
+        for (i in 0 until messagesArray.length()) {
+            val calls = messagesArray.optJSONObject(i)?.optJSONArray("tool_calls") ?: continue
+            for (j in 0 until calls.length()) reserved.add(calls.getJSONObject(j).getString("id"))
+        }
+        val usedIds = mutableSetOf<String>()
+        val renameForPendingResults = HashMap<String, java.util.ArrayDeque<String>>()
         var renamedCount = 0
         val n = messagesArray.length()
         for (i in 0 until n) {
@@ -2494,25 +2421,24 @@ class OpenAIProvider private constructor(
                         val call = toolCalls.optJSONObject(j) ?: continue
                         val rawId = call.optString("id", "")
                         if (rawId.isEmpty()) continue
-                        val used = seen[rawId] ?: 0
-                        val renamedId: String
-                        if (used == 0) {
-                            renamedId = rawId
-                            seen[rawId] = 1
-                        } else {
-                            val next = used + 1
-                            renamedId = "$rawId-$next"
-                            seen[rawId] = next
+                        var renamedId = rawId
+                        if (rawId in usedIds) {
+                            var next = 2
+                            do {
+                                val suffix = "-${next++}"
+                                renamedId = rawId.take(64 - suffix.length) + suffix
+                            } while (renamedId in usedIds || renamedId in reserved)
                             renamedCount += 1
                             call.put("id", renamedId)
                         }
-                        renameForPendingResults[rawId] = renamedId
+                        usedIds.add(renamedId)
+                        renameForPendingResults.getOrPut(rawId) { java.util.ArrayDeque() }.addLast(renamedId)
                     }
                 }
                 "tool" -> {
                     val rawId = msg.optString("tool_call_id", "")
                     if (rawId.isEmpty()) continue
-                    val renamedId = renameForPendingResults[rawId] ?: continue
+                    val renamedId = renameForPendingResults[rawId]?.pollFirst() ?: continue
                     if (renamedId != rawId) {
                         msg.put("tool_call_id", renamedId)
                     }
@@ -2882,15 +2808,12 @@ class OpenAIProvider private constructor(
             }
         }
 
-        var line: String?
-        while (reader.readLine().also { line = it } != null) {
-            val l = line ?: continue
-            // Tolerate both `data: {…}` and `data:{…}` (same as the chat path).
-            if (!l.startsWith("data:")) continue
-            val payload = l.removePrefix("data:").let { if (it.startsWith(" ")) it.removePrefix(" ") else it }
+        val events = SseEventReader(reader)
+        while (true) {
+            val payload = events.nextData() ?: break
             if (payload == "[DONE]") break
 
-            val event = try { JSONObject(payload) } catch (e: Exception) { continue }
+            val event = parseToolInputObject(payload)
             when (event.optString("type")) {
                 "response.output_item.done" -> {
                     onProgress()
@@ -2919,11 +2842,8 @@ class OpenAIProvider private constructor(
                     }
                 }
                 "response.failed", "error" -> {
-                    val msg = event.optJSONObject("response")?.optJSONObject("error")?.optString("message")
-                        ?.takeIf { it.isNotEmpty() }
-                        ?: event.optJSONObject("error")?.optString("message")?.takeIf { it.isNotEmpty() }
-                        ?: "Codex image generation failed"
-                    throw LLMError.ProviderError(msg)
+                    throw mapStreamError(event.optJSONObject("response")?.optJSONObject("error")
+                        ?: event.optJSONObject("error") ?: event)
                 }
             }
         }
@@ -3480,6 +3400,7 @@ class OpenAIProvider private constructor(
                 })
             }
         }
+        globallyDedupeResponsesIds(input)
         body.put("input", ResponsesToolPairing.sanitize(input).items)
 
         // [T-android-model-use-passthrough-mode GH#72] Same verbatim merge as the
@@ -3504,9 +3425,52 @@ class OpenAIProvider private constructor(
         else combined.substring(0, sep) to combined.substring(sep + 1)
     }
 
-    /** Responses-API ids must be ≤64 chars; truncate defensively to avoid 400s. */
+    /** Cap each protocol ID independently; never truncate a composite or conflate long prefixes. */
     private fun capResponsesId(id: String): String =
-        if (id.length <= 64) id else id.substring(0, 64)
+        if (id.length <= 64) id else {
+            val prefix = if (id.startsWith("fc_")) "fc_" else "call_"
+            val hash = java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            prefix + hash.take(64 - prefix.length)
+        }
+
+    private fun globallyDedupeResponsesIds(input: JSONArray) {
+        val reservedCalls = mutableSetOf<String>()
+        val reservedItems = mutableSetOf<String>()
+        for (i in 0 until input.length()) {
+            val item = input.getJSONObject(i)
+            if (item.optString("type") == "function_call") {
+                reservedCalls.add(item.getString("call_id"))
+                reservedItems.add(item.getString("id"))
+            }
+        }
+        val usedCalls = mutableSetOf<String>()
+        val usedItems = mutableSetOf<String>()
+        val pending = mutableMapOf<String, java.util.ArrayDeque<String>>()
+        fun allocate(raw: String, used: MutableSet<String>, reserved: Set<String>): String {
+            var candidate = raw
+            var suffixNumber = 2
+            if (raw in used) do {
+                val suffix = "-${suffixNumber++}"
+                candidate = raw.take(64 - suffix.length) + suffix
+            } while (candidate in used || candidate in reserved)
+            used.add(candidate)
+            return candidate
+        }
+        for (i in 0 until input.length()) {
+            val item = input.getJSONObject(i)
+            when (item.optString("type")) {
+                "function_call" -> {
+                    val raw = item.getString("call_id")
+                    val call = allocate(raw, usedCalls, reservedCalls)
+                    item.put("call_id", call)
+                    item.put("id", allocate(item.getString("id"), usedItems, reservedItems))
+                    pending.getOrPut(raw) { java.util.ArrayDeque() }.addLast(call)
+                }
+                "function_call_output" -> pending[item.getString("call_id")]?.pollFirst()?.let { item.put("call_id", it) }
+            }
+        }
+    }
 
     /**
      * [T-android-tool-call-id-too-long] Chat-Completions `tool_calls[].id` /
@@ -3621,6 +3585,18 @@ class OpenAIProvider private constructor(
             cacheReadInputTokens = cacheRead,
             latestContextTokens = inputTokens,
         )
+    }
+
+    private fun mapStreamError(error: JSONObject): LLMError {
+        val code = error.safeOptString("code", "").ifEmpty { error.safeOptString("type", "") }
+        val message = error.safeOptString("message", "Stream failed")
+        val status = (error.opt("code") as? Number)?.toInt() ?: (error.opt("status") as? Number)?.toInt()
+        return when {
+            status == 401 || status == 403 || code in setOf("invalid_api_key", "authentication_error", "permission_error", "unauthorized", "invalid_token") -> LLMError.InvalidApiKey(message)
+            status == 429 || code in setOf("rate_limit_exceeded", "rate_limit_error", "rate_limited") -> LLMError.RateLimited()
+            status != null && status >= 500 || code in setOf("server_error", "api_error", "overloaded_error", "service_unavailable") -> LLMError.TransientError("[$code] $message", status)
+            else -> LLMError.ProviderError("[$code] $message", status)
+        }
     }
 
     private fun mapHttpError(statusCode: Int, body: String): LLMError {

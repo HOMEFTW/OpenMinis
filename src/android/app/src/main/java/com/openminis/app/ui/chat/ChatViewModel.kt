@@ -8580,14 +8580,13 @@ class ChatViewModel(
         var bestPart = -1
         var bestBytes = 0
         for ((mi, message) in agentHistory.withIndex()) {
+            if (message.hasSignedToolReplay()) continue
             for ((pi, part) in message.contentParts.withIndex()) {
                 val eligible = when (part) {
                     is AgentContentPart.Text -> !ContextOffload.isOffloadPlaceholder(part.text)
                     is AgentContentPart.ToolResult -> !ContextOffload.isOffloadPlaceholder(part.content)
                     is AgentContentPart.ImageData -> part.data.isNotEmpty()
-                    is AgentContentPart.ToolUse -> !part.isOffloadedArgument &&
-                        part.name in setOf("file_write", "file_edit") &&
-                        part.input.optString("content").isNotEmpty()
+                    is AgentContentPart.ToolUse -> offloadableToolArguments(part, 0).isNotEmpty()
                 }
                 if (!eligible) continue
                 val bytes = partPayloadBytes(part)
@@ -8615,25 +8614,15 @@ class ChatViewModel(
                 AgentContentPart.Text(ContextOffload.stub(tokens, bestBytes, path))
             }
             is AgentContentPart.ToolUse -> {
-                val path = ContextOffload.offloadContent(context, fsSessionId, part.input.optString("content"), id, part.name)
-                if (path.isEmpty()) return false
-                val input = JSONObject(part.input.toString())
-                input.put("content", ContextOffload.prunedArgumentNotice(tokens, bestBytes, path))
-                part.copy(input = input, isOffloadedArgument = true)
+                offloadToolArguments(part, 0, tokens) { field, content ->
+                    ContextOffload.offloadContent(context, fsSessionId, content, id, "${part.name}_$field")
+                } ?: return false
             }
             is AgentContentPart.ToolResult -> {
-                val textPath = if (part.content.isNotEmpty()) {
-                    ContextOffload.offloadContent(context, fsSessionId, part.content, id, part.name)
-                        .takeIf { it.isNotEmpty() } ?: return false
-                } else null
-                val imagePath = part.imageData?.let {
-                    ContextOffload.offloadImage(context, fsSessionId, it, id, part.imageMimeType ?: "image/png")
-                        .takeIf { path -> path.isNotEmpty() } ?: return false
-                }
-                val paths = listOfNotNull(textPath, imagePath)
-                if (paths.isEmpty()) return false
-                part.copy(content = paths.joinToString("\n") { ContextOffload.stub(tokens, bestBytes, it) },
-                    imageData = null, imageMimeType = null, imageLinuxPath = imagePath ?: part.imageLinuxPath)
+                offloadToolResult(part, tokens, bestBytes, minTextChars = 500, minImageBytes = 0,
+                    writeText = { ContextOffload.offloadContent(context, fsSessionId, it, id, part.name) },
+                    writeImage = { ContextOffload.offloadImage(context, fsSessionId, it, id, part.imageMimeType ?: "image/png") },
+                ) ?: return false
             }
         }
         val parts = message.contentParts.toMutableList()
@@ -8672,7 +8661,7 @@ class ChatViewModel(
      *
      * Eligibility (parity with iOS lines 7556-7596):
      *   - `ToolResult` with content > 500 chars OR image data > 1 KB
-     *   - `ToolUse` for `file_write` / `file_edit` whose `content` arg > 500 chars
+     *   - `ToolUse` for `file_write` / `file_edit` with a body argument > 500 chars
      *   - bare `ImageData` part > 1 KB
      *
      * Candidates are sorted oldest first, then by token count, and offloaded
@@ -8731,6 +8720,7 @@ class ChatViewModel(
 
         for (msgIdx in 0 until candidateUpper) {
             val msg = agentHistory[msgIdx]
+            if (msg.hasSignedToolReplay()) continue
             for ((partIdx, part) in msg.contentParts.withIndex()) {
                 if (emergencyToolResults && part !is AgentContentPart.ToolResult) continue
                 when (part) {
@@ -8751,12 +8741,10 @@ class ChatViewModel(
                         candidates.add(OffloadCandidate(msgIdx, partIdx, tokens, bytes, part.id, part.name))
                     }
                     is AgentContentPart.ToolUse -> {
-                        if (part.name != "file_write" && part.name != "file_edit") continue
-                        if (part.isOffloadedArgument || ContextOffload.isOffloadPlaceholder(part.input.optString("content", ""))) continue
-                        val content = part.input.optString("content", "")
-                        if (content.length <= 500) continue
+                        val arguments = offloadableToolArguments(part, 500)
+                        if (arguments.isEmpty()) continue
                         val tokens = countPartTokens(part)
-                        val bytes = content.toByteArray(Charsets.UTF_8).size
+                        val bytes = arguments.values.sumOf { it.toByteArray(Charsets.UTF_8).size }
                         candidates.add(OffloadCandidate(msgIdx, partIdx, tokens, bytes, part.id, part.name))
                     }
                     is AgentContentPart.ImageData -> {
@@ -8792,40 +8780,22 @@ class ChatViewModel(
 
             val newPart: AgentContentPart? = when (part) {
                 is AgentContentPart.ToolResult -> {
-                    if (part.content.length > 500) {
-                        linuxPath = ContextOffload.offloadContent(
-                            context, fsSessionId, part.content,
-                            toolId = part.id, toolName = part.name,
-                        )
-                    }
-                    if (part.content.length > 500 && linuxPath.isEmpty()) continue
-                    val imgPath = part.imageData?.let { data ->
-                        if (data.size > 1024) {
-                            ContextOffload.offloadImage(
-                                context, fsSessionId, data,
-                                toolId = part.id,
-                                mimeType = part.imageMimeType ?: "image/png",
-                            )
-                        } else ""
-                    } ?: ""
-                    if ((part.imageData?.size ?: 0) > 1024 && imgPath.isEmpty()) continue
-                    if (linuxPath.isEmpty()) linuxPath = imgPath
-                    val stub = ContextOffload.stub(candidate.tokens, candidate.bytes, linuxPath)
-                    part.copy(content = stub, imageData = null, imageMimeType = null)
+                    offloadToolResult(part, candidate.tokens, candidate.bytes,
+                        writeText = { content ->
+                            ContextOffload.offloadContent(context, fsSessionId, content, part.id, part.name)
+                                .also { if (it.isNotEmpty()) linuxPath = it }
+                        },
+                        writeImage = { data ->
+                            ContextOffload.offloadImage(context, fsSessionId, data, part.id, part.imageMimeType ?: "image/png")
+                                .also { if (it.isNotEmpty()) linuxPath = it }
+                        },
+                    )
                 }
                 is AgentContentPart.ToolUse -> {
-                    val content = part.input.optString("content", "")
-                    linuxPath = ContextOffload.offloadContent(
-                        context, fsSessionId, content,
-                        toolId = part.id, toolName = part.name,
-                    )
-                    if (linuxPath.isEmpty()) continue
-                    val newInput = org.json.JSONObject(part.input.toString())
-                    newInput.put(
-                        "content",
-                        ContextOffload.prunedArgumentNotice(candidate.tokens, candidate.bytes, linuxPath),
-                    )
-                    part.copy(input = newInput, isOffloadedArgument = true)
+                    offloadToolArguments(part, 500, candidate.tokens) { field, content ->
+                        ContextOffload.offloadContent(context, fsSessionId, content, part.id, "${part.name}_$field")
+                            .also { if (it.isNotEmpty()) linuxPath = it }
+                    }
                 }
                 is AgentContentPart.ImageData -> {
                     linuxPath = ContextOffload.offloadImage(
@@ -9441,7 +9411,7 @@ class ChatViewModel(
             // Mark where this turn's blocks start in allToolBlocks so we can persist
             // only the NEW parts from this turn (not the full accumulated history).
             // Matches iOS's per-turn RawMessage persistence.
-            val turnStartBlockIndex = allToolBlocks.size
+            var turnStartBlockIndex = allToolBlocks.size
             // T307: per-delta StringBuilder for the running turn text + the
             // currently-open trailing text block. `turnText` snapshots are
             // taken (via .toString()) at flush boundaries only, never per
@@ -9501,6 +9471,7 @@ class ChatViewModel(
             // emits "" legitimately and fabricated text would be in-context-learned.
             var turnReasoningBlob: String? = null
             var turnDeepSeekReplay: String? = null
+            var turnAnthropicReplay: String? = null
             var discardTurnToolCalls = false
             // T321: capture finish_reason from LLMStreamChunk.Finished so we can
             // log it at turn-end alongside the empty-turn warning.
@@ -9515,45 +9486,31 @@ class ChatViewModel(
             // thoughtSignature for this turn's calls (null for other providers).
             val toolCallSignatures = mutableMapOf<String, String>()
 
-            // [T-dedupe-toolcallid 03fbcbfd] Per-turn dedupe of tool_call_id.
-            // Some upstream OpenAI-compatible gateways occasionally emit
-            // multiple parallel tool_calls with the SAME id but different
-            // name/args. Sending both back unchanged trips the receiver's
-            // uniqueness check (HTTP 400 "duplicate tool_call_id"). Mirror
-            // the iOS fix: the FIRST occurrence keeps the raw id, second
-            // becomes "<id>-2", third "<id>-3", etc.
-            //
-            // Three pieces of state because Android routes ToolInputDelta
-            // by chunk.id (iOS routes by name) and OpenAI emits ALL completes
-            // together after finish_reason — so we can't drop the
-            // "currently in-flight" map by the time completes arrive.
-            //
-            //   dedupeStartCounts    raw id → # ToolUseStart events seen
-            //   dedupeCompleteCounts raw id → # ToolCallComplete events seen
-            //   inFlightRenamedId    raw id → renamed id of the tool currently
-            //                        streaming deltas (overwritten on each start)
-            //
-            // Start/complete ordering match: OpenAI streams emit tools in
-            // `index` order at finish_reason, mirroring start order.
-            val dedupeStartCounts = mutableMapOf<String, Int>()
-            val dedupeCompleteCounts = mutableMapOf<String, Int>()
-            val inFlightRenamedId = mutableMapOf<String, String>()
-            fun dedupeToolStartId(raw: String): String {
-                val n = (dedupeStartCounts[raw] ?: 0) + 1
-                dedupeStartCounts[raw] = n
-                val renamed = if (n == 1) raw else "$raw-$n"
-                if (n > 1) {
-                    AppLogger.warning(TAG_STREAM, "[ToolDedupe] duplicate tool_call id on stream start: '$raw' #$n -> renamed '$renamed'")
-                }
-                inFlightRenamedId[raw] = renamed
-                return renamed
-            }
-            fun dedupeToolInputId(raw: String): String =
-                inFlightRenamedId[raw] ?: raw
-            fun dedupeToolCompleteId(raw: String): String {
-                val n = (dedupeCompleteCounts[raw] ?: 0) + 1
-                dedupeCompleteCounts[raw] = n
-                return if (n == 1) raw else "$raw-$n"
+            val attemptToolIds = ToolStreamAttemptIds()
+            fun resetFailedAttempt() {
+                rollbackToolStreamAttempt(allToolBlocks, turnStartBlockIndex)
+                attemptToolIds.reset()
+                toolInputChunkRings.clear()
+                turnTextSb.setLength(0)
+                currentTextBlockSb = null
+                turnTextBlockIdx = -1
+                loggedPostToolTextMerge = false
+                turnThinking.clear()
+                thinkingUpdateGate.reset()
+                toolCalls.clear()
+                toolCallSignatures.clear()
+                turnReasoningBlob = null
+                turnDeepSeekReplay = null
+                turnAnthropicReplay = null
+                turnFinishReason = null
+                discardTurnToolCalls = false
+                lastUsage = null
+                turnCalibration = null
+                pendingChunkSb.setLength(0)
+                lastUiUpdateMs = 0L
+                lastFlushedLen = 0
+                lastFileToolInputMs = 0L
+                lastOtherToolInputMs = 0L
             }
 
             // Stream the response — with auto-retry on transient errors, then fallback.
@@ -9803,7 +9760,7 @@ class ChatViewModel(
                         // renamed value drives the AssistantBlock.id used by
                         // ToolCallComplete / ToolInputDelta lookups and ends
                         // up as the persisted tool_call_id on the next request.
-                        val toolUseId = dedupeToolStartId(chunk.id)
+                        val toolUseId = attemptToolIds.start(chunk.id)
                         android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolUseStart id=$toolUseId name=${chunk.name}")
                         // Mark thinking block as done when tool use starts
                         val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
@@ -9869,7 +9826,7 @@ class ChatViewModel(
                         // [T-dedupe-toolcallid] Translate to the currently-in-flight
                         // renamed id so the per-tool ring + block lookup match
                         // the block that ToolUseStart created.
-                        val toolInputId = dedupeToolInputId(chunk.id)
+                        val toolInputId = attemptToolIds.input(chunk.id)
                         android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolInputDelta id=$toolInputId len=${chunk.accumulated.length}")
                         // Maintain a per-tool ring of the most recent `accumulated`
                         // snapshots so the preflight validator below can dump them
@@ -9930,7 +9887,7 @@ class ChatViewModel(
                         // persisted tool_calls list, the block lookup, and
                         // the downstream tool-result join all key on the
                         // same value (matches the rename applied at start).
-                        val toolCompleteId = dedupeToolCompleteId(chunk.id)
+                        val toolCompleteId = attemptToolIds.complete(chunk.id)
                         android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolCallComplete id=$toolCompleteId name=${chunk.name} args=${chunk.args.toString().take(300)}")
                         toolCalls.add(Triple(toolCompleteId, chunk.name, chunk.args))
                         // [T-android-gemini3-thoughtsig / #179] Stash the Gemini
@@ -9982,6 +9939,7 @@ class ChatViewModel(
                         // the thinking panel is driven by ThinkingDelta events above.
                         turnReasoningBlob = chunk.content
                         turnDeepSeekReplay = chunk.deepSeekReplay
+                        turnAnthropicReplay = chunk.anthropicReplay
                     }
                     is LLMStreamChunk.Finished -> {
                         // T321: stash for empty-turn diagnostic logging below.
@@ -9999,6 +9957,11 @@ class ChatViewModel(
                     }
                 }
                     }  // end collect
+                    if (turnFinishReason.isNullOrBlank() && toolCalls.isNotEmpty()) {
+                        throw com.openminis.app.data.model.LLMError.TransientError(
+                            "Tool response interrupted before its completion event; no tools were executed",
+                        )
+                    }
                     publishThinking(force = true)
                     // T94 fix 2: flush any text that landed in the throttle
                     // window after the last UI tick. The retry-rollback /
@@ -10069,10 +10032,12 @@ class ChatViewModel(
                             offloadOversizedPart()) {
                             outgoingMessages = rebuildOutgoingHistory()
                             contextRecheckRequired = true
+                            resetFailedAttempt()
                             continue
                         }
                         if (!compactAttemptedSinceDispatch && inLoopCompactions < maxInLoopCompactions) {
                             contextRecheckRequired = true
+                            resetFailedAttempt()
                             continue
                         }
                     }
@@ -10113,46 +10078,11 @@ class ChatViewModel(
                         withContext(Dispatchers.Main) {
                             clearInlineError()
                         }
-                        // Roll back partial blocks from the failed stream attempt so the retried
-                        // stream's deltas don't double-append on top of stale content. Previous
-                        // turns (everything before turnStartBlockIndex) are preserved.
-                        if (allToolBlocks.size > turnStartBlockIndex) {
-                            while (allToolBlocks.size > turnStartBlockIndex) {
-                                allToolBlocks.removeAt(allToolBlocks.size - 1)
-                            }
-                            // [T-android-fallback-text-rewind] Keep this turn's
-                            // already-streamed text on screen across the rollback.
-                            // `accumulatedText` only folds in `turnTextSb` after the
-                            // while loop completes successfully, so passing bare
-                            // `accumulatedText` here would visibly rewind everything
-                            // the user already read this turn. The next attempt
-                            // streams into a fresh `turnTextSb` and re-publishes
-                            // `accumulatedText + newTurnText`, so this transient
-                            // value is overwritten cleanly (no duplication).
-                            withContext(Dispatchers.Main) {
-                                updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
-                            }
+                        val failedText = turnTextSb.toString()
+                        resetFailedAttempt()
+                        withContext(Dispatchers.Main) {
+                            updateAssistantMessage(assistantId, accumulatedText + failedText, true, allToolBlocks)
                         }
-                        // T307: SB-based per-turn accumulators reset.
-                        turnTextSb.setLength(0)
-                        currentTextBlockSb = null
-                        // [T-android-tool-splits-reply-fix] The tracked turn
-                        // text block was just rolled back with the rest of
-                        // this turn's partial blocks.
-                        turnTextBlockIdx = -1
-                        turnThinking.clear()
-                        thinkingUpdateGate.reset()
-                        toolCalls.clear()
-                        toolCallSignatures.clear()  // [T-android-gemini3-thoughtsig / #179]
-                        // T94 fix 2 + T256: throttle bookkeeping is per-stream
-                        // attempt; reset alongside the partial-block rollback so
-                        // the next attempt's first delta fires through immediately
-                        // rather than coalescing against stale baselines.
-                        pendingChunkSb.setLength(0)
-                        lastUiUpdateMs = 0L
-                        lastFlushedLen = 0
-                        lastFileToolInputMs = 0L
-                        lastOtherToolInputMs = 0L
                         continue  // retry on same provider
                     }
                     // Retries exhausted or non-retryable — proceed to fallback / throw.
@@ -10239,35 +10169,18 @@ class ChatViewModel(
                             persistBinding("""{"type":"entry","entryId":"${newEntry.id}"}""")
                         }
                         val infoText = fallbackReasons.joinToString("\n") + "\n🔄 Switched to ${currentProvider.model.displayName}"
-                        allToolBlocks.removeAll { it.kind == "info" }
-                        allToolBlocks.add(0, AssistantBlock(
+                        val failedText = turnTextSb.toString()
+                        resetFailedAttempt()
+                        turnStartBlockIndex = replaceFallbackBanner(allToolBlocks, AssistantBlock(
                             id = "fallback_info_$turn",
                             kind = "info",
                             content = infoText,
                             toolTitle = "Switched model",
                             toolStatus = ToolBlockStatus.SUCCESS,
                         ))
-                        // [T-android-fallback-text-rewind] Same as the retry-
-                        // rollback path above: preserve this turn's streamed text
-                        // (`turnTextSb`) on screen while we switch providers.
-                        // `accumulatedText` hasn't folded it in yet, so bare
-                        // `accumulatedText` would rewind the visible reply. The new
-                        // provider streams into a fresh `turnTextSb` (reset just
-                        // below) and re-publishes `accumulatedText + newTurnText`.
                         withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                            updateAssistantMessage(assistantId, accumulatedText + failedText, true, allToolBlocks)
                         }
-                        // Reset turn state for retry with new provider
-                        turnTextSb.setLength(0)
-                        currentTextBlockSb = null
-                        // [T-android-tool-splits-reply-fix] Fresh stream from a
-                        // different provider — and the add(0, info) above
-                        // shifted every block index anyway.
-                        turnTextBlockIdx = -1
-                        turnThinking.clear()
-                        thinkingUpdateGate.reset()
-                        toolCalls.clear()
-                        toolCallSignatures.clear()  // [T-android-gemini3-thoughtsig / #179]
                         // loop continues — will retry collect with currentProvider
                     } else {
                         // All fallbacks exhausted. Surface the trail of tried
@@ -10288,7 +10201,7 @@ class ChatViewModel(
                 }
             }  // end while (!collectDone)
 
-            if (discardTurnToolCalls) {
+            if (toolTurnMustDiscardCalls(turnFinishReason, discardTurnToolCalls)) {
                 toolCalls.clear()
                 toolCallSignatures.clear()
                 discardTruncatedToolBlocks(allToolBlocks, turnStartBlockIndex)
@@ -10330,6 +10243,7 @@ class ChatViewModel(
                 contentParts = assistantParts,
                 reasoningContent = turnReasoningContent,
                 deepSeekReplay = turnDeepSeekReplay,
+                anthropicReplay = turnAnthropicReplay,
             ))
 
             // T321: empty-turn diagnostic — fires when GPT-5.5 (or any other
@@ -10353,7 +10267,7 @@ class ChatViewModel(
                 }
                 val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
                 val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-                persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta, turnCalibration, turnDeepSeekReplay)
+                persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta, turnCalibration, turnDeepSeekReplay, turnAnthropicReplay)
                 // [T-error-persist-android] Empty-response hint: the model ended a
                 // turn (finish=stop/end_turn) with no visible text anywhere in the
                 // reply and no tool blocks — the user just sees a blank bubble.
@@ -10529,53 +10443,33 @@ class ChatViewModel(
                     isRunning = true,
                     toolTitle = dispatchToolTitle,
                 )
-                // JSON repair (T-tool-json-repair b2c4f8a6): salvage truncated /
-                // type-mismatched / typo'd args BEFORE preflight rejects them.
-                // Mutates `args` in place; downstream argsStr and preflight see
-                // the repaired payload. Mirrors iOS repairToolArgs in
-                // AIChatViewModel.swift.
-                val repairs = com.openminis.app.provider.ToolJsonRepair.repair(
+                // Normalize complete arguments once, then keep the execution,
+                // preview and durable history snapshots identical.
+                val preparedArgs = prepareToolArguments(
                     name, args, toolInputChunkRings[id]?.lastOrNull(), agentTools,
+                    preserveExactInput = turnAnthropicReplay != null || turnDeepSeekReplay != null ||
+                        !toolCallSignatures[id].isNullOrBlank(),
                 )
+                val repairs = preparedArgs.repairs
+                val argsStr = preparedArgs.json
+                allToolInputs[id] = argsStr
+                val argsBlockIndex = allToolBlocks.indexOfFirst { it.id == id }
+                if (argsBlockIndex >= 0) {
+                    allToolBlocks[argsBlockIndex] = allToolBlocks[argsBlockIndex].copy(toolArgs = argsStr)
+                }
                 if (repairs.isNotEmpty()) {
                     AppLogger.warning(
                         "ToolPreflight",
                         "[ToolRepair] REPAIRED tool=$name id=$id strategies=[${repairs.joinToString(", ")}] " +
-                            "argsKeys=[${args.keys().asSequence().toList().sorted().joinToString(",")}] " +
-                            "rawTail=<<<${toolInputChunkRings[id]?.lastOrNull()?.take(500) ?: ""}>>>"
+                            "argsKeys=[${args.keys().asSequence().toList().sorted().joinToString(",")}]"
                     )
                 }
-                // [T-truncated-args-visibility #119] Non-null when THIS call's
-                // arguments arrived truncated and were auto-closed. Only the
-                // truncation strategy means the VALUE was cut short; coercion
-                // and fuzzy-name repairs fix the shape of a complete argument.
-                // Mirrors iOS truncationRepairTag.
-                val truncationRepairTag: String? = repairs.firstOrNull { it.startsWith("truncation+") }
-
-                // [T-truncated-args-visibility #119] Refuse truncated WRITES.
-                // Auto-closing an unterminated JSON string is indistinguishable
-                // from the model ending `content` there, so a half file lands on
-                // disk while UI and tool result both report success. For writes a
-                // partial artifact is silent corruption of user data and is worse
-                // than no write at all; read-only and shell tools keep the
-                // repair-and-run behaviour. Mirrors iOS ConcurrentTools.
-                if (truncationRepairTag != null && (name == "file_write" || name == "file_edit")) {
-                    val path = args.optString("path", "").ifBlank { args.optString("file_path", "") }
+                if (preparedArgs.error != null) {
                     AppLogger.warning(
                         "ToolPreflight",
-                        "[ToolRepair] REFUSED truncated write tool=$name id=$id strategy=$truncationRepairTag path=$path"
+                        "[ToolRepair] REFUSED incomplete arguments tool=$name id=$id"
                     )
-                    val modelMessage = buildString {
-                        append("Error: This call was NOT executed. Its argument stream was truncated ")
-                        append("in transit (repair strategy: $truncationRepairTag), so the `content` ")
-                        append("your client sent was cut short and would have written an incomplete file")
-                        if (path.isNotBlank()) append(" to $path")
-                        append(". Nothing was written to disk — the target file is unchanged.\n\n")
-                        append("The most likely cause is the response hitting its output-token limit ")
-                        append("mid-argument. Re-issue this write in smaller pieces: write the first ")
-                        append("part, then append the rest with follow-up calls, rather than repeating ")
-                        append("the same oversized call.")
-                    }
+                    val modelMessage = preparedArgs.error
                     val refusedIdx = allToolBlocks.indexOfFirst { it.id == id }
                     if (refusedIdx >= 0) {
                         val elapsed = System.currentTimeMillis() - allToolBlocks[refusedIdx].startTimeMs
@@ -10598,7 +10492,6 @@ class ChatViewModel(
                     toolInputChunkRings.remove(id)
                     return@withPermit
                 }
-                val argsStr = args.toString()
                 val paramsMap = parseToolParams(argsStr)
                 // Flip PENDING → RUNNING right before the execute dispatch so the UI
                 // (tool pill spinner) shows the exact moment execution begins.
@@ -10743,14 +10636,9 @@ class ChatViewModel(
                         delegateBlockOverrides[id]?.content ?: resultContent
                     } else null
                     val finalContent = delegatePayload ?: if (existingContent.length > resultContent.length) existingContent else resultContent
-                    // [T-truncated-args-visibility #119] A call built from
-                    // truncated args must not render as a clean success — that
-                    // silence is the reported bug. Show it with the same weight
-                    // as the blocked path. Mirrors iOS ConcurrentTools.
                     val finalStatus = when {
                         delegatePayload != null && delegateBlockOverrides[id]?.toolStatus != null -> delegateBlockOverrides[id]!!.toolStatus!!
                         delegatePayload != null && runCatching { JSONObject(delegatePayload).optString("status") in listOf("running", "queued") }.getOrDefault(false) -> ToolBlockStatus.RUNNING
-                        result.success && truncationRepairTag != null -> ToolBlockStatus.FAILED
                         result.success -> ToolBlockStatus.SUCCESS
                         result.timedOut -> ToolBlockStatus.TIMEOUT
                         else -> ToolBlockStatus.FAILED
@@ -10781,25 +10669,10 @@ class ChatViewModel(
                     )
                 }
 
-                // [T-truncated-args-visibility #119] Tell the MODEL its own
-                // arguments were altered. Writes never reach here (refused
-                // above); this covers the tools we still run repaired, where the
-                // model would otherwise assume the args it emitted were the args
-                // that ran. Mirrors iOS ConcurrentTools.
-                val outputForLLMWithNote = if (truncationRepairTag != null) {
-                    outputForLLM + "\n\n<system-reminder>The argument stream for this call was " +
-                        "truncated in transit and auto-closed by the client (repair strategy: " +
-                        "$truncationRepairTag) before execution. The arguments actually used may be " +
-                        "incomplete — verify the result and re-issue the call with complete " +
-                        "arguments if anything is missing.</system-reminder>"
-                } else {
-                    outputForLLM
-                }
-
                 resultParts.add(AgentContentPart.ToolResult(
                     id = id,
                     name = name,
-                    content = outputForLLMWithNote,
+                    content = outputForLLM,
                     isError = !result.success,
                     imageData = result.imageData,
                     imageMimeType = result.imageMimeType,
@@ -10830,7 +10703,7 @@ class ChatViewModel(
             // assistant entry — compact-marker boundary resolution depends on it.
             val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
             val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-            val assistantDbId = persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta, turnCalibration, turnDeepSeekReplay)
+            val assistantDbId = persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta, turnCalibration, turnDeepSeekReplay, turnAnthropicReplay)
             if (assistantDbId != null) {
                 val lastIdx = agentHistory.indexOfLast { it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null }
                 if (lastIdx >= 0) {
@@ -12870,34 +12743,7 @@ class ChatViewModel(
     private fun buildAssistantPartsJson(
         parts: List<AgentContentPart>,
         toolBlockMeta: Map<String, AssistantBlock>,
-    ): String = buildString {
-        append("[")
-        parts.forEachIndexed { index, part ->
-            if (index > 0) append(",")
-            when (part) {
-                is AgentContentPart.Text -> {
-                    append("""{"type":"text","value":${escapeJson(part.text)}}""")
-                }
-                is AgentContentPart.ToolUse -> {
-                    // Skip tool_use with blank name — upstream bug guard.
-                    val name = part.name
-                    if (name.isBlank()) return@forEachIndexed
-                    val inputStr = part.input.toString()
-                    val meta = toolBlockMeta[part.id]
-                    val desc = meta?.toolTitle ?: ""
-                    val pageURL = meta?.browserURL ?: ""
-                    val imgPath = meta?.imageFilePath ?: ""
-                    // [T-android-gemini3-thoughtsig / #179] Persist the captured
-                    // signature (null-literal when absent) so it survives a session
-                    // reload and can be replayed on the historical functionCall.
-                    val sigJson = part.thoughtSignature?.let { escapeJson(it) } ?: "null"
-                    append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":$sigJson,"isOffloadedArgument":${part.isOffloadedArgument}}""")
-                }
-                else -> { /* tool_result is persisted via persistToolResultMessage */ }
-            }
-        }
-        append("]")
-    }
+    ): String = serializeAssistantParts(parts, toolBlockMeta)
 
     private suspend fun persistAssistantTurn(
         parts: List<AgentContentPart>,
@@ -12906,11 +12752,10 @@ class ChatViewModel(
         toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
         calibration: ContextSizeMeter.CalibrationSample? = null,
         deepSeekReplay: String? = null,
+        anthropicReplay: String? = null,
     ): String? {
-        if (parts.isEmpty()) return null
-        val serializedParts = buildAssistantPartsJson(parts, toolBlockMeta)
-        val partsJson = if (deepSeekReplay == null) serializedParts else org.json.JSONArray(serializedParts)
-            .put(JSONObject().put("type", "deepSeekReplay").put("value", deepSeekReplay)).toString()
+        if (parts.isEmpty() && deepSeekReplay == null && anthropicReplay == null) return null
+        val partsJson = serializeAssistantParts(parts, toolBlockMeta, deepSeekReplay, anthropicReplay)
         val tokenJson = usage?.let {
             """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens}${calibration?.jsonFields().orEmpty()}}"""
         }
@@ -14973,7 +14818,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                                 imageFilePath = imgPath,
                                 // [T-android-gemini3-thoughtsig / #179] Restore the
                                 // persisted signature onto the rebuilt block.
-                                thoughtSignature = value.optString("thoughtSignature", "").ifEmpty { null },
+                                thoughtSignature = value.optionalNonBlankString("thoughtSignature"),
                             ))
                         }
                         "mediaRef" -> {
@@ -15112,6 +14957,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val imageParts = mutableListOf<LLMMessage.ImagePart>()
         var textContent = ""
         var deepSeekReplay: String? = null
+        var anthropicReplay: String? = null
 
         try {
             val array = org.json.JSONArray(partsJson)
@@ -15119,6 +14965,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 val obj = array.getJSONObject(i)
                 when (obj.optString("type")) {
                     "deepSeekReplay" -> deepSeekReplay = obj.optString("value").takeIf { it.isNotEmpty() }
+                    "anthropicReplay" -> anthropicReplay = obj.optionalNonBlankString("value")
                     "text" -> {
                         val value = obj.optString("value", "")
                         // [T-android-retry-attachment-loss] The persisted
@@ -15152,7 +14999,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             // [T-android-gemini3-thoughtsig / #179] Restore the
                             // persisted Gemini 3.x signature so a reloaded session
                             // replays it (else the next gemini-3 turn 400s).
-                            thoughtSignature = v.optString("thoughtSignature", "").ifEmpty { null },
+                            thoughtSignature = v.optionalNonBlankString("thoughtSignature"),
                             isOffloadedArgument = v.optBoolean("isOffloadedArgument", false),
                         ))
                     }
@@ -15253,6 +15100,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             dbMessageId = id,
             reasoningContent = reasoningContent,
             deepSeekReplay = deepSeekReplay,
+            anthropicReplay = anthropicReplay,
         )
     }
 

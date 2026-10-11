@@ -7,6 +7,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ToolResultPersistenceTest {
+    @Test fun singleLongLineCannotDoubleThePersistedResultSize() {
+        val output = "x".repeat(250_001)
+        val raw = serializeToolResults(listOf(AgentContentPart.ToolResult("call_large", "shell", output))) {
+            error("No image")
+        }
+        val result = JSONArray(raw).getJSONObject(0).getJSONObject("value")
+        assertEquals(output, result.getString("output"))
+        assertTrue(result.getJSONObject("snapshot").getString("text").length <= 4_096)
+        assertTrue(raw.length < 260_000)
+    }
+
     @Test fun toolPixelsAreStoredAsDiscoverableMediaReferences() {
         val bytes = byteArrayOf(1, 2, 3)
         val results = listOf(

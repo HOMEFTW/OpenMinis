@@ -18,6 +18,8 @@ import com.openminis.app.provider.cancelOnCancellation
 import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.SseEventReader
+import com.openminis.app.provider.parseToolInputObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -252,90 +254,26 @@ class AnthropicProvider(
             send(chunk)
         }
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
-        // Track current tool_use block being streamed
-        var currentToolId: String? = null
-        var currentToolName: String? = null
-        val toolInputBuffer = StringBuilder()
+        val events = SseEventReader(reader)
+        val stream = AnthropicStream(model.id)
 
         try {
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
-                val payload = l.removePrefix("data: ")
+            while (true) {
+                val payload = events.nextData() ?: break
                 if (payload == "[DONE]") break
-
-                val event = try { JSONObject(payload) } catch (_: Exception) { continue }
+                val event = parseToolInputObject(payload)
                 com.openminis.app.logging.AppLogger.trace("ToolChain") { "SSE type=${event.safeOptString("type", "")}" }
                 val eventType = event.safeOptString("type", "")
 
-                when (eventType) {
-                    "message_start" -> {
-                        sendChunk(LLMStreamChunk.Started)
-                        event.optJSONObject("message")?.optJSONObject("usage")?.let { usage ->
-                            sendChunk(LLMStreamChunk.Usage(parseUsage(usage)))
-                        }
-                    }
-                    "content_block_start" -> {
-                        val contentBlock = event.optJSONObject("content_block")
-                        if (contentBlock?.safeOptString("type", "") == "tool_use") {
-                            currentToolId = contentBlock.safeOptString("id", "")
-                            currentToolName = contentBlock.safeOptString("name", "")
-                            toolInputBuffer.clear()
-                            android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart id=$currentToolId name=$currentToolName")
-                            sendChunk(LLMStreamChunk.ToolUseStart(currentToolId!!, currentToolName!!))
-                        }
-                    }
-                    "content_block_delta" -> {
-                        val delta = event.optJSONObject("delta") ?: continue
-                        when (delta.safeOptString("type", "")) {
-                            "text_delta" -> {
-                                val text = delta.safeOptString("text", "")
-                                if (text.isNotEmpty()) sendChunk(LLMStreamChunk.Text(text))
-                            }
-                            "thinking_delta" -> {
-                                val thinking = delta.safeOptString("thinking", "")
-                                if (thinking.isNotEmpty()) sendChunk(LLMStreamChunk.ThinkingDelta(thinking))
-                            }
-                            "input_json_delta" -> {
-                                val partial = delta.safeOptString("partial_json", "")
-                                if (partial.isNotEmpty() && currentToolId != null) {
-                                    toolInputBuffer.append(partial)
-                                    com.openminis.app.logging.AppLogger.trace("ToolChain") { "ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars" }
-                                    sendChunk(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
-                                }
-                            }
-                        }
-                    }
-                    "content_block_stop" -> {
-                        if (currentToolId != null && currentToolName != null) {
-                            val args = try {
-                                JSONObject(toolInputBuffer.toString())
-                            } catch (_: Exception) {
-                                JSONObject()
-                            }
-                            android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=$currentToolId name=$currentToolName args=${args.toString().take(300)}")
-                            sendChunk(LLMStreamChunk.ToolCallComplete(currentToolId!!, currentToolName!!, args))
-                            currentToolId = null
-                            currentToolName = null
-                            toolInputBuffer.clear()
-                        }
-                    }
-                    "message_delta" -> {
-                        event.optJSONObject("usage")?.let { usage ->
-                            sendChunk(LLMStreamChunk.Usage(parseUsage(usage)))
-                        }
-                        val stopReason = event.optJSONObject("delta")
-                            ?.safeOptString("stop_reason", "")?.ifEmpty { null }
-                        sendChunk(LLMStreamChunk.Finished(stopReason))
-                    }
-                    "error" -> {
-                        val error = event.optJSONObject("error")
-                        throw streamError(error?.safeOptString("type", "") ?: "error",
-                            error?.safeOptString("message", "") ?: "Stream failed")
-                    }
+                stream.accept(event).forEach { sendChunk(it) }
+                val usage = if (eventType == "message_start") event.optJSONObject("message")?.optJSONObject("usage")
+                    else event.optJSONObject("usage")
+                usage?.let { sendChunk(LLMStreamChunk.Usage(parseUsage(it))) }
+                if (stream.completed) {
+                    break
                 }
             }
+            stream.endOfInput()
         } catch (e: CancellationException) {
             val timeout = progressWatchdog.timeoutException
             if (timeout == null) throw e
@@ -345,11 +283,7 @@ class AnthropicProvider(
             )
         } catch (e: Exception) {
             val timeout = progressWatchdog.timeoutException
-            cancel(
-                if (timeout == null) "Stream error" else "SSE stream idle timeout",
-                if (timeout == null) mapError(e)
-                else com.openminis.app.data.model.LLMError.NetworkError(timeout),
-            )
+            channel.close(if (timeout == null) mapError(e) else LLMError.NetworkError(timeout))
         } finally {
             reader.close()
             cleanupCall()
@@ -587,7 +521,8 @@ class AnthropicProvider(
             // Keep messages that still have either non-empty contentParts or a
             // non-empty `content` string (string-only messages never had parts
             // to strip in the first place).
-            m.contentParts.isNotEmpty() || m.content.isNotEmpty()
+            m.contentParts.isNotEmpty() || m.content.isNotEmpty() ||
+                (m.role == LLMMessage.Role.ASSISTANT && (AnthropicReplay.read(m, model.id)?.length() ?: 0) > 0)
         }
     }
 
@@ -638,6 +573,13 @@ class AnthropicProvider(
         for ((index, msg) in messages.withIndex()) {
             val obj = JSONObject()
             obj.put("role", msg.role.value)
+
+            val replay = if (msg.role == LLMMessage.Role.ASSISTANT) AnthropicReplay.read(msg, model.id) else null
+            if (replay != null) {
+                obj.put("content", replay)
+                messagesArray.put(obj)
+                continue
+            }
 
             if (msg.contentParts.isNotEmpty()) {
                 val contentArray = JSONArray()

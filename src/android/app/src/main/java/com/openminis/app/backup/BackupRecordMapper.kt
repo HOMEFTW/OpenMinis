@@ -1,5 +1,7 @@
 package com.openminis.app.backup
 
+import com.openminis.app.data.repository.forBoundedStorage
+
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.CompactMarkerEntity
 import com.openminis.app.data.db.FolderEntity
@@ -138,7 +140,7 @@ internal object BackupRecordMapper {
             modelDisplayName = m.str("modelDisplayName"),
             providerType = m.str("providerType"),
             providerInstanceId = m.str("providerInstanceId"),
-        )
+        ).forBoundedStorage()
     }
 
     // -- Compact markers --------------------------------------------------------

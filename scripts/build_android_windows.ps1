@@ -1,7 +1,9 @@
 param(
     [string]$GradlePath,
     [switch]$RunModelTests,
-    [switch]$RunAllTests
+    [switch]$RunAllTests,
+    [switch]$Clean,
+    [switch]$BuildAndroidTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +43,7 @@ if (!$prootStrings.Contains('--fake-netlink')) {
 }
 
 $gradleArgs = @('--no-daemon')
+if ($Clean) { $gradleArgs += 'clean' }
 $git = Get-Command git -ErrorAction SilentlyContinue
 if ($git) {
     $gitRoot = Split-Path (Split-Path $git.Source -Parent) -Parent
@@ -53,6 +56,7 @@ if ($RunAllTests) {
     $gradleArgs += @(':app:testDebugUnitTest', '--tests', 'com.openminis.app.provider.AstraImage25Test', '--tests', 'com.openminis.app.sandbox.offload.ModelUseImageResultTest')
 }
 $gradleArgs += ':app:assembleDebug'
+if ($BuildAndroidTests) { $gradleArgs += ':app:assembleDebugAndroidTest' }
 
 Push-Location $androidRoot
 try {

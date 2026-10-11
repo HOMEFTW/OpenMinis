@@ -31,6 +31,8 @@ data class LLMMessage(
     val reasoningContent: String? = null,
     /** DeepSeek Messages block order/signatures; ignored by other providers. */
     val deepSeekReplay: String? = null,
+    /** Anthropic signed/redacted thinking replay; ignored by other providers. */
+    val anthropicReplay: String? = null,
 ) {
     enum class Role(val value: String) {
         USER("user"),

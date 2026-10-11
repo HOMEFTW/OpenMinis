@@ -18,6 +18,8 @@ import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.SseProgressWatchdog
 import com.openminis.app.provider.budgetProviderRequest
 import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.SseEventReader
+import com.openminis.app.provider.parseToolInputObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
@@ -191,13 +193,22 @@ class GeminiProvider(
         try {
             var started = false
             var lastFinishReason: String? = null
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
-                val payload = l.removePrefix("data: ")
-
-                val json = try { JSONObject(payload) } catch (_: Exception) { continue }
+        val pendingCalls = mutableListOf<LLMStreamChunk.ToolCallComplete>()
+        val events = SseEventReader(reader)
+            while (true) {
+                val payload = events.nextData() ?: break
+                if (payload == "[DONE]") break
+                val json = parseToolInputObject(payload)
+                json.optJSONObject("error")?.let { error ->
+                    val status = error.optInt("code", when (error.optString("status")) {
+                        "RESOURCE_EXHAUSTED" -> 429
+                        "UNAUTHENTICATED" -> 401
+                        "PERMISSION_DENIED" -> 403
+                        "INTERNAL", "UNAVAILABLE" -> 500
+                        else -> 400
+                    })
+                    throw mapHttpError(status, json.toString())
+                }
 
                 if (!started) {
                     sendChunk(LLMStreamChunk.Started)
@@ -221,7 +232,7 @@ class GeminiProvider(
                     // [T-android-gemini3-thoughtsig / #179] Carry the part's
                     // thoughtSignature through so it can be persisted and replayed
                     // on the historical functionCall (gemini-3.x requires it).
-                    sendChunk(LLMStreamChunk.ToolCallComplete(toolId, fcName, fcArgs, thoughtSignature = fcSig))
+                    pendingCalls.add(LLMStreamChunk.ToolCallComplete(toolId, fcName, fcArgs, thoughtSignature = fcSig))
                 }
 
                 extractUsage(json)?.let { usage ->
@@ -235,7 +246,10 @@ class GeminiProvider(
                     progressWatchdog.markProgress()
                 }
             }
-            sendChunk(LLMStreamChunk.Finished(lastFinishReason ?: "end_turn"))
+            val reason = lastFinishReason ?: throw LLMError.TransientError("Gemini stream ended before finishReason")
+            val discard = reason != "end_turn"
+            if (!discard) pendingCalls.forEach { sendChunk(it) }
+            sendChunk(LLMStreamChunk.Finished(reason, discardToolCalls = discard))
         } catch (e: CancellationException) {
             val timeout = progressWatchdog.timeoutException
             if (timeout == null) throw e
@@ -245,10 +259,7 @@ class GeminiProvider(
             )
         } catch (e: Exception) {
             val timeout = progressWatchdog.timeoutException
-            cancel(
-                if (timeout == null) "Stream error" else "SSE stream idle timeout",
-                if (timeout == null) mapError(e) else LLMError.NetworkError(timeout),
-            )
+            channel.close(if (timeout == null) mapError(e) else LLMError.NetworkError(timeout))
         } finally {
             reader.close()
             cleanupCall()
@@ -315,7 +326,7 @@ class GeminiProvider(
                 // One unsigned call condemns the whole message's batch: sending
                 // the signed remainder alone is precisely what Gemini calls
                 // corrupted.
-                if (toolUses.any { it.thoughtSignature.isNullOrEmpty() }) {
+                if (toolUses.any { it.thoughtSignature.isNullOrBlank() || it.thoughtSignature == "null" }) {
                     toolUses.forEach { add(it.id) }
                 }
             }
@@ -598,7 +609,8 @@ class GeminiProvider(
             val part = parts.getJSONObject(i)
             val fc = part.optJSONObject("functionCall") ?: continue
             val name = fc.safeOptString("name", "")
-            val args = fc.optJSONObject("args") ?: JSONObject()
+            val args = if (!fc.has("args")) JSONObject() else fc.optJSONObject("args")
+                ?: throw LLMError.DecodingError(IllegalArgumentException("Gemini functionCall.args must be an object"))
             val sig = part.safeOptString("thoughtSignature", "").ifEmpty { null }
             if (name.isNotEmpty()) calls.add(Triple(name, args, sig))
         }

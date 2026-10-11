@@ -254,7 +254,7 @@ class GeminiProviderTest {
         val sseBody = buildString {
             appendLine("""data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}""")
             appendLine()
-            appendLine("""data: {"candidates":[{"content":{"parts":[{"text":" world"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}""")
+            appendLine("""data: {"candidates":[{"content":{"parts":[{"text":" world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}""")
             appendLine()
         }
 
@@ -308,8 +308,8 @@ class GeminiProviderTest {
         assertEquals("max_tokens", finished[0].stopReason)
     }
 
-    @Test
-    fun `streamMessage defaults to end_turn when no finishReason in SSE`() = runBlocking {
+    @Test(expected = LLMError.TransientError::class)
+    fun `streamMessage rejects EOF without finishReason in SSE`() = runBlocking {
         val sseBody = buildString {
             appendLine("""data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}""")
             appendLine()
@@ -317,17 +317,14 @@ class GeminiProviderTest {
 
         server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
 
-        val chunks = provider.streamMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024).toList()
-
-        val finished = chunks.filterIsInstance<LLMStreamChunk.Finished>()
-        assertEquals(1, finished.size)
-        assertEquals("end_turn", finished[0].stopReason)
+        provider.streamMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024).toList()
+        Unit
     }
 
     @Test
     fun `streamMessage includes temperature in request`() = runBlocking {
         val sseBody = buildString {
-            appendLine("""data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}""")
+            appendLine("""data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}""")
             appendLine()
         }
         server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
@@ -344,7 +341,7 @@ class GeminiProviderTest {
     @Test
     fun `streamMessage parses usage metadata`() = runBlocking {
         val sseBody = buildString {
-            appendLine("""data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}""")
+            appendLine("""data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}""")
             appendLine()
         }
 

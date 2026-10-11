@@ -153,6 +153,8 @@ class AnthropicProviderTest {
                 appendLine()
                 appendLine("""data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}""")
                 appendLine()
+                appendLine("""data: {"type":"message_stop"}""")
+                appendLine()
             }
             server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
             val usages = provider.streamMessage(
@@ -291,11 +293,17 @@ class AnthropicProviderTest {
         val sseBody = buildString {
             appendLine("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}")
             appendLine()
-            appendLine("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}")
+            appendLine("""data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}""")
             appendLine()
-            appendLine("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}")
+            appendLine("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}")
+            appendLine()
+            appendLine("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}")
+            appendLine()
+            appendLine("""data: {"type":"content_block_stop","index":0}""")
             appendLine()
             appendLine("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}")
+            appendLine()
+            appendLine("""data: {"type":"message_stop"}""")
             appendLine()
         }
 
@@ -332,10 +340,16 @@ class AnthropicProviderTest {
             appendLine("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}")
             appendLine()
             appendLine("event: content_block_delta")
-            appendLine("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}")
+            appendLine("""data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}""")
+            appendLine()
+            appendLine("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}")
             appendLine()
             appendLine(": comment line")
+            appendLine("""data: {"type":"content_block_stop","index":0}""")
+            appendLine()
             appendLine("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}")
+            appendLine()
+            appendLine("""data: {"type":"message_stop"}""")
             appendLine()
         }
 
@@ -353,6 +367,8 @@ class AnthropicProviderTest {
             appendLine("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}")
             appendLine()
             appendLine("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}")
+            appendLine()
+            appendLine("""data: {"type":"message_stop"}""")
             appendLine()
         }
         server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
