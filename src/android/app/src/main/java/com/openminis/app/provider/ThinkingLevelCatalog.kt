@@ -147,7 +147,33 @@ val LLMModel.selectableThinkingLevels: List<ThinkingLevel>
  * model, so read the ceiling off the resolved model there.
  */
 val ModelEntry.effectiveMaxThinkingLevel: ThinkingLevel
-    get() = overrides.maxThinkingLevel ?: model.catalogMaxThinkingLevel
+    get() = model.requestMaxThinkingLevel
+
+/** The request must obey both provider capabilities and this entry's user limit. */
+val LLMModel.requestMaxThinkingLevel: ThinkingLevel
+    get() = listOfNotNull(catalogMaxThinkingLevel, entryThinkingCeiling).minBy { it.rank }
+
+fun LLMModel.clampThinkingLevel(level: ThinkingLevel): ThinkingLevel {
+    val ceiling = requestMaxThinkingLevel
+    val normalized = normalizeThinkingLevel(level)
+    val bounded = if (normalized.rank > ceiling.rank) ceiling else normalized
+    return if ((isDeepSeekFlash || entryThinkingCeiling != null) && bounded.isEnabled &&
+        selectableThinkingLevels.isNotEmpty()) {
+        selectableThinkingLevels.lastOrNull { it.rank <= bounded.rank } ?: ThinkingLevel.OFF
+    } else bounded
+}
+
+internal fun LLMModel.validateEntryThinkingCeiling(requested: ThinkingLevel) {
+    val ceiling = entryThinkingCeiling ?: return
+    require(ceiling != ThinkingLevel.OFF || (!isGPT61Sol && !isGPT6Astra)) {
+        "This model requires thinking; the model entry's thinking limit cannot be Off."
+    }
+    require(!requested.isEnabled || catalogMaxThinkingLevel == ThinkingLevel.OFF ||
+        ceiling == ThinkingLevel.OFF || selectableThinkingLevels.isEmpty() ||
+        selectableThinkingLevels.any { it.rank <= ceiling.rank }) {
+        "The model entry's thinking limit is below every supported thinking level."
+    }
+}
 
 /** Keep the Flash picker aligned with its three distinct wire efforts. */
 internal fun LLMModel.chatThinkingLevels(ceiling: ThinkingLevel): List<ThinkingLevel> {

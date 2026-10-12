@@ -2,8 +2,8 @@
 
 Flow: spawn -> initialize handshake -> tools/list / tools/call. Each line on the
 child's stdout is one JSON-RPC message (newline-delimited JSON, the MCP stdio
-convention). Crash (non-zero exit / broken pipe before a reply) triggers ONE
-automatic retry. 5-minute overall timeout per call.
+convention). Read-only queries and failed handshakes may retry once on a crash.
+Tool calls with a lost reply are never transparently repeated. 5-minute timeout.
 
 `$ENV_VAR` references in env values are expanded from the parent environment.
 Missing commands (npx/uvx/...) are auto-resolved via utils.deps first.
@@ -65,7 +65,7 @@ class STDIOTransport:
         try:
             proc.stdin.write(json.dumps(body) + "\n")
             proc.stdin.flush()
-        except (BrokenPipeError, ValueError):
+        except (BrokenPipeError, ValueError, OSError):
             raise MCPError("STDIO_CRASH", "child closed stdin")
 
     def _read_reply(self, proc, want_id):
@@ -121,16 +121,23 @@ class STDIOTransport:
         self._send(proc, "notifications/initialized", notify=True)
         return result
 
-    def _session(self, fn):
-        """Run fn(proc) inside one spawned child, with a single crash retry."""
+    def _session(self, fn, retry_safe=True):
+        """Retry a failed handshake/query, never a possibly completed write."""
         last_err = None
         for attempt in range(2):
             self._id = 0
             proc = self._spawn()
+            operation_started = False
             try:
                 self._handshake(proc)
+                operation_started = True
                 return fn(proc)
             except MCPError as exc:
+                if not retry_safe and operation_started and exc.code in ("STDIO_CRASH", "TIMEOUT"):
+                    raise MCPError("OUTCOME_UNKNOWN", (
+                        "tool reply was lost; the operation may have completed. "
+                        "It was not retried. Check the resulting state before calling again."
+                    )) from exc
                 last_err = exc
                 if exc.code != "STDIO_CRASH" or attempt == 1:
                     raise
@@ -140,6 +147,14 @@ class STDIOTransport:
                     proc.terminate()
                 except OSError:
                     pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                for pipe in (proc.stdin, proc.stdout):
+                    if pipe:
+                        pipe.close()
         if last_err:
             raise last_err
 
@@ -152,7 +167,7 @@ class STDIOTransport:
         return self._session(
             lambda proc: self._rpc(
                 proc, "tools/call", {"name": tool, "arguments": arguments or {}}
-            )
+            ), retry_safe=False
         )
 
     def ping(self):

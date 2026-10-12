@@ -112,6 +112,10 @@ internal object BackupRecordMapper {
 
     // -- Messages ---------------------------------------------------------------
 
+    /** Old packages have no revision stamp: never overwrite a local ID on guesswork. */
+    fun messageIncomingWins(payload: JsonObject, existingUpdatedAt: Long?): Boolean =
+        existingUpdatedAt == null || payload.millis("updatedAt")?.let { it > existingUpdatedAt } == true
+
     /** Null when id or sessionId is missing. The parent check is the caller's. */
     fun message(m: JsonObject): MessageEntity? {
         val id = m.str("id") ?: return null
@@ -129,7 +133,7 @@ internal object BackupRecordMapper {
             sortOrder = m.int("sortOrder") ?: 0,
             reasoningContent = m.str("reasoningContent"),
             streamInterruptCount = m.int("streamInterruptCount") ?: 0,
-            updatedAt = createdAt,
+            updatedAt = m.millis("updatedAt") ?: createdAt,
             // errorInfo is device-local (§0.2) and is never restored.
             errorInfo = null,
             // [T-token-attribution-snapshot] Absent in packages written before

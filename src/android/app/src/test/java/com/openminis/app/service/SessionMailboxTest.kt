@@ -4,6 +4,36 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionMailboxTest {
+    @Test fun `deleted participants cannot leave a full unreachable mailbox after restart`() {
+        val records = org.json.JSONArray((0 until SessionMailbox.MAX_RECORDS).map {
+            SessionMail("old-$it", "deleted-a", "deleted-b", "old", false, 1, "completed").toJson()
+        })
+        var durable = org.json.JSONObject().put("enabled", org.json.JSONArray(listOf("deleted-b")))
+            .put("messages", records).toString()
+        val box = SessionMailbox(durable) { durable = it }
+        box.recover()
+        box.pruneDeletedSessions(setOf("a", "b"))
+        assertTrue(box.messages.value.isEmpty())
+        assertTrue(box.allowed.value.isEmpty())
+        box.enqueue("a", "b", "new", false)
+        assertEquals(box.messages.value, SessionMailbox(durable) {}.messages.value)
+    }
+
+    @Test fun `cleanup keeps reachable history and never removes uncertain running work`() {
+        val box = SessionMailbox(null) {}
+        val reachable = box.enqueue("gone", "live", "history", false)
+        box.claim(reachable.id); box.finish(reachable.id, "completed", "answer")
+        val queued = box.enqueue("gone", "live", "waiting", false)
+        val running = box.enqueue("gone", "also-gone", "running", false)
+        box.claim(running.id)
+        box.pruneDeletedSessions(setOf("live"))
+        assertEquals("answer", box.forSession("live", reachable.id).single().reply)
+        assertEquals("failed", box.forSession("live", queued.id).single().status)
+        assertEquals("running", box.messages.value.single { it.id == running.id }.status)
+        box.recover(); box.pruneDeletedSessions(setOf("live"))
+        assertFalse(box.messages.value.any { it.id == running.id })
+    }
+
     @Test fun `oversized replies are visibly truncated and bounded`() {
         val box = SessionMailbox(null) {}
         val mail = box.enqueue("a", "b", "hi", false)

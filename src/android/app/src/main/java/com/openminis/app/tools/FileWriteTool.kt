@@ -97,39 +97,41 @@ object FileWriteTool {
             // materialized lazily, so a fresh session writing into
             // /var/minis/workspace/foo/bar.md would otherwise hit "Parent
             // directory does not exist" on the very first call.
-            val parent = file.parentFile
-            if (parent != null && (createDirs || !parent.exists())) {
-                parent.mkdirs()
-            }
-
-            if (append) {
-                file.appendText(content)
-            } else {
-                file.writeText(content)
-            }
-
-            val bytes = file.length()
-            // Diagnose "write reported success but nothing on disk" (Android 10
-            // legacy-storage FUSE shadow writes): confirm the file is actually
-            // there with the expected size right after writing. A mounted-folder
-            // write that silently no-ops shows exists=false / size mismatch here.
-            if (path.startsWith("/var/minis/mounts/")) {
-                val landed = file.exists() && file.length() == bytes
-                com.openminis.app.logging.AppLogger.info(
-                    "FileWrite",
-                    "mount write path=$path host=${file.absolutePath} bytes=$bytes " +
-                        "exists=${file.exists()} landedOk=$landed",
-                )
-                if (!landed) {
-                    com.openminis.app.logging.AppLogger.warning(
-                        "FileWrite",
-                        "mount write to $path reported success but did NOT persist to " +
-                            "${file.absolutePath} — likely missing WRITE_EXTERNAL_STORAGE / " +
-                            "shadowed FUSE view on this device",
-                    )
+            FileMutationCoordinator.withFile(file) {
+                val parent = file.parentFile
+                if (parent != null && (createDirs || !parent.exists())) {
+                    parent.mkdirs()
                 }
+
+                if (append) {
+                    file.appendText(content)
+                } else {
+                    file.writeText(content)
+                }
+
+                val bytes = file.length()
+                // Diagnose "write reported success but nothing on disk" (Android 10
+                // legacy-storage FUSE shadow writes): confirm the file is actually
+                // there with the expected size right after writing. A mounted-folder
+                // write that silently no-ops shows exists=false / size mismatch here.
+                if (path.startsWith("/var/minis/mounts/")) {
+                    val landed = file.exists() && file.length() == bytes
+                    com.openminis.app.logging.AppLogger.info(
+                        "FileWrite",
+                        "mount write path=$path host=${file.absolutePath} bytes=$bytes " +
+                            "exists=${file.exists()} landedOk=$landed",
+                    )
+                    if (!landed) {
+                        com.openminis.app.logging.AppLogger.warning(
+                            "FileWrite",
+                            "mount write to $path reported success but did NOT persist to " +
+                                "${file.absolutePath} — likely missing WRITE_EXTERNAL_STORAGE / " +
+                                "shadowed FUSE view on this device",
+                        )
+                    }
+                }
+                ToolExecutionResult("Wrote to $path ($bytes bytes)", true, toolTitle = toolTitle)
             }
-            ToolExecutionResult("Wrote to $path ($bytes bytes)", true, toolTitle = toolTitle)
         } catch (e: Exception) {
             ToolExecutionResult("Error writing file: ${e.message}", false)
         }

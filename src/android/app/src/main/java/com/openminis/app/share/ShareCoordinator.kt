@@ -10,7 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * Mirrors iOS Shared/ShareCoordinator.swift. Singleton bridge between
  * ShareReceiverActivity (producer, lives in a different Activity instance
  * before re-launching MainActivity) and ChatScreen (consumer, lives inside
- * MainActivity). Holds the [PendingShare] in memory with a 30s TTL —
+ * MainActivity). Keeps the durable [PendingShare] until composer persistence
+ * acknowledges delivery; the in-memory notification has a 300s TTL —
  * long enough for the launch flow to land in a chat session, short enough
  * that a stale share doesn't surprise the user weeks later.
  */
@@ -26,6 +27,7 @@ object ShareCoordinator {
     private data class Buffered(val share: PendingShare, val bufferedAtMs: Long)
 
     @Volatile private var buffer: Buffered? = null
+    private var inFlight: PendingShare? = null
 
     private val _bufferVersion = MutableStateFlow(0)
     /**
@@ -40,9 +42,10 @@ object ShareCoordinator {
      * Called from MainActivity.onCreate / onNewIntent when the share
      * receiver re-launched MainActivity with the `shared_content` extra.
      * Loads from prefs, drops if older than [LAUNCH_MAX_AGE_MS] (5 min,
-     * mirrors iOS launch check), stores in the in-memory buffer, clears
-     * prefs.
+     * mirrors iOS launch check), stores in the in-memory buffer. Persistence
+     * survives process death until acknowledgeConsumed confirms the draft.
      */
+    @Synchronized
     fun processPendingShare(context: Context) {
         val pending = SharedShareStore.loadPendingShare(context) ?: run {
             AppLogger.info(TAG, "[Share] processPendingShare: no pending share")
@@ -51,7 +54,7 @@ object ShareCoordinator {
         val ageMs = System.currentTimeMillis() - pending.timestampMs
         if (ageMs > LAUNCH_MAX_AGE_MS) {
             AppLogger.info(TAG, "[Share] processPendingShare: stale (age=${ageMs}ms), discarding")
-            SharedShareStore.clearPendingShare(context)
+            SharedShareStore.discardPendingShare(context, pending)
             // [T-android-share-buffer-merge] Preserve files still referenced by a
             // live in-memory buffer. Discarding THIS stale record must not delete
             // an earlier share's attachments that are still waiting to be
@@ -60,29 +63,13 @@ object ShareCoordinator {
             SharedShareStore.cleanSharedFiles(context, keep = liveBufferFileNames())
             return
         }
-        SharedShareStore.clearPendingShare(context)
-        // [T-android-share-buffer-merge] Append into an unconsumed buffer
-        // instead of replacing it (mirrors iOS a51e7255). The old
-        // single-slot `buffer = Buffered(...)` silently destroyed a share
-        // that had been loaded but not yet injected into the chat — the
-        // exact "shared two screenshots, only the second arrived" report.
+        // The store already merges and caps producer writes. Exclude the
+        // claimed snapshot so a warm launch cannot inject it a second time.
         val now = System.currentTimeMillis()
-        val existing = buffer
-        val mergedShare = if (existing != null && now - existing.bufferedAtMs <= BUFFER_TTL_MS) {
-            val seen = LinkedHashMap<Pair<PendingShare.Item.Kind, String>, PendingShare.Item>()
-            for (item in existing.share.items + pending.items) {
-                seen[item.kind to item.value] = item
-            }
-            AppLogger.info(
-                TAG,
-                "[Share] processPendingShare: merging ${existing.share.items.size} + " +
-                    "${pending.items.size} -> ${seen.size} item(s)",
-            )
-            PendingShare(seen.values.toList(), pending.timestampMs)
-        } else {
-            AppLogger.info(TAG, "[Share] processPendingShare: buffering ${pending.items.size} item(s)")
-            pending
-        }
+        val claimed = inFlight?.items.orEmpty().toSet()
+        val mergedShare = pending.copy(items = pending.items.filterNot { it in claimed })
+        if (mergedShare.items.isEmpty()) return
+        if (buffer?.share == mergedShare) return
         // bufferedAt renews on merge so the combined buffer gets a full TTL.
         buffer = Buffered(mergedShare, now)
         _bufferVersion.value = _bufferVersion.value + 1
@@ -138,14 +125,12 @@ object ShareCoordinator {
      * unrelated stale record. Empty when nothing is buffered.
      */
     private fun liveBufferFileNames(): Set<String> =
-        buffer?.share?.items
-            ?.filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }
-            ?.map { it.value }
-            ?.toSet()
-            ?: emptySet()
+        (buffer?.share?.items.orEmpty() + inFlight?.items.orEmpty())
+            .filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }.map { it.value }.toSet()
 
     /**
-     * Consume the buffer (one-shot). Returns null if empty or expired.
+     * Claim once in this process. Caller must persist its draft and acknowledge,
+     * or release on failure; a process restart recovers the durable snapshot.
      *
      * [T-android-share-buffer-merge] An expired buffer used to vanish with
      * only a log line — the user shared something, opened the app, and
@@ -160,12 +145,16 @@ object ShareCoordinator {
      * the fix, not the diagnosis. Recording who drained it is what lets a repro
      * log answer "did the wrong chat eat this share?".
      */
+    @Synchronized
     fun consumeBuffer(context: Context, diagSessionId: String? = null): PendingShare? {
+        if (inFlight != null) return null
+        if (buffer == null) processPendingShare(context)
         val buf = buffer ?: return null
         buffer = null
         val nowMs = System.currentTimeMillis()
         val ageMs = nowMs - buf.bufferedAtMs
         if (ageMs > BUFFER_TTL_MS) {
+            SharedShareStore.discardPendingShare(context, buf.share)
             AppLogger.info(TAG, "[Share] consumeBuffer: expired (age=${ageMs}ms)")
             AppLogger.info(
                 TAG,
@@ -188,7 +177,26 @@ object ShareCoordinator {
             "[XSessionDiag] share/consumed-by: consumer=${diagSessionId?.take(8) ?: "unknown"} " +
                 "items=${buf.share.items.size} ageMs=$ageMs",
         )
+        inFlight = buf.share
         return buf.share
+    }
+
+    @Synchronized
+    fun acknowledgeConsumed(context: Context, pending: PendingShare) {
+        if (inFlight != pending) return
+        SharedShareStore.acknowledgeConsumed(context, pending)
+        inFlight = null
+        buffer = null
+        processPendingShare(context)
+    }
+
+    @Synchronized
+    fun releaseConsumption(context: Context, pending: PendingShare) {
+        if (inFlight != pending) return
+        inFlight = null
+        // Keep a retryable snapshot without waking the same failing UI effect.
+        // A session change, a new share or a later launch can retry it.
+        buffer = SharedShareStore.loadPendingShare(context)?.let { Buffered(it, it.timestampMs) }
     }
 
     /**

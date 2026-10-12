@@ -427,6 +427,7 @@ data class ModelEntry(
                 maxOutputTokens = overrides.maxOutputTokens ?: base.maxOutputTokens,
                 contextWindow = overrides.contextWindow ?: base.contextWindow,
                 supportsReasoning = overrides.supportsReasoning ?: base.supportsReasoning,
+                entryThinkingCeiling = overrides.maxThinkingLevel,
                 inputModalities = (overrides.inputModalities ?: input)?.map { it.normalizeModalityName() }?.distinct(),
                 outputModalities = (overrides.outputModalities ?: output)?.map { it.normalizeModalityName() }?.distinct(),
             )

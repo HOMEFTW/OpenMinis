@@ -11,6 +11,7 @@ import com.openminis.app.data.db.MessageEntity
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -219,6 +220,23 @@ class BackupRecordMapperTest {
         assertEquals(message.copy(partsJson = back.partsJson, tokenUsage = back.tokenUsage), back)
         assertEquals("parts compare as JSON, unknown type kept", parsed(message.partsJson), parsed(back.partsJson))
         assertEquals(parsed(message.tokenUsage!!), parsed(back.tokenUsage!!))
+    }
+
+    @Test
+    fun `updated message preserves its exact revision timestamp through backup`() {
+        val edited = message.copy(updatedAt = at(9) + 456)
+        val restored = BackupRecordMapper.message(BackupExporter.messageRecord(edited).jsonObject)!!
+        assertEquals(edited.updatedAt, restored.updatedAt)
+    }
+
+    @Test
+    fun `message merge preserves local edits and permits missing IDs from legacy backups`() {
+        val legacy = json("""{"id":"M","sessionId":"S","createdAt":1000,"parts":[]}""")
+        assertFalse(BackupRecordMapper.messageIncomingWins(legacy, 3000))
+        assertTrue(BackupRecordMapper.messageIncomingWins(legacy, null))
+        assertFalse(BackupRecordMapper.messageIncomingWins(json("""{"updatedAt":2000}"""), 3000))
+        assertFalse(BackupRecordMapper.messageIncomingWins(json("""{"updatedAt":3000}"""), 3000))
+        assertTrue(BackupRecordMapper.messageIncomingWins(json("""{"updatedAt":3001}"""), 3000))
     }
 
     @Test

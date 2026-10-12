@@ -119,4 +119,19 @@ class SessionMailbox(initial: String?, private val persist: (String) -> Unit) {
             if (it.status == "running") it.copy(status = "interrupted", reply = "App stopped before completion; check the target conversation before sending again.") else it
         })
     }
+
+    /** Retain history for surviving participants; unreachable terminal history cannot fill the mailbox forever. */
+    @Synchronized
+    fun pruneDeletedSessions(existingSessionIds: Set<String>) {
+        val records = _messages.value.map { mail ->
+            if (mail.status == "queued" && (mail.source !in existingSessionIds || mail.target !in existingSessionIds)) {
+                mail.copy(status = "failed", reply = "Source or target session was deleted")
+            } else mail
+        }.filterNot { mail ->
+            mail.source !in existingSessionIds && mail.target !in existingSessionIds &&
+                mail.status in setOf("completed", "failed", "interrupted")
+        }
+        val allowed = enabled.intersect(existingSessionIds)
+        if (records != _messages.value || allowed != enabled) save(records, allowed)
+    }
 }

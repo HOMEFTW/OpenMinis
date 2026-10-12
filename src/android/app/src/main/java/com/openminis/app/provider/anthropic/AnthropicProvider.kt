@@ -22,6 +22,8 @@ import com.openminis.app.provider.SseEventReader
 import com.openminis.app.provider.parseToolInputObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -107,15 +109,21 @@ class AnthropicProvider(
         val budgeted = budgetProviderRequest(messages, imageParts)
         val body = buildRequestBody(budgeted.messages, systemPrompt, maxTokens, stream = false, temperature = temperature, imageParts = budgeted.imageParts, tools = tools, thinkingLevel = thinkingLevel)
         val request = buildRequest(body.toString(), body)
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string() ?: ""
-
-        if (!response.isSuccessful) {
-            throw mapHttpError(response.code, responseBody)
+        val call = client.newCall(request)
+        val callCancellation = cancelOnCancellation { call.cancel() }
+        try {
+            call.execute().use { response ->
+                val responseBody = response.body?.string() ?: ""
+                if (!response.isSuccessful) throw mapHttpError(response.code, responseBody)
+                parseResponse(JSONObject(responseBody))
+            }
+        } catch (error: Throwable) {
+            // A cancelled socket may throw IOException; preserve coroutine cancellation.
+            currentCoroutineContext().ensureActive()
+            throw error
+        } finally {
+            callCancellation.cancel()
         }
-
-        val json = JSONObject(responseBody)
-        parseResponse(json)
     }
 
     override fun streamMessageClamped(

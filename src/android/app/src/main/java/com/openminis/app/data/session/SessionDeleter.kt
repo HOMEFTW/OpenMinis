@@ -88,6 +88,11 @@ object SessionDeleter {
             // for this session while it had no live view model.
             com.openminis.app.sandbox.offload.BrowserCliPools.release(id)
         }
+        // Also handles terminal history inherited from deletes performed by older builds.
+        (context.applicationContext as? com.openminis.app.MinisApp)?.let { app ->
+            runCatching { app.sessionMessenger.pruneDeletedSessions() }
+                .onFailure { AppLogger.warning(TAG, "Mailbox cleanup failed: ${it.message}") }
+        }
         AppLogger.info(
             TAG,
             "deleteTree root=${rootId.take(8)} reason=$reason sessions=${ids.size} " +

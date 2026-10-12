@@ -15,7 +15,6 @@ import com.openminis.app.backup.BackupRecordMapper.str
 import com.openminis.app.backup.BackupRecordMapper.unwrapNested
 import com.openminis.app.logging.AppLogger
 import kotlin.coroutines.coroutineContext
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -306,6 +305,9 @@ class BackupImporter(
         val dao = db.chatDao()
         val dataDir = File(root, "data")
 
+        // One database transaction for this category: cancellation or failure
+        // rolls back metadata, messages and markers together, including local rows.
+        db.withTransaction {
         // Folders first: sessions carry a folderId, so applying folders
         // beforehand means the reference resolves immediately.
         readJsonl(dataDir, "folders") { rec ->
@@ -324,10 +326,6 @@ class BackupImporter(
         // Sessions before messages — a message row needs its parent to exist,
         // and the schema enforces it with a foreign key.
         val restoredSessionIds = mutableSetOf<String>()
-        // [T-android-restore-cancel-empty-sessions] Sessions THIS run newly
-        // inserted (Decoded.Apply with isNew) — never ones that already
-        // existed locally, which a cancel must not touch even if empty.
-        val newlyInsertedSessionIds = mutableListOf<String>()
         // [XSessionDiag] Restore wall clock, sampled once rather than per row —
         // the comparison below only needs "roughly now", and calling
         // currentTimeMillis() inside a loop over thousands of records would be
@@ -347,15 +345,7 @@ class BackupImporter(
         // rather than any work this code does — the app sat at ~135% CPU with
         // the four Room IO threads each burning ~1.0 s per 10 s wall clock.
         //
-        // [T-android-restore-cancel-empty-sessions] Durability: the import
-        // writes straight into the LIVE database (there is no staging DB) and
-        // is not resumable mid-category. Sessions and messages are SEPARATE
-        // transactions, so an interruption between them does not simply leave
-        // "every committed batch" behind as a consistent state: a Stop during
-        // the messages loop used to leave committed sessions with rolled-back
-        // messages. The cancel path below removes those; a crash (no
-        // CancellationException) can still leave them until the restore is
-        // re-run, which re-inserts the messages by id.
+        // Nested transactions share the category's rollback boundary.
         db.withTransaction {
         readJsonl(dataDir, "sessions") { rec ->
             sessionsSeen += 1
@@ -387,7 +377,6 @@ class BackupImporter(
                 is BackupRecordMapper.Decoded.Apply -> {
                     dao.insertSession(d.entity)
                     if (d.isNew) report.imported += 1 else report.updated += 1
-                    if (d.isNew) newlyInsertedSessionIds.add(id)
                     restoredSessionIds.add(id)
                     d.entity
                 }
@@ -434,13 +423,6 @@ class BackupImporter(
 
         }
 
-        // [T-android-restore-cancel-empty-sessions] From here on the sessions
-        // transaction has committed. A Stop anywhere below (the messages loop's
-        // ensureActive(), or a later withTransaction suspension) rolls back
-        // the in-flight batch only, so the sessions this run created would
-        // survive as empty "No messages yet" rows. The catch at the end of
-        // this block removes those before the cancellation propagates.
-        try {
         // The manifest counts MESSAGES for the chats category, so this is the
         // loop whose progress the button reports.
         var seen = 0
@@ -512,8 +494,13 @@ class BackupImporter(
                 report.skipped += 1
                 return@readJsonl
             }
-            dao.insertMessage(message)
-            report.imported += 1
+            val existingUpdatedAt = dao.messageUpdatedAt(message.id)
+            if (BackupRecordMapper.messageIncomingWins(m, existingUpdatedAt)) {
+                dao.insertMessage(message)
+                if (existingUpdatedAt == null) report.imported += 1 else report.updated += 1
+            } else {
+                report.skipped += 1
+            }
         }
         }
 
@@ -574,22 +561,7 @@ class BackupImporter(
                 dao.updateLastMessage(sid, preview, s.updatedAt)
             }
         }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            // NonCancellable: the job is already cancelled, so any suspending
-            // DAO call would otherwise throw immediately and skip the cleanup.
-            val removed = withContext(NonCancellable) {
-                deleteEmptySessions(
-                    newlyInsertedSessionIds,
-                    messageCount = { dao.messageCountForSession(it) },
-                    delete = { dao.deleteSession(it) },
-                )
-            }
-            AppLogger.info(
-                TAG,
-                "[Restore] chats: cancelled — removed ${removed.size} of " +
-                    "${newlyInsertedSessionIds.size} newly-inserted session(s) left without messages"
-            )
-            throw e
+        coroutineContext.ensureActive()
         }
 
         // The session file trees. Containment root is the sessions directory:
@@ -607,6 +579,10 @@ class BackupImporter(
             else File(sessionsRoot, parts.drop(1).joinToString("/"))
         }
         applyFileResult(report, files)
+
+        // Optional in old packages; preserve relative references and immutable
+        // local media while restoring images, pasted text and branch media.
+        applyFileResult(report, BackupChatMedia.restore(root, fileIndex, context.filesDir))
 
         // [T-android-restore-perf] Truncate the WAL now that the big
         // transactions have committed. Measured peak was 635 MB for a 633 MB
@@ -1004,27 +980,6 @@ class BackupImporter(
 
     companion object {
         private const val TAG = "Restore"
-
-        /**
-         * [T-android-restore-cancel-empty-sessions] Deletes each of [sessionIds]
-         * whose [messageCount] is zero; returns the ids deleted. Callers pass
-         * only sessions the current run newly inserted, so a pre-existing
-         * (user-owned) empty session is never in scope. Best-effort per id: one
-         * failing lookup or delete must not stop the rest of the cleanup.
-         */
-        internal suspend fun deleteEmptySessions(
-            sessionIds: Collection<String>,
-            messageCount: suspend (String) -> Int,
-            delete: suspend (String) -> Unit,
-        ): List<String> {
-            val deleted = mutableListOf<String>()
-            for (id in sessionIds) {
-                val count = runCatching { messageCount(id) }.getOrNull() ?: continue
-                if (count != 0) continue
-                runCatching { delete(id) }.onSuccess { deleted += id }
-            }
-            return deleted
-        }
 
         /**
          * [XSessionDiag] Mirror of the auto launch-mode freshness window in

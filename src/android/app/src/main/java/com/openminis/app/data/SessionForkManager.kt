@@ -4,6 +4,12 @@ import android.content.Context
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.SkillRepository
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.data.session.SessionResourceCopier
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import java.io.File
 
 /**
@@ -53,10 +59,10 @@ class SessionForkManager(
      *   - `lastMessage` (createSession seeds it; refreshed by appendMessage)
      *   - `id` / `createdAt` / `updatedAt` (new identity, current timestamps)
      */
-    suspend fun duplicateSession(sessionId: String): String? {
+    suspend fun duplicateSession(sessionId: String): String? = withContext(Dispatchers.IO) {
         val source = chatRepository.getSession(sessionId) ?: run {
             AppLogger.warning(TAG, "duplicateSession: $sessionId not found")
-            return null
+            return@withContext null
         }
         val messages = chatRepository.loadMessages(sessionId)
         val dupTitle = "${source.title ?: "Chat"} (Copy)"
@@ -64,6 +70,10 @@ class SessionForkManager(
             modelId = source.modelId,
             title = dupTitle,
         )
+        val resources = SessionResourceCopier(filesDir, new.id)
+        try {
+        val copyContext = coroutineContext
+        resources.copyWorkspace(sessionId) { copyContext.ensureActive() }
         // Mirror iOS: carry over the source's category onto the copy so the
         // session-list icon + colour stay consistent with the original.
         if (source.category != null) {
@@ -98,7 +108,7 @@ class SessionForkManager(
             val newMsg = chatRepository.appendMessage(
                 sessionId = new.id,
                 role = msg.role,
-                partsJson = msg.partsJson,
+                partsJson = resources.rewrite(msg.partsJson),
                 tokenUsage = msg.tokenUsage,
                 reasoningContent = msg.reasoningContent,
             )
@@ -163,7 +173,14 @@ class SessionForkManager(
                 "category=${source.category}, modelBinding=${source.modelBinding}, " +
                 "memoryEnabled=${source.memoryEnabled})",
         )
-        return new.id
+        new.id
+        } catch (failure: Throwable) {
+            withContext(NonCancellable) {
+                chatRepository.deleteSessionOnly(new.id)
+                resources.cleanup()
+            }
+            throw failure
+        }
     }
 
     /**

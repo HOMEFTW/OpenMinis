@@ -260,6 +260,7 @@ class BackupExporter(
         var fileCount = 0
         var fileBytes = 0L
         var jsonlBytes = 0L
+        val exportedMedia = mutableSetOf<String>()
 
         BackupJsonlWriter(dataDir, "sessions").use { sessions ->
             BackupJsonlWriter(dataDir, "messages").use { messages ->
@@ -283,6 +284,9 @@ class BackupExporter(
                             for (msg in dao.loadMessages(session.id)) {
                                 if (msg.createdAt > snapshotAtMillis) continue
                                 messages.write("MessageV2", 1, messageRecord(msg))
+                                val media = BackupChatMedia.export(msg.partsJson, File(context.filesDir, "media"), trees, exportedMedia, session.id)
+                                fileCount += media.filesIncluded
+                                fileBytes += media.bytesIncluded
                                 messageCount += 1
                             }
                             for (marker in dao.listCompactMarkers(session.id)) {
@@ -768,6 +772,8 @@ class BackupExporter(
             put("role", JsonPrimitive(m.role))
             put("parts", parseParts(m.partsJson))
             put("createdAt", JsonPrimitive(iso8601(m.createdAt)))
+            put("updatedAt", JsonPrimitive(SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+                .apply { timeZone = TimeZone.getTimeZone("UTC") }.format(java.util.Date(m.updatedAt ?: m.createdAt))))
             put("tokenUsage", m.tokenUsage?.let { parseJsonOrNull(it) } ?: JsonNull)
             put("reasoningContent", m.reasoningContent?.let(::JsonPrimitive) ?: JsonNull)
             put("streamInterruptCount", JsonPrimitive(m.streamInterruptCount))

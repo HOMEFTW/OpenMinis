@@ -5,6 +5,30 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ComposerDraftStoreTest {
+    @Test fun confirmedSharedDraftSurvivesBeforeThePendingShareIsAcknowledged() {
+        val prefs = MemorySharedPreferences()
+        val draft = ComposerDraft("Shared text", listOf(
+            DraftAttachment("shared", "photo.png", "file:///private/share_inbound/photo.png", "image/png", "IMAGE"),
+        ))
+        ComposerDraftStore(prefs).saveConfirmed("__new__shared", draft)
+        assertEquals(draft, ComposerDraftStore(MemorySharedPreferences(prefs.all)).load("__new__shared"))
+    }
+
+    @Test fun failedSharedDraftPersistenceIsReportedBeforeConsumption() {
+        val prefs = MemorySharedPreferences()
+        val failing = object : android.content.SharedPreferences by prefs {
+            override fun edit(): android.content.SharedPreferences.Editor {
+                val editor = prefs.edit()
+                return object : android.content.SharedPreferences.Editor by editor {
+                    override fun commit() = false
+                }
+            }
+        }
+        assertTrue(runCatching { ComposerDraftStore(failing).saveConfirmed("share", ComposerDraft("text", emptyList())) }
+            .exceptionOrNull() is IllegalStateException)
+        assertNull(ComposerDraftStore(prefs).load("share"))
+    }
+
     @Test fun newChatDraftSurvivesStoreRecreationAndPromotion() {
         val prefs = MemorySharedPreferences()
         val draft = ComposerDraft("尚未发送的内容", listOf(

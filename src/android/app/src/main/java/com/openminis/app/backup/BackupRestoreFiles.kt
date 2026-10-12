@@ -2,6 +2,7 @@ package com.openminis.app.backup
 
 import com.openminis.app.logging.AppLogger
 import java.io.File
+import java.nio.file.Files
 import java.util.UUID
 
 /**
@@ -49,10 +50,12 @@ object BackupRestoreFiles {
         fileIndex: List<BackupFileIndexEntry>,
         category: BackupCategory,
         containmentRoot: File,
+        overwriteExisting: Boolean = true,
         destinationFor: (String) -> File?,
     ): Result {
         val result = Result()
         val root = containmentRoot.canonicalFile
+        val blobsRoot = File(packageRoot.canonicalFile, "blobs")
 
         for (entry in fileIndex) {
             if (entry.category != category.key) continue
@@ -92,7 +95,21 @@ object BackupRestoreFiles {
                 continue
             }
             val sha = entry.sha256 ?: continue
-            val blob = File(File(File(packageRoot, "blobs"), sha.take(2)), sha)
+            if (!sha.matches(Regex("[0-9a-fA-F]{64}"))) {
+                result.rejectedPaths += 1
+                continue
+            }
+            val blob = File(File(blobsRoot, sha.take(2)), sha)
+            val safeSource = runCatching {
+                listOf(blobsRoot, blob.parentFile, blob).all { component ->
+                    !Files.isSymbolicLink(component.toPath()) &&
+                        (!component.exists() || component.toPath().toRealPath() == component.toPath().toAbsolutePath().normalize())
+                } && isContained(blob, blobsRoot)
+            }.getOrDefault(false)
+            if (!safeSource) {
+                result.rejectedPaths += 1
+                continue
+            }
             if (!blob.isFile) {
                 AppLogger.info(
                     TAG,
@@ -102,6 +119,7 @@ object BackupRestoreFiles {
                 continue
             }
 
+            if (!overwriteExisting && dest.isFile) continue
             dest.parentFile?.mkdirs()
             if (writeViaStagedSwap(blob, dest, entry.path)) {
                 result.written += 1

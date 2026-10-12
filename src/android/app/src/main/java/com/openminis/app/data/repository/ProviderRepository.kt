@@ -47,6 +47,7 @@ import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
@@ -215,6 +216,8 @@ class ProviderRepository(private val context: Context) {
     // before load just has no model entry, exactly like a fresh install).
     private val _config = MutableStateFlow(ProviderConfig())
     val config: StateFlow<ProviderConfig> = _config.asStateFlow()
+    private val _credentialRevision = MutableStateFlow(0L)
+    val credentialRevision: StateFlow<Long> = _credentialRevision.asStateFlow()
 
     /**
      * [T-android-startup-config-stall] False until the persisted config has
@@ -2646,6 +2649,7 @@ class ProviderRepository(private val context: Context) {
     // API Key management
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).apply()
+        _credentialRevision.update { it + 1 }
     }
 
     fun loadApiKey(instanceId: String): String? {
@@ -2670,6 +2674,7 @@ class ProviderRepository(private val context: Context) {
 
     fun deleteApiKey(instanceId: String) {
         encryptedPrefs.edit().remove("apikey_$instanceId").apply()
+        _credentialRevision.update { it + 1 }
     }
 
     // -- Import / Export --

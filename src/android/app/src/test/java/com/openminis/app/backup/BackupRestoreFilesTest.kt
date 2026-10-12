@@ -89,6 +89,49 @@ class BackupRestoreFilesTest {
         assertFalse(File(tmp, "evil.txt").exists())
     }
 
+    @Test
+    fun `a digest cannot select a file outside the package`() {
+        File(pkg, "blobs").mkdirs()
+        File(tmp, "private.txt").writeText("private fixture")
+        val r = restore(listOf(BackupFileIndexEntry.file(
+            "shared/copied.txt", 15, "../private.txt", BackupCategory.SHARED_FILES,
+        )))
+        assertEquals(0, r.written)
+        assertEquals(1, r.rejectedPaths)
+        assertFalse(File(dest, "copied.txt").exists())
+    }
+
+    @Test
+    fun `valid digest cannot follow a blob link outside the package`() {
+        val sha = blob("fixture".toByteArray())
+        val source = File(File(File(pkg, "blobs"), sha.take(2)), sha)
+        val external = File(tmp, "external.txt").apply { writeText("private fixture") }
+        source.delete()
+        val linked = runCatching { java.nio.file.Files.createSymbolicLink(source.toPath(), external.toPath()) }.isSuccess
+        org.junit.Assume.assumeTrue("Host must support symlinks", linked)
+        val r = restore(listOf(BackupFileIndexEntry.file("shared/copied.txt", 15, sha, BackupCategory.SHARED_FILES)))
+        assertEquals(0, r.written)
+        assertEquals(1, r.rejectedPaths)
+        assertFalse(File(dest, "copied.txt").exists())
+    }
+
+    @Test
+    fun `valid digest cannot follow a blob directory link outside the package`() {
+        val sha = blob("fixture".toByteArray())
+        val prefix = File(File(pkg, "blobs"), sha.take(2))
+        val external = File(tmp, "external").apply { mkdirs() }
+        File(prefix, sha).renameTo(File(external, sha))
+        assertTrue(prefix.delete())
+        org.junit.Assume.assumeTrue("Host must support symlinks", runCatching {
+            java.nio.file.Files.createSymbolicLink(prefix.toPath(), external.toPath())
+        }.isSuccess)
+        val r = restore(listOf(BackupFileIndexEntry.file("shared/copied.txt", 7, sha, BackupCategory.SHARED_FILES)))
+        assertEquals(0, r.written)
+        assertEquals(1, r.rejectedPaths)
+        assertFalse(File(dest, "copied.txt").exists())
+        assertEquals("fixture", File(external, sha).readText())
+    }
+
     /**
      * S7: the index says the file is in the package but its blob is not. This
      * must be counted and surfaced — as a silent skip, the file simply never

@@ -136,8 +136,11 @@ class BackupCompactMarkerVersionParityTest {
         val rec = BackupExporter.messageRecord(
             message.copy(modelId = "m", modelDisplayName = "M", providerType = "openAI", providerInstanceId = "P"),
         ).jsonObject
-        val foreign = rec.keys.filter { it !in iosNames }
+        // Synthesized Swift Codable ignores additional keys. Android's optional
+        // revision extension prevents stale restores from overwriting local edits.
+        val foreign = rec.keys.filter { it !in iosNames && it != "updatedAt" }
         assertTrue("keys iOS does not know: $foreign", foreign.isEmpty())
+        assertEquals(message.updatedAt ?: message.createdAt, BackupRecordMapper.message(rec)?.updatedAt)
     }
 
     // -- Android round trip ----------------------------------------------------

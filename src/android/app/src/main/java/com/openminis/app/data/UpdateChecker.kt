@@ -34,12 +34,7 @@ import java.util.concurrent.TimeUnit
 object UpdateChecker {
 
     private const val TAG = "UpdateChecker"
-    private const val OWNER = "OpenMinis"
-    // T133: the public repo is OpenMinis/OpenMinis (org + repo share a name).
-    // Previously pointed at OpenMinis/MinisApp, which is the private dev
-    // mirror — every API call 404'd, which we mistranslated as "no release
-    // published". The 0.1-preview release is published as a prerelease on
-    // OpenMinis/OpenMinis with a MinisApp-*.apk asset attached.
+    private const val OWNER = "HOMEFTW"
     private const val REPO = "OpenMinis"
     private const val DOWNLOAD_FILENAME = "minis-update.apk"
     /**
@@ -186,9 +181,7 @@ object UpdateChecker {
                 // Highest version we've seen at all (used for the "release
                 // exists but is older or equal" → UpToDate decision and for
                 // logging).
-                val highest = candidates.maxWithOrNull(
-                    compareBy { compareVersions(it.versionName, "0") },
-                ) ?: candidates.first()
+                val highest = highestVersion(candidates) { it.versionName } ?: candidates.first()
                 AppLogger.info(
                     TAG,
                     "highest-published tag=${highest.tagName} parsed=${highest.versionName} prerelease=${highest.isPrerelease} apk=${highest.apkUrl != null}",
@@ -200,7 +193,7 @@ object UpdateChecker {
                 val upgradeCandidate = candidates
                     .filter { it.apkUrl != null }
                     .filter { compareVersions(it.versionName, localVer) > 0 }
-                    .maxWithOrNull(compareBy { compareVersions(it.versionName, "0") })
+                    .let { highestVersion(it) { candidate -> candidate.versionName } }
 
                 if (upgradeCandidate != null) {
                     AppLogger.info(
@@ -258,7 +251,10 @@ object UpdateChecker {
     }
 
     /** Public so UI can deep-link users to manual download when GitHub is blocked. */
-    const val RELEASES_URL: String = "https://github.com/OpenMinis/OpenMinis/releases"
+    const val RELEASES_URL: String = "https://github.com/HOMEFTW/OpenMinis/releases"
+
+    internal fun <T> highestVersion(items: List<T>, version: (T) -> String): T? =
+        items.maxWithOrNull(Comparator { a, b -> compareVersions(version(a), version(b)) })
 
     /** Returns (downloadUrl, sizeBytes) for the first .apk asset, or (null, 0). */
     private fun findApkAsset(assets: JSONArray?): Pair<String?, Long> {

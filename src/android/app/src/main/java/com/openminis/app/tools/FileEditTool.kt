@@ -69,46 +69,47 @@ object FileEditTool {
             val file = PRootKernel.resolveSessionHostPath(sessionId, path, context)
                 ?: return ToolExecutionResult("Error: Cannot resolve path: $path", false, toolTitle = toolTitle)
 
-            if (!file.exists()) {
-                return ToolExecutionResult("Error: File not found: $path", false, toolTitle = toolTitle)
-            }
+            FileMutationCoordinator.withFile(file) {
+                if (!file.exists()) {
+                    return@withFile ToolExecutionResult("Error: File not found: $path", false, toolTitle = toolTitle)
+                }
 
-            val content = file.readText()
+                val content = file.readText()
 
-            // Count occurrences
-            var count = 0
-            var searchFrom = 0
-            while (true) {
-                val idx = content.indexOf(oldString, searchFrom)
-                if (idx < 0) break
-                count++
-                searchFrom = idx + oldString.length
-            }
+                var count = 0
+                var searchFrom = 0
+                while (true) {
+                    val idx = content.indexOf(oldString, searchFrom)
+                    if (idx < 0) break
+                    count++
+                    searchFrom = idx + oldString.length
+                }
 
-            if (count == 0) {
-                return ToolExecutionResult("Error: old_string not found in $path", false, toolTitle = toolTitle)
-            }
+                if (count == 0) {
+                    return@withFile ToolExecutionResult("Error: old_string not found in $path", false, toolTitle = toolTitle)
+                }
 
-            if (count > 1 && !replaceAll) {
-                return ToolExecutionResult(
-                    "Error: old_string found $count times in $path. Use replace_all=true to replace all occurrences, " +
-                        "or provide a more specific old_string that matches exactly once.",
-                    false, toolTitle = toolTitle
+                if (count > 1 && !replaceAll) {
+                    return@withFile ToolExecutionResult(
+                        "Error: old_string found $count times in $path. Use replace_all=true to replace all occurrences, " +
+                            "or provide a more specific old_string that matches exactly once.",
+                        false, toolTitle = toolTitle
+                    )
+                }
+
+                val newContent = if (replaceAll) {
+                    content.replace(oldString, newString)
+                } else {
+                    content.replaceFirst(oldString, newString)
+                }
+
+                file.writeText(newContent)
+                val replacements = if (replaceAll) count else 1
+                ToolExecutionResult(
+                    "Edited $path ($replacements replacement(s), ${newContent.length} bytes)",
+                    true, toolTitle = toolTitle
                 )
             }
-
-            val newContent = if (replaceAll) {
-                content.replace(oldString, newString)
-            } else {
-                content.replaceFirst(oldString, newString)
-            }
-
-            file.writeText(newContent)
-            val replacements = if (replaceAll) count else 1
-            ToolExecutionResult(
-                "Edited $path ($replacements replacement(s), ${newContent.length} bytes)",
-                true, toolTitle = toolTitle
-            )
         } catch (e: Exception) {
             ToolExecutionResult("Error editing file: ${e.message}", false)
         }

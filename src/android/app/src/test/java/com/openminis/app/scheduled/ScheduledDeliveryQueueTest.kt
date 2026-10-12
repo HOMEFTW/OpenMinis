@@ -4,6 +4,31 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ScheduledDeliveryQueueTest {
+    @Test fun `pending callback includes restored deferred and running work until durable finish`() {
+        var disk: String? = null
+        var pending = emptySet<String>()
+        var fail = false
+        val observe: (List<ScheduledDelivery>) -> Unit = { pending = it.map { d -> d.executionId }.toSet() }
+        val queue = ScheduledDeliveryQueue(null, onChanged = observe) {
+            if (fail) error("disk full")
+            disk = it
+        }
+        queue.enqueue(delivery("one"))
+        assertEquals(setOf("one"), pending)
+        queue.claim("one")
+        assertEquals(setOf("one"), pending)
+        val restored = ScheduledDeliveryQueue(disk, onChanged = observe) {}
+        assertEquals(setOf("one"), pending)
+        restored.defer("one")
+        assertEquals(setOf("one"), pending)
+        fail = true
+        assertTrue(runCatching { queue.finish("one") }.isFailure)
+        assertEquals(setOf("one"), pending)
+        fail = false
+        queue.finish("one")
+        assertTrue(pending.isEmpty())
+    }
+
     private fun delivery(id: String, session: String = "parent") = ScheduledDelivery(
         ScheduledTask(label = "Test", timeOfDayHour = 9, timeOfDayMinute = 0,
             repeatMode = ScheduledRepeatMode.ONCE, prompt = "Work",

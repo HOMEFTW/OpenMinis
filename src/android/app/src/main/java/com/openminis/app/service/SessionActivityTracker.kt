@@ -396,9 +396,25 @@ object SessionActivityTracker {
      */
     fun shouldRunServiceNow(): Boolean = shouldRunService()
 
+    private val pendingWorkByOwner = mutableMapOf<String, Set<String>>()
+    private val _pendingWork = MutableStateFlow<Set<String>>(emptySet())
+    val pendingWork: StateFlow<Set<String>> = _pendingWork.asStateFlow()
+
+    /** Handoffs and durable queues keep the service alive until execution or failure. */
+    @Synchronized
+    fun setPendingWork(owner: String, workIds: Set<String>) {
+        val wasIdle = !shouldRunService()
+        if (workIds.isEmpty()) pendingWorkByOwner.remove(owner)
+        else pendingWorkByOwner[owner] = workIds.toSet()
+        _pendingWork.value = pendingWorkByOwner.values.flatten().toSet()
+        if (!shouldRunService()) stopService()
+        else if (wasIdle) startServiceIfNeeded()
+        else updateService()
+    }
+
     private fun shouldRunService(): Boolean =
         _activeSessions.value.isNotEmpty() || _presentSessions.value.isNotEmpty() ||
-            _overlayCompletionPending.value
+            _overlayCompletionPending.value || _pendingWork.value.isNotEmpty()
 
     /**
      * [T-android-overlay-completion-survives-stop] True while a finished turn
@@ -424,6 +440,7 @@ object SessionActivityTracker {
      */
     private val _overlayCompletionPending = MutableStateFlow(false)
 
+    @Synchronized
     fun setOverlayCompletionPending(pending: Boolean) {
         if (_overlayCompletionPending.value == pending) return
         _overlayCompletionPending.value = pending
@@ -537,6 +554,7 @@ object SessionActivityTracker {
      * loop's cancel callback — captured here so the notification's Stop
      * action can fan out to every running session.
      */
+    @Synchronized
     fun setActive(sessionId: String, onStop: (() -> Unit)? = null, sessionTitle: String? = null) {
         // [T-android-overlay-multitask] Register the capsule slot first so the
         // "① of N" indicator counts this run even if it produces no tool call.
@@ -582,6 +600,7 @@ object SessionActivityTracker {
      * sessions remain active *and* the user is no longer present in any
      * chat.
      */
+    @Synchronized
     fun setInactive(sessionId: String) {
         val wasActive = sessionId in _activeSessions.value
         _activeSessions.value = _activeSessions.value - sessionId
@@ -653,6 +672,7 @@ object SessionActivityTracker {
      * at adj=200 across Home / app-switcher / lock-screen, even when no
      * stream is in flight.
      */
+    @Synchronized
     fun setPresent(sessionId: String) {
         if (sessionId in _presentSessions.value) return
         val wasIdle = !shouldRunService()
@@ -671,6 +691,7 @@ object SessionActivityTracker {
      * MainActivity when the user leaves the chat route or the Activity
      * is paused.
      */
+    @Synchronized
     fun setAbsent(sessionId: String) {
         if (sessionId !in _presentSessions.value) return
         _presentSessions.value = _presentSessions.value - sessionId
@@ -689,6 +710,7 @@ object SessionActivityTracker {
      * pinned at adj=200 across the user's brief absence. Backgrounding
      * is the entire scenario this exists to protect against.
      */
+    @Synchronized
     fun clearPresence() {
         if (_presentSessions.value.isEmpty()) return
         _presentSessions.value = emptySet()
@@ -929,7 +951,7 @@ object SessionActivityTracker {
      */
     private fun sessionCountForNotification(): Int =
         if (_activeSessions.value.isNotEmpty()) _activeSessions.value.size
-        else _presentSessions.value.size
+        else maxOf(_presentSessions.value.size, _pendingWork.value.size)
 
     /**
      * Tool status fallback: when nothing is streaming, expose "In session"
@@ -962,6 +984,7 @@ object SessionActivityTracker {
                     if (activeCount == 1) "1 task running" else "$activeCount tasks running"
                 }
             }
+            _pendingWork.value.isNotEmpty() -> "Scheduled tasks pending"
             _presentSessions.value.isNotEmpty() ->
                 ctx?.getString(com.openminis.app.R.string.notif_in_session) ?: "In session"
             else -> "Idle"

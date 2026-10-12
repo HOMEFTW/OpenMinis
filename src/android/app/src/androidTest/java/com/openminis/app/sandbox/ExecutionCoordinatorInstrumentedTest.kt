@@ -4,10 +4,13 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,7 +18,7 @@ import java.io.File
 
 /**
  * On-device tests for ExecutionCoordinator.
- * Tests session mount switching, command serialization, and lifecycle.
+ * Tests per-command mounts, concurrent isolation, and cancellation.
  *
  * Run on real device: ./gradlew connectedAndroidTest
  */
@@ -45,62 +48,52 @@ class ExecutionCoordinatorInstrumentedTest {
     // ==================== Session mounting ====================
 
     @Test
-    fun executeSetsMountedSessionId() = runBlocking {
+    fun executeRecordsItsWorkspaceOwner() = runBlocking {
         skipIfNoBoot()
 
         val sessionId = "session-mount-test"
         ExecutionCoordinator.execute(sessionId, "echo hello")
 
-        assertEquals(sessionId, ExecutionCoordinator.mountedSessionId)
+        assertEquals(sessionId, ExecutionCoordinator.mountedSessionIdFor(sessionId))
     }
 
     @Test
-    fun executeSwitchesSessionMounts() = runBlocking {
+    fun executePreservesIndependentWorkspaceOwners() = runBlocking {
         skipIfNoBoot()
 
         ExecutionCoordinator.execute("session-A", "echo a")
-        assertEquals("session-A", ExecutionCoordinator.mountedSessionId)
+        assertEquals("session-A", ExecutionCoordinator.mountedSessionIdFor("session-A"))
 
         ExecutionCoordinator.execute("session-B", "echo b")
-        assertEquals("session-B", ExecutionCoordinator.mountedSessionId)
+        assertEquals("session-B", ExecutionCoordinator.mountedSessionIdFor("session-B"))
+        assertEquals("session-A", ExecutionCoordinator.mountedSessionIdFor("session-A"))
     }
 
     @Test
-    fun executeSameSessionDoesNotRemount() = runBlocking {
+    fun executeUsesAFreshProcessWithTheSameWorkspace() = runBlocking {
         skipIfNoBoot()
 
-        ExecutionCoordinator.execute("session-X", "echo first")
-
-        // Get current bind mount count
-        val mountCount = PRootKernel.bindMounts.size
-
-        ExecutionCoordinator.execute("session-X", "echo second")
-
-        // Mounts should remain the same (not cleared and re-added)
-        assertEquals(mountCount, PRootKernel.bindMounts.size)
-        assertEquals("session-X", ExecutionCoordinator.mountedSessionId)
+        ExecutionCoordinator.execute("session-X", "export MINIS_TEST_LOCAL=first; echo first > /var/minis/workspace/process-test.txt")
+        val second = ExecutionCoordinator.execute("session-X", "echo env=\$MINIS_TEST_LOCAL; cat /var/minis/workspace/process-test.txt")
+        assertTrue(second.output.contains("first"))
+        assertFalse(second.output.contains("env=first"))
     }
 
     @Test
-    fun executeCreatesSessionBindMounts() = runBlocking {
+    fun executeKeepsSessionMountsOutOfTheGlobalMap() = runBlocking {
         skipIfNoBoot()
 
         ExecutionCoordinator.execute("session-mounts", "echo test")
 
-        // Should have session-level + global bind mounts
-        // Session: attachments, offloads, workspace, browser (4)
-        // Global: memory, skills (2)
-        assertEquals(6, PRootKernel.bindMounts.size)
-
-        // Verify session-level mounts
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/attachments"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/offloads"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/workspace"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/browser"))
-
-        // Verify global mounts
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/memory"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/skills"))
+        val built = SessionMounts.forContext(context, "session-mounts")
+        assertTrue(built.skipped.isEmpty())
+        for (subdir in SessionMounts.SESSION_SUBDIRS) {
+            assertTrue(built.mounts.containsKey("/var/minis/$subdir"))
+            assertFalse(PRootKernel.bindMounts.containsKey("/var/minis/$subdir"))
+        }
+        for (subdir in SessionMounts.GLOBAL_SUBDIRS) {
+            assertTrue(built.mounts.containsKey("/var/minis/$subdir"))
+        }
     }
 
     @Test
@@ -118,7 +111,7 @@ class ExecutionCoordinatorInstrumentedTest {
 
         // Verify global host directories exist
         val globalBase = File(context.filesDir, "minis-global")
-        for (subdir in listOf("memory", "skills")) {
+        for (subdir in SessionMounts.GLOBAL_SUBDIRS) {
             assertTrue("$subdir should exist", File(globalBase, subdir).isDirectory)
         }
     }
@@ -131,15 +124,16 @@ class ExecutionCoordinatorInstrumentedTest {
         ExecutionCoordinator.execute(sessionId, "echo test")
 
         val sessionBase = File(context.filesDir, "minis-sessions/$sessionId")
+        val mounts = SessionMounts.forContext(context, sessionId).mounts
         assertEquals(
             File(sessionBase, "workspace").absolutePath,
-            PRootKernel.bindMounts["/var/minis/workspace"]
+            mounts["/var/minis/workspace"]
         )
 
         val globalBase = File(context.filesDir, "minis-global")
         assertEquals(
             File(globalBase, "memory").absolutePath,
-            PRootKernel.bindMounts["/var/minis/memory"]
+            mounts["/var/minis/memory"]
         )
     }
 
@@ -197,22 +191,18 @@ class ExecutionCoordinatorInstrumentedTest {
         assertTrue(lines.contains("two"))
     }
 
-    // ==================== Serialization ====================
+    // ==================== Concurrent isolation ====================
 
     @Test
-    fun executeSerializesConcurrentCalls() = runBlocking {
+    fun concurrentCallsKeepTheirOwnWorkspaceMounts() = runBlocking {
         skipIfNoBoot()
 
-        // Launch two commands concurrently — they should serialize
-        val startTime = System.currentTimeMillis()
-
         val deferred1 = async {
-            ExecutionCoordinator.execute("session-serial", "sleep 1; echo first")
+            ExecutionCoordinator.execute("session-concurrent-A", "echo A > /var/minis/workspace/concurrent.txt; sleep 1; cat /var/minis/workspace/concurrent.txt")
         }
         val deferred2 = async {
-            // Small delay to ensure ordering
             delay(50)
-            ExecutionCoordinator.execute("session-serial", "echo second")
+            ExecutionCoordinator.execute("session-concurrent-B", "echo B > /var/minis/workspace/concurrent.txt; sleep 1; cat /var/minis/workspace/concurrent.txt")
         }
 
         val result1 = deferred1.await()
@@ -222,44 +212,45 @@ class ExecutionCoordinatorInstrumentedTest {
         assertEquals(0, result1.exitCode)
         assertEquals(0, result2.exitCode)
 
-        // Total time should be > 1s (serialized, not parallel)
-        val elapsed = System.currentTimeMillis() - startTime
-        assertTrue("Commands should be serialized (elapsed: ${elapsed}ms)", elapsed >= 900)
+        assertEquals("A", result1.output.trim())
+        assertEquals("B", result2.output.trim())
     }
 
     // ==================== sessionDidTerminate ====================
 
     @Test
-    fun sessionDidTerminateClearsMountsForMatchingSession() = runBlocking {
+    fun sessionDidTerminateStopsOnlyItsRunningCommand() = runBlocking {
         skipIfNoBoot()
 
-        ExecutionCoordinator.execute("session-terminate", "echo test")
-        assertEquals("session-terminate", ExecutionCoordinator.mountedSessionId)
-        assertTrue(PRootKernel.bindMounts.isNotEmpty())
-
+        val ready = CompletableDeferred<Unit>()
+        val command = async {
+            ExecutionCoordinator.execute("session-terminate", "echo ready; sleep 30; echo unexpected", lineCallback = {
+                if (it == "ready") ready.complete(Unit)
+            })
+        }
+        withTimeout(10_000) { ready.await() }
         ExecutionCoordinator.sessionDidTerminate("session-terminate")
-
-        assertNull(ExecutionCoordinator.mountedSessionId)
-        assertTrue(PRootKernel.bindMounts.isEmpty())
+        command.join()
+        assertTrue(command.isCancelled)
+        assertEquals(0, ExecutionCoordinator.execute("session-keep", "echo still-running").exitCode)
     }
 
     @Test
-    fun sessionDidTerminateIgnoresMismatchedSession() = runBlocking {
+    fun sessionDidTerminatePreservesWorkspaceOwnership() = runBlocking {
         skipIfNoBoot()
 
         ExecutionCoordinator.execute("session-keep", "echo test")
-        val mountsBefore = PRootKernel.bindMounts.size
-
+        SessionWorkspaceRegistry.register("session-owner-child", "session-keep")
         ExecutionCoordinator.sessionDidTerminate("session-other")
-
-        assertEquals("session-keep", ExecutionCoordinator.mountedSessionId)
-        assertEquals(mountsBefore, PRootKernel.bindMounts.size)
+        ExecutionCoordinator.sessionDidTerminate("session-owner-child")
+        assertEquals("session-keep", ExecutionCoordinator.mountedSessionIdFor("session-owner-child"))
+        assertEquals(0, ExecutionCoordinator.execute("session-keep", "echo kept").exitCode)
     }
 
     @Test
     fun sessionDidTerminateIsNoOpWhenNoSession() {
         ExecutionCoordinator.sessionDidTerminate("any-session")
-        assertNull(ExecutionCoordinator.mountedSessionId)
+        assertEquals("any-session", ExecutionCoordinator.mountedSessionIdFor("any-session"))
     }
 
     // ==================== stopCurrentCommand ====================
@@ -310,13 +301,13 @@ class ExecutionCoordinatorInstrumentedTest {
         // Write file to global memory in session A
         ExecutionCoordinator.execute(
             "session-global-A",
-            "echo 'shared' > /var/minis/memory/shared.txt"
+            "echo 'shared' > /var/minis/memory/coordinator-test-shared.txt"
         )
 
         // Read from session B — should see the same file
         val result = ExecutionCoordinator.execute(
             "session-global-B",
-            "cat /var/minis/memory/shared.txt"
+            "cat /var/minis/memory/coordinator-test-shared.txt"
         )
         assertTrue("Global dirs should be shared", result.output.contains("shared"))
     }
@@ -324,48 +315,34 @@ class ExecutionCoordinatorInstrumentedTest {
     // ==================== Helpers ====================
 
     private fun canBoot(): Boolean {
-        return try {
-            context.assets.open("alpine-minirootfs.tar.gz").use { }
-            context.assets.open("proot-aarch64").use { }
-            true
-        } catch (_: Exception) {
-            false
+        // AAPT may package the gzip archive as a tar; match RootfsManager's
+        // supported names so an installed app does not silently skip the suite.
+        val rootfsAvailable = listOf("alpine-minirootfs.tar.gz", "alpine-minirootfs.tar").any { asset ->
+            runCatching { context.assets.open(asset).use { } }.isSuccess
         }
+        val prootAvailable = File(context.applicationInfo.nativeLibraryDir, "libproot.so").isFile
+        return rootfsAvailable && prootAvailable
     }
 
     private fun skipIfNoBoot() {
-        if (!PRootKernel.isBooted) {
-            println("SKIP: PRoot not booted (assets not available)")
-            return
-        }
+        assumeTrue("PRoot assets must be available", PRootKernel.isBooted)
     }
 
     private fun resetKernel() {
-        try {
-            val field = PRootKernel::class.java.getDeclaredField("isBooted")
-            field.isAccessible = true
-            field.set(PRootKernel, false)
-        } catch (_: Exception) { }
         PRootKernel.clearBindMounts()
         PRootKernel.customEnvironment.clear()
-
-        // Reset ExecutionCoordinator mountedSessionId
-        try {
-            val field = ExecutionCoordinator::class.java.getDeclaredField("mountedSessionId")
-            field.isAccessible = true
-            field.set(ExecutionCoordinator, null)
-        } catch (_: Exception) { }
     }
 
     private fun cleanupSessionDirs() {
         listOf("session-mount-test", "session-A", "session-B", "session-X",
             "session-mounts", "session-dirs-test", "session-verify-paths",
             "session-output", "session-fail", "session-ok", "session-timeout",
-            "session-callback", "session-serial", "session-terminate",
+            "session-callback", "session-concurrent-A", "session-concurrent-B", "session-terminate", "session-owner-child",
             "session-keep", "session-iso-A", "session-iso-B",
             "session-global-A", "session-global-B").forEach { id ->
             File(context.filesDir, "minis-sessions/$id").deleteRecursively()
+            SessionWorkspaceRegistry.forget(id)
         }
-        File(context.filesDir, "minis-global").deleteRecursively()
+        File(context.filesDir, "minis-global/memory/coordinator-test-shared.txt").delete()
     }
 }

@@ -238,6 +238,11 @@ object ProviderFactory {
         (provider as? OpenAIProvider)?.responseTimeoutSeconds = instance.responseTimeoutSeconds
         (provider as? OpenAIProvider)?.sessionId = sessionId
         (provider as? OpenAIProvider)?.modelOverrides = overrides?.takeIf { !it.isEmpty }
+        overrides?.maxThinkingLevel?.let { ceiling ->
+            val existing = model.entryThinkingCeiling
+            provider.model = model.copy(entryThinkingCeiling =
+                if (existing != null && existing.rank < ceiling.rank) existing else ceiling)
+        }
         return provider
     }
 }

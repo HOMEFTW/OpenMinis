@@ -33,6 +33,7 @@ class SessionMessenger(private val app: MinisApp) {
         // Constructor runs on IO; fail opening rather than expose a queue with no dispatcher.
         mailbox.recover()
         scope.launch {
+            runCatching { pruneDeletedSessions() }.onFailure { _error.value = it.message ?: "Mailbox cleanup failed" }
             while (isActive) {
                 mailbox.messages.value.filter { it.status == "queued" }.forEach { mail ->
                     if (activeTargets.add(mail.target)) scope.launch {
@@ -53,10 +54,15 @@ class SessionMessenger(private val app: MinisApp) {
 
     fun isHandling(sessionId: String): Boolean = sessionId in activeTargets
 
+    suspend fun pruneDeletedSessions() {
+        mailbox.pruneDeletedSessions(app.chatRepository.dao.listSessionIds().toSet())
+    }
+
     suspend fun send(source: String, target: String, text: String, fromAgent: Boolean): SessionMail = withContext(Dispatchers.IO) {
         require(app.chatRepository.getSession(source) != null) { "Source session no longer exists" }
         require(app.chatRepository.getSession(target) != null) { "Target session no longer exists" }
         require(!fromAgent || !isHandling(source)) { "Cross-session requests cannot send nested requests; return a reply instead" }
+        pruneDeletedSessions()
         mailbox.enqueue(source, target, text, fromAgent)
     }
 

@@ -30,16 +30,23 @@ data class ScheduledDelivery(
 }
 
 /** The persistence callback must finish successfully before state is published. */
-class ScheduledDeliveryQueue(initial: String?, private val persist: (String) -> Unit) {
+class ScheduledDeliveryQueue(
+    initial: String?,
+    private val onChanged: ((List<ScheduledDelivery>) -> Unit)? = null,
+    private val persist: (String) -> Unit,
+) {
     private val _deliveries = MutableStateFlow(initial?.let { raw ->
         val array = JSONArray(raw)
         (0 until array.length()).map { ScheduledDelivery.fromJson(array.getJSONObject(it)) }
     }.orEmpty())
     val deliveries = _deliveries.asStateFlow()
 
+    init { onChanged?.invoke(_deliveries.value) }
+
     private fun save(next: List<ScheduledDelivery>) {
         persist(JSONArray(next.map { it.toJson() }).toString())
         _deliveries.value = next
+        onChanged?.invoke(next)
     }
 
     @Synchronized

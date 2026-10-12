@@ -19,6 +19,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
@@ -230,8 +231,7 @@ class BrowserUseManager(
         _isLoading.value = false
         navigationDeferred?.complete(Unit)
         navigationDeferred = null
-        asyncJsDeferred?.complete("{\"error\":\"Browser tab was closed or reclaimed.\"}")
-        asyncJsDeferred = null
+        asyncJsRequests.failAll("{\"error\":\"Browser tab was closed or reclaimed.\"}")
         webView.disposeSafely()
     }
 
@@ -242,19 +242,18 @@ class BrowserUseManager(
         File(webView.context.cacheDir, "browser_screenshots").also { it.mkdirs() }
     }
 
-    /** Deferred used by executeJS to receive results from async scripts via JS bridge. */
-    private var asyncJsDeferred: CompletableDeferred<String>? = null
+    private val asyncJsRequests = AsyncJsRequests()
 
     /** JavaScript interface for async script result callbacks. */
     private val jsBridge = object {
         @JavascriptInterface
-        fun resolve(result: String) {
-            asyncJsDeferred?.complete(result)
+        fun resolve(token: String, result: String) {
+            asyncJsRequests.complete(token, result)
         }
 
         @JavascriptInterface
-        fun reject(error: String) {
-            asyncJsDeferred?.complete("{\"error\":${JSONObject.quote(error)}}")
+        fun reject(token: String, error: String) {
+            asyncJsRequests.complete(token, "{\"error\":${JSONObject.quote(error)}}")
         }
 
         /**
@@ -415,8 +414,7 @@ class BrowserUseManager(
                 _isLoading.value = false
                 navigationDeferred?.complete(Unit)
                 navigationDeferred = null
-                asyncJsDeferred?.complete("{\"error\":\"Browser renderer stopped; open a new tab.\"}")
-                asyncJsDeferred = null
+                asyncJsRequests.failAll("{\"error\":\"Browser renderer stopped; open a new tab.\"}")
                 view.disposeSafely()
                 view.rendererGoneNotice()
                 return com.openminis.app.ui.webview.WebViewRenderProcess.handle("BrowserUseManager", detail)
@@ -1256,36 +1254,30 @@ class BrowserUseManager(
         // Android WebView doesn't resolve Promises from evaluateJavascript,
         // so we use a JS bridge callback (__minis__.resolve / __minis__.reject).
         return try {
-            val deferred = CompletableDeferred<String>()
-            asyncJsDeferred = deferred
-            val wrapped = """
-                (async function(){
-                    try {
-                        var __r__ = (async function(){ $script })();
-                        var __v__ = await __r__;
-                        if (__v__ === undefined || __v__ === null) {
-                            __minis__.resolve(String(__v__));
-                        } else if (typeof __v__ === 'object') {
-                            __minis__.resolve(JSON.stringify(__v__));
-                        } else {
-                            __minis__.resolve(String(__v__));
+            val raw = asyncJsRequests.await(30_000L) { token ->
+                val wrapped = """
+                    (async function(){
+                        try {
+                            var __r__ = (async function(){ $script })();
+                            var __v__ = await __r__;
+                            if (__v__ === undefined || __v__ === null) {
+                                __minis__.resolve(${JSONObject.quote(token)}, String(__v__));
+                            } else if (typeof __v__ === 'object') {
+                                __minis__.resolve(${JSONObject.quote(token)}, JSON.stringify(__v__));
+                            } else {
+                                __minis__.resolve(${JSONObject.quote(token)}, String(__v__));
+                            }
+                        } catch(e) {
+                            __minis__.reject(${JSONObject.quote(token)}, e.message || String(e));
                         }
-                    } catch(e) {
-                        __minis__.reject(e.message || String(e));
-                    }
-                })();
-            """.trimIndent()
-            withContext(Dispatchers.Main) {
-                ensureUsable()
+                    })();
+                """.trimIndent()
+                withContext(Dispatchers.Main) {
+                    ensureUsable()
 
-                webView.evaluateJavascript(wrapped, null)
-            }
-            val raw = withTimeoutOrNull(30_000L) { deferred.await() }
-                ?: run {
-                    asyncJsDeferred = null
-                    return BrowserActionResult.error("JavaScript execution timed out (30s)")
+                    webView.evaluateJavascript(wrapped, null)
                 }
-            asyncJsDeferred = null
+            } ?: return BrowserActionResult.error("JavaScript execution timed out (30s)")
             val json = try { JSONObject(raw) } catch (_: Exception) { null }
             if (json != null) {
                 if (json.has("error")) {
@@ -1296,8 +1288,9 @@ class BrowserUseManager(
             } else {
                 BrowserActionResult(text = raw)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            asyncJsDeferred = null
             BrowserActionResult.error("JavaScript error: ${e.message}")
         }
     }
@@ -1394,32 +1387,29 @@ class BrowserUseManager(
      * pattern used by [executeJS].
      */
     private suspend fun awaitPromiseJs(js: String): String? {
-        val deferred = CompletableDeferred<String>()
-        asyncJsDeferred = deferred
-        val wrapped = """
-            (async function(){
-                try {
-                    var __v__ = await ($js);
-                    if (__v__ === undefined || __v__ === null) {
-                        __minis__.resolve('null');
-                    } else if (typeof __v__ === 'object') {
-                        __minis__.resolve(JSON.stringify(__v__));
-                    } else {
-                        __minis__.resolve(String(__v__));
+        return asyncJsRequests.await(60_000L) { token ->
+            val wrapped = """
+                (async function(){
+                    try {
+                        var __v__ = await ($js);
+                        if (__v__ === undefined || __v__ === null) {
+                            __minis__.resolve(${JSONObject.quote(token)}, 'null');
+                        } else if (typeof __v__ === 'object') {
+                            __minis__.resolve(${JSONObject.quote(token)}, JSON.stringify(__v__));
+                        } else {
+                            __minis__.resolve(${JSONObject.quote(token)}, String(__v__));
+                        }
+                    } catch(e) {
+                        __minis__.reject(${JSONObject.quote(token)}, e && e.message ? e.message : String(e));
                     }
-                } catch(e) {
-                    __minis__.reject(e && e.message ? e.message : String(e));
-                }
-            })();
-        """.trimIndent()
-        withContext(Dispatchers.Main) {
-            ensureUsable()
+                })();
+            """.trimIndent()
+            withContext(Dispatchers.Main) {
+                ensureUsable()
 
-            webView.evaluateJavascript(wrapped, null)
+                webView.evaluateJavascript(wrapped, null)
+            }
         }
-        val raw = withTimeoutOrNull(60_000L) { deferred.await() }
-        asyncJsDeferred = null
-        return raw
     }
 
     // -- Set User Agent --

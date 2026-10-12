@@ -55,7 +55,9 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
+import com.openminis.app.provider.RequestProviderCache
 import com.openminis.app.provider.catalogMaxThinkingLevel
+import com.openminis.app.provider.clampThinkingLevel
 import com.openminis.app.provider.chatThinkingLevels
 import com.openminis.app.provider.effectiveMaxThinkingLevel
 import com.openminis.app.agent.shell.BashismDetector
@@ -1553,6 +1555,46 @@ class ChatViewModel(
     @Volatile
     private var streamJob: Job? = null
     private var currentProvider: LLMProvider? = null
+    private val requestProviderCache = RequestProviderCache()
+
+    private fun releaseStreamingSession() {
+        val sid = activeSessionId
+        try {
+            publishOverlayReplyExcerpt(sid)
+        } finally {
+            try {
+                SessionActivityTracker.setInactive(sid)
+            } finally {
+                if (!isHelper) SessionConcurrencyManager.releaseSlot(sid)
+            }
+        }
+    }
+
+    private fun providerForNextRequest(): LLMProvider? {
+        val entryId = _activeEntryId.value ?: return currentProvider
+        var entry = providerRepository.config.value.modelEntries.find { it.id == entryId } ?: return null
+        val groupId = _selectedGroupId.value
+        if (groupId != null && !providerRepository.isEntryProviderEnabled(entry.id)) {
+            if (!resolveProviderFromGroup(groupId)) return null
+            entry = providerRepository.config.value.modelEntries.find { it.id == _activeEntryId.value } ?: return null
+        }
+        val instance = providerRepository.instance(entry.providerInstanceId) ?: return null
+        if (!providerRepository.hasAnyCredential(instance)) {
+            currentProvider = null
+            return null
+        }
+        val resolved = requestProviderCache.resolve(
+            entry, instance, providerRepository.credentialRevision.value, activeSessionId, currentProvider,
+        ) {
+            ProviderFactory.create(instance, providerRepository.usableApiKey(instance) ?: "", entry.model,
+                context, sessionId = activeSessionId, overrides = entry.overrides)
+        }
+        currentProvider = resolved
+        currentModel = entry.model
+        _modelName.value = entry.model.displayName
+        _providerName.value = instance.label.ifEmpty { entry.model.provider }
+        return resolved
+    }
     // Capabilities are read directly by Compose; changes must invalidate those reads
     // even when the display name and selected entry id stay the same.
     private var currentModelState: LLMModel? by mutableStateOf(null)
@@ -1562,7 +1604,7 @@ class ChatViewModel(
         get() = currentModelState
         set(value) {
             currentModelState = value
-            value?.let { _thinkingLevel.value = it.normalizeThinkingLevel(_thinkingLevel.value) }
+            value?.let { _thinkingLevel.value = it.clampThinkingLevel(_thinkingLevel.value) }
         }
 
     /**
@@ -2529,9 +2571,11 @@ class ChatViewModel(
             return ThinkingLevel.entries.filter { it != ThinkingLevel.OFF && it.rank <= ceiling.rank }
         }
 
-    fun thinkingLevelForDisplay(level: ThinkingLevel): ThinkingLevel =
-        if (currentModel?.isDeepSeekFlash == true) LLMModel.deepSeekFlashThinkingLevel(level)
-        else currentModel?.normalizeThinkingLevel(level) ?: level
+    fun thinkingLevelForDisplay(level: ThinkingLevel): ThinkingLevel {
+        val model = currentModel ?: return level
+        val displayed = if (model.isDeepSeekFlash) LLMModel.deepSeekFlashThinkingLevel(level) else level
+        return model.clampThinkingLevel(displayed)
+    }
 
     val canDisableThinking: Boolean get() = currentModel?.isGPT61Sol != true
 
@@ -2992,7 +3036,7 @@ class ChatViewModel(
             )
             return
         }
-        val provider = currentProvider ?: run {
+        val provider = providerForNextRequest() ?: run {
             appendSystemInfo("No provider configured. Cannot compact.", "compact")
             return
         }
@@ -4241,7 +4285,7 @@ class ChatViewModel(
                     "was done\", NOT as an ongoing goal or todo list."
             )
         }
-        val provider = currentProvider
+        val provider = withContext(Dispatchers.Main) { providerForNextRequest() }
             ?: throw IllegalStateException("No LLM provider available for compaction")
         val summaryMessages = listOf(
             LLMMessage(role = LLMMessage.Role.USER, content = userMessage),
@@ -4784,7 +4828,8 @@ class ChatViewModel(
             // case where binding restore failed, while leaving alone any
             // session whose binding successfully resolved to its target.
             sessionLoaded.first { it }
-            providerRepository.config.collect { config ->
+            combine(providerRepository.config, providerRepository.credentialRevision) { config, _ -> config }
+                .collect { config ->
                 // T278: _availableGroups feeds the model picker sheet — it must
                 // track the latest config on every emission, even after the user
                 // has selected a model (currentProvider != null). The guard below
@@ -4795,9 +4840,8 @@ class ChatViewModel(
                 // Refresh capabilities on the existing binding without rerouting the group.
                 // Previously a cached provider kept the pre-edit reasoning flag indefinitely.
                 val refreshedModel = config.modelEntries.firstOrNull { it.id == _activeEntryId.value }?.model
-                if (refreshedModel != null && refreshedModel.id == currentModel?.id && refreshedModel != currentModel) {
+                if (!_isStreaming.value && refreshedModel != null && refreshedModel.id == currentModel?.id && refreshedModel != currentModel) {
                     currentModel = refreshedModel
-                    currentProvider?.takeIf { it.model.id == refreshedModel.id }?.model = refreshedModel
                     _modelName.value = refreshedModel.displayName
                 }
                 // [T-android-disabled-provider-still-selectable-via-group #34]
@@ -4920,7 +4964,10 @@ class ChatViewModel(
 
     /** Ensure the session exists in the database. Called before first message. */
     private suspend fun ensureSession(): String {
-        if (realSessionId.isNotEmpty()) return realSessionId
+        if (realSessionId.isNotEmpty()) {
+            withContext(Dispatchers.IO) { retryPendingDraftResources() }
+            return realSessionId
+        }
         val modelId = currentModel?.id ?: providerRepository.allVisibleEntries().firstOrNull()?.model?.id ?: "unknown"
         // [T-memory-global-toggle-settings-ui-android] Snapshot the
         // current in-memory `_memoryEnabled` into the new row. For a
@@ -4952,7 +4999,9 @@ class ChatViewModel(
             // minis-sessions/__new__*/… and be orphaned when the user
             // re-enters the session and everything is resolved via the real
             // id. See debug report 2026-04-21 (TikTok Chinese filename).
-            migrateDraftResources(fromDraft = sessionId, toReal = session.id)
+            withContext(Dispatchers.IO) {
+                migrateDraftResources(fromDraft = sessionId, toReal = session.id)
+            }
             // [T-android-session-skill-override-init-timing] Re-point any
             // session_skill_overrides / mcp_session_overrides rows written
             // pre-first-message (against `__new__<uuid>`) onto the real
@@ -5000,62 +5049,35 @@ class ChatViewModel(
      * "disappear" after `yt-dlp` reported success.
      */
     private fun migrateDraftResources(fromDraft: String, toReal: String) {
-        // Stop any shell that was already spun up against the draft id; its
-        // -b mount arguments were frozen to the draft directory at launch, so
-        // we can't reuse it after the migration.
         runCatching { ExecutionCoordinator.sessionDidTerminate(fromDraft) }
-
-        val base = java.io.File(context.filesDir, "minis-sessions")
-        val draftBase = java.io.File(base, fromDraft)
-        if (!draftBase.isDirectory) return
-        val realBase = java.io.File(base, toReal).apply { mkdirs() }
-
-        listOf("attachments", "offloads", "workspace", "browser").forEach { subdir ->
-            val src = java.io.File(draftBase, subdir)
-            if (!src.isDirectory) return@forEach
-            val dst = java.io.File(realBase, subdir).apply { mkdirs() }
-            src.listFiles()?.forEach { child ->
-                val target = java.io.File(dst, child.name)
-                runCatching {
-                    if (!target.exists() && !child.renameTo(target)) {
-                        copyRecursive(child, target)
-                    }
-                }.onFailure {
-                    android.util.Log.w("ChatViewModel",
-                        "migrateDraftResources: failed to move ${child.absolutePath} -> ${target.absolutePath}: ${it.message}")
-                }
-            }
+        val migrations = context.getSharedPreferences("draft_resource_migrations", Context.MODE_PRIVATE)
+        check(migrations.edit().putString(toReal, fromDraft).commit()) {
+            "Could not persist the draft resource migration"
         }
-        runCatching { draftBase.deleteRecursively() }
-
-        // Also rename the BrowserTabPool saved-state file (filesDir/browser_tabs/<sid>.json).
-        // Otherwise the pool will load empty state on the next re-entry and the
-        // user loses their open tabs even though the URLs never truly "went away".
+        val base = java.io.File(context.filesDir, "minis-sessions")
+        val complete = DraftResourceMigration.migrate(
+            java.io.File(base, fromDraft), java.io.File(base, toReal),
+        )
         val tabsDir = java.io.File(context.filesDir, "browser_tabs")
-        val draftTabs = java.io.File(tabsDir, "$fromDraft.json")
-        if (draftTabs.exists()) {
-            val realTabs = java.io.File(tabsDir, "$toReal.json")
-            runCatching {
-                if (!realTabs.exists()) {
-                    if (!draftTabs.renameTo(realTabs)) {
-                        draftTabs.copyTo(realTabs, overwrite = false)
-                        draftTabs.delete()
-                    }
-                }
-            }
+        val tabsComplete = DraftResourceMigration.move(
+            java.io.File(tabsDir, "$fromDraft.json"), java.io.File(tabsDir, "$toReal.json"),
+        )
+        if (complete && tabsComplete) {
+            migrations.edit().remove(toReal).apply()
+        } else {
+            AppLogger.warning(TAG, "Draft resource migration incomplete; source preserved for retry: $fromDraft -> $toReal")
         }
     }
 
-    private fun copyRecursive(src: java.io.File, dst: java.io.File): Boolean = runCatching {
-        if (src.isDirectory) {
-            dst.mkdirs()
-            src.listFiles()?.all { copyRecursive(it, java.io.File(dst, it.name)) } ?: true
-        } else {
-            src.copyTo(dst, overwrite = false)
-            src.delete()
-            true
-        }
-    }.getOrDefault(false)
+    private fun retryPendingDraftResources() {
+        val sid = realSessionId.takeIf { it.isNotEmpty() } ?: return
+        val migrations = context.getSharedPreferences("draft_resource_migrations", Context.MODE_PRIVATE)
+        val draft = migrations.getString(sid, null) ?: sessionId.takeIf { isDraft } ?: return
+        // The pending source is an app-created draft id, never an arbitrary path.
+        if (!draft.startsWith("__new__") || java.io.File(draft).name != draft) return
+        val source = java.io.File(context.filesDir, "minis-sessions/$draft")
+        if (source.exists() || migrations.contains(sid)) migrateDraftResources(draft, sid)
+    }
 
     private fun loadSession() {
         // T-android-crash-detected-halt: when CrashFrequencyDetector
@@ -5118,6 +5140,7 @@ class ChatViewModel(
 
             // Existing session: load from DB
             val session = chatRepository.getSession(sessionId) ?: return@launch
+            withContext(Dispatchers.IO) { retryPendingDraftResources() }
             com.openminis.app.sandbox.SessionWorkspaceRegistry.restore(session.id) {
                 chatRepository.getSession(it)?.parentSessionId
             }
@@ -6188,6 +6211,12 @@ class ChatViewModel(
      * ChatScreen when draining a [com.openminis.app.share.PendingShare].
      */
     fun addAttachmentFromStagedShare(file: java.io.File): InputAttachment? {
+        val attachment = stageSharedAttachment(file) ?: return null
+        addAttachment(attachment)
+        return attachment
+    }
+
+    private fun stageSharedAttachment(file: java.io.File): InputAttachment? {
         if (!file.exists()) return null
         val ext = file.extension.lowercase()
         val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
@@ -6202,13 +6231,14 @@ class ChatViewModel(
         // the LLM payload, leaving the model staring at "what is this?" with no
         // picture. Copy the staged bytes into our own private dir so the
         // attachment outlives the share-extension cleanup.
-        val durableDir = java.io.File(context.cacheDir, "share_inbound").apply { mkdirs() }
+        val durableDir = java.io.File(context.filesDir, "share_inbound").apply { mkdirs() }
         val durable = java.io.File(durableDir, "${java.util.UUID.randomUUID()}-${file.name}")
         try {
             file.inputStream().use { input ->
                 durable.outputStream().use { output -> input.copyTo(output) }
             }
         } catch (e: Exception) {
+            durable.delete()
             Log.w(TAG, "failed to copy staged share file ${file.name}: ${e.message}")
             return null
         }
@@ -6218,8 +6248,46 @@ class ChatViewModel(
             mimeType = mime,
             kind = kind,
         )
-        addAttachment(attachment)
         return attachment
+    }
+
+    /** Stage all bytes and confirm the composer on disk before acknowledging delivery. */
+    suspend fun acceptPendingShare(pending: com.openminis.app.share.PendingShare) {
+        val staged = mutableListOf<InputAttachment>()
+        var confirmed = false
+        try {
+            withContext(Dispatchers.IO) {
+                val directory = com.openminis.app.share.SharedShareStore.sharedFileDirectory(context).canonicalFile
+                for (item in pending.items) {
+                    if (item.kind != com.openminis.app.share.PendingShare.Item.Kind.ATTACHMENT) continue
+                    val file = java.io.File(directory, item.value).canonicalFile
+                    require(file.parentFile == directory) { "Invalid shared attachment path" }
+                    staged += stageSharedAttachment(file) ?: throw java.io.IOException("Shared attachment is unavailable")
+                }
+            }
+            withContext(Dispatchers.Main) {
+                var text = _inputText.value
+                for (item in pending.items) {
+                    if (item.kind != com.openminis.app.share.PendingShare.Item.Kind.INLINE_TEXT) continue
+                    text += (if (text.isEmpty()) "" else "\n") + item.value +
+                        (if (item.value.startsWith("http://") || item.value.startsWith("https://")) " " else "")
+                }
+                val combinedAttachments = _attachments.value + staged
+                var persistedText = text
+                _pastedTexts.value.forEach { persistedText = persistedText.replace(it.placeholder, it.text) }
+                composerDraftStore.saveConfirmed(realSessionId.ifEmpty { sessionId }, ComposerDraft(
+                    persistedText, combinedAttachments.map {
+                        DraftAttachment(it.id, it.fileName, it.uri.toString(), it.mimeType, it.kind.name)
+                    }, _editingMessageId.value,
+                ))
+                confirmed = true
+                _inputText.value = text
+                _attachments.value = combinedAttachments
+                markShareInjected()
+            }
+        } finally {
+            if (!confirmed) staged.forEach { attachment -> attachment.uri.path?.let { java.io.File(it).delete() } }
+        }
     }
 
     // ─── Message Sending & Agent Loop ─────────────────────────────────────
@@ -6342,7 +6410,7 @@ class ChatViewModel(
             return retryFromMessageInternal(userMsg.id, effectiveRunId)
         }
 
-        val initialProvider = currentProvider
+        val initialProvider = providerForNextRequest()
         if (initialProvider == null) {
             _error.value = "No provider configured"
             setRunStatus(effectiveRunId, ChatRunStatus.Error, "No provider configured")
@@ -6524,7 +6592,7 @@ class ChatViewModel(
             return false
         }
 
-        val initialProvider = currentProvider
+        val initialProvider = providerForNextRequest()
         if (initialProvider == null) {
             _error.value = "No provider configured"
             setRunStatus(effectiveRunId, ChatRunStatus.Error, "No provider configured")
@@ -6780,15 +6848,15 @@ class ChatViewModel(
             AppLogger.info(TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
             try {
                 if (!isHelper) SessionConcurrencyManager.acquireSlot(activeSessionId)
-                AppLogger.debug(TAG_STREAM, "$label streamJob slot acquired")
-                SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-                val activeFallbackStrategy = run {
-                    val groupId = _selectedGroupId.value
-                    groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                        ?: com.openminis.app.data.model.FallbackStrategy.default
-                }
-                val fallbackProviders = buildFallbackProviders(launchedProvider)
                 try {
+                    AppLogger.debug(TAG_STREAM, "$label streamJob slot acquired")
+                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                    val activeFallbackStrategy = run {
+                        val groupId = _selectedGroupId.value
+                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                            ?: com.openminis.app.data.model.FallbackStrategy.default
+                    }
+                    val fallbackProviders = buildFallbackProviders(launchedProvider)
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CALL")
                     runAgentLoop(
                         provider = launchedProvider,
@@ -6830,9 +6898,7 @@ class ChatViewModel(
                     // non-null excerpt. Reading _messages here is safe:
                     // we're in the finally block of the agent loop and
                     // the stream has already flushed its last delta.
-                    publishOverlayReplyExcerpt(activeSessionId)
-                    SessionActivityTracker.setInactive(activeSessionId)
-                    if (!isHelper) SessionConcurrencyManager.releaseSlot(activeSessionId)
+                    releaseStreamingSession()
                     finishRuns(runIds, ChatRunStatus.Completed)
                     AppLogger.info(TAG_STREAM, "$label streamJob FINALLY exit")
                 }
@@ -6885,6 +6951,8 @@ class ChatViewModel(
                 val sid = realSessionId.ifEmpty { sessionId }
                 val row = BubbleRowLocator.locateUserRow(messages, index, chatRepository.loadMessages(sid)).row
                     ?: throw IllegalStateException("Message is not persisted")
+                val copyContext = kotlinx.coroutines.currentCoroutineContext()
+                branchMedia.copyWorkspace(sid) { copyContext.ensureActive() }
                 val attached = (message.imageUris + message.attachmentUris).mapIndexed { index, uri ->
                     val name = message.attachmentNames.getOrNull(index) ?: uri.lastPathSegment ?: "attachment"
                     branchMedia.directory.mkdirs()
@@ -6904,13 +6972,13 @@ class ChatViewModel(
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
                 if (chatRepository.dao.getSession(branchId) == null) {
                     composerDraftStore.save(branchId, ComposerDraft("", emptyList()))
-                    branchMedia.directory.deleteRecursively()
+                    branchMedia.cleanup()
                 }
             }
             throw e
         } catch (e: Exception) {
             composerDraftStore.save(branchId, ComposerDraft("", emptyList()))
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { branchMedia.directory.deleteRecursively() }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { branchMedia.cleanup() }
             _error.value = context.getString(com.openminis.app.R.string.daily_branch_failed)
             null
         } finally { creatingEditBranch = false }
@@ -7738,7 +7806,7 @@ class ChatViewModel(
         // inside the send button's tap closure).
         if (!isProgrammatic && _hasInjectedShareContent.value) _hasInjectedShareContent.value = false
 
-        val initialProvider = currentProvider
+        val initialProvider = providerForNextRequest()
         if (initialProvider == null) {
             _error.value = "No provider configured"
             setRunStatus(effectiveRunId, ChatRunStatus.Error, "No provider configured")
@@ -7895,20 +7963,20 @@ class ChatViewModel(
                     )
                     // Acquire concurrency slot (suspends if at max)
                     if (!isHelper) SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-
-                    // Resolve the active group's fallback strategy
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.openminis.app.data.model.FallbackStrategy.default
-                    }
-
-                    // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
-                    val fallbackProviders = buildFallbackProviders(provider)
-
                     try {
+                        AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+
+                        // Resolve the active group's fallback strategy
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                ?: com.openminis.app.data.model.FallbackStrategy.default
+                        }
+
+                        // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
+                        val fallbackProviders = buildFallbackProviders(provider)
+
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
@@ -7950,9 +8018,7 @@ class ChatViewModel(
                         // non-null excerpt. Reading _messages here is safe:
                         // we're in the finally block of the agent loop and
                         // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                        if (!isHelper) SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        releaseStreamingSession()
                         finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "send streamJob FINALLY exit")
                     }
@@ -8198,7 +8264,7 @@ class ChatViewModel(
             }
         }
 
-        val initialProvider = currentProvider ?: run {
+        val initialProvider = providerForNextRequest() ?: run {
             setRunStatus(runId, ChatRunStatus.Error, "No provider configured")
             return
         }
@@ -8279,15 +8345,15 @@ class ChatViewModel(
                 AppLogger.info(TAG_STREAM, "retryLast streamJob ENTER sid=$activeSessionId")
                 try {
                     if (!isHelper) SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "retryLast streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.openminis.app.data.model.FallbackStrategy.default
-                    }
-                    val fallbackProviders = buildFallbackProviders(provider)
                     try {
+                        AppLogger.debug(TAG_STREAM, "retryLast streamJob slot acquired")
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                ?: com.openminis.app.data.model.FallbackStrategy.default
+                        }
+                        val fallbackProviders = buildFallbackProviders(provider)
                         AppLogger.info(TAG_STREAM, "retryLast runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
@@ -8326,9 +8392,7 @@ class ChatViewModel(
                         // non-null excerpt. Reading _messages here is safe:
                         // we're in the finally block of the agent loop and
                         // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                        if (!isHelper) SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        releaseStreamingSession()
                         finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "retryLast streamJob FINALLY exit")
                     }
@@ -9038,8 +9102,10 @@ class ChatViewModel(
                 loopExitedNormally = true
                 break
             }
-            if (_selectedGroupId.value != null && this.currentProvider !== currentProvider) {
-                currentProvider = this.currentProvider ?: throw IllegalStateException("No enabled provider is available for this model group.")
+            val latestProvider = withContext(Dispatchers.Main) { providerForNextRequest() }
+                ?: throw IllegalStateException("No configured provider is available for this chat.")
+            if (latestProvider !== currentProvider) {
+                currentProvider = latestProvider
                 remainingFallbacks.clear()
                 remainingFallbacks.addAll(buildFallbackProviders(currentProvider))
             }
@@ -9522,6 +9588,12 @@ class ChatViewModel(
             val recoveryStartedAt = android.os.SystemClock.elapsedRealtime()
             while (!collectDone) {
                 try {
+                    val refreshedProvider = withContext(Dispatchers.Main) { providerForNextRequest() }
+                        ?: throw IllegalStateException("No configured provider is available for this chat.")
+                    if (refreshedProvider !== currentProvider) {
+                        currentProvider = refreshedProvider
+                        contextRecheckRequired = true
+                    }
                     // [T-android-enhanced-cache] Stamp the per-turn Enhanced
                     // Cache flag onto the active provider here — the single
                     // choke point every turn passes through, regardless of how
@@ -14128,7 +14200,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 return@launch
             }
 
-            val initialProvider = currentProvider
+            val initialProvider = providerForNextRequest()
             if (initialProvider == null) {
                 AppLogger.warning(TAG, "resumeQueueAfterCancel: no provider, dropping queue")
                 _promptQueue.value.forEach { prompt ->
@@ -14186,17 +14258,17 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
                 try {
                     if (!isHelper) SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.openminis.app.data.model.FallbackStrategy.default
-                    }
-                    val fallbackProviders = buildFallbackProviders(provider)
-
                     try {
+                        AppLogger.debug(TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                ?: com.openminis.app.data.model.FallbackStrategy.default
+                        }
+                        val fallbackProviders = buildFallbackProviders(provider)
+
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts CALL")
                         drainQueuedPrompts(
                             provider = provider,
@@ -14222,9 +14294,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         // non-null excerpt. Reading _messages here is safe:
                         // we're in the finally block of the agent loop and
                         // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                        if (!isHelper) SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        releaseStreamingSession()
                         finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
                     }
@@ -14420,7 +14490,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             setRunStatus(runId, ChatRunStatus.NotStarted, "resume is not available")
             return
         }
-        val provider = currentProvider ?: run {
+        val provider = providerForNextRequest() ?: run {
             _error.value = "No provider configured"
             setRunStatus(runId, ChatRunStatus.Error, "No provider configured")
             return
@@ -14480,16 +14550,16 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 AppLogger.info(TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
                 try {
                     if (!isHelper) SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "resume streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let {
-                            providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy
-                        } ?: com.openminis.app.data.model.FallbackStrategy.default
-                    }
-                    val fallbackProviders = buildFallbackProviders(provider)
                     try {
+                        AppLogger.debug(TAG_STREAM, "resume streamJob slot acquired")
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let {
+                                providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy
+                            } ?: com.openminis.app.data.model.FallbackStrategy.default
+                        }
+                        val fallbackProviders = buildFallbackProviders(provider)
                         AppLogger.info(TAG_STREAM, "resume runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
@@ -14526,9 +14596,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         // non-null excerpt. Reading _messages here is safe:
                         // we're in the finally block of the agent loop and
                         // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                        if (!isHelper) SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        releaseStreamingSession()
                         finishRuns(runIds, ChatRunStatus.Completed)
                         AppLogger.info(TAG_STREAM, "resume streamJob FINALLY exit")
                     }

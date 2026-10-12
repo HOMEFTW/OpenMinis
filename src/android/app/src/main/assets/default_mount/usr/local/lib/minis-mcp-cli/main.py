@@ -229,8 +229,18 @@ def send_to_daemon(request, timeout=CONN_TIMEOUT):
         return {"ok": False, "error": "daemon not running", "code": "NO_DAEMON"}
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
+    may_have_sent = False
+
+    def failed(message, code):
+        if request.get("cmd") == "call" and may_have_sent:
+            code = "OUTCOME_UNKNOWN"
+            message += "; the tool may have completed. It was not retried; check its state before calling again."
+        return {"ok": False, "error": message, "code": code}
+
     try:
         sock.connect(("127.0.0.1", port))
+        # sendall can fail after writing part or all of the request.
+        may_have_sent = True
         sock.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
         buf = b""
         while b"\n" not in buf:
@@ -239,14 +249,16 @@ def send_to_daemon(request, timeout=CONN_TIMEOUT):
                 break
             buf += chunk
         if not buf.strip():
-            return {"ok": False, "error": "empty daemon reply", "code": "NO_DAEMON"}
+            return failed("empty daemon reply", "NO_DAEMON")
         return json.loads(buf.split(b"\n")[0])
     except ConnectionRefusedError:
-        return {"ok": False, "error": "daemon not running", "code": "NO_DAEMON"}
+        return failed("daemon not running", "NO_DAEMON")
     except socket.timeout:
-        return {"ok": False, "error": "daemon request timed out", "code": "TIMEOUT"}
+        return failed("daemon request timed out", "TIMEOUT")
     except OSError as exc:
-        return {"ok": False, "error": str(exc), "code": "NO_DAEMON"}
+        return failed(str(exc), "NO_DAEMON")
+    except ValueError as exc:
+        return failed("invalid daemon reply: %s" % exc, "PARSE_ERROR")
     finally:
         try:
             sock.close()

@@ -29,7 +29,8 @@ class DailyUseTest {
     }
 
     @Test fun branchMediaRemainsReadableAfterSourceRemoval() {
-        val root = java.nio.file.Files.createTempDirectory("branch-media").toFile()
+        val files = java.nio.file.Files.createTempDirectory("branch-files").toFile()
+        val root = java.io.File(files, "media").apply { mkdirs() }
         try {
             val source = java.io.File(root, "source/a.txt").apply { parentFile!!.mkdirs(); writeText("attachment") }
             val copier = EditBranchMedia(root, "branch")
@@ -38,16 +39,17 @@ class DailyUseTest {
             source.delete()
             assertEquals("attachment", java.io.File(root, rewritten).readText())
             assertTrue(rewritten.startsWith("branches/branch/"))
-        } finally { root.deleteRecursively() }
+        } finally { files.deleteRecursively() }
     }
     @Test fun branchMediaRejectsTraversal() {
-        val root = java.nio.file.Files.createTempDirectory("branch-media").toFile()
+        val files = java.nio.file.Files.createTempDirectory("branch-files").toFile()
+        val root = java.io.File(files, "media").apply { mkdirs() }
         try {
             try {
                 EditBranchMedia(root, "branch").rewrite("""[{"type":"mediaRef","value":{"relativePath":"../secret"}}]""")
                 fail("Expected path rejection")
             } catch (_: IllegalArgumentException) { }
-        } finally { root.deleteRecursively() }
+        } finally { files.deleteRecursively() }
     }
 
     @Test fun lastViewedWinsOverBackgroundUpdatesAndDeletedSessionsFallBack() {

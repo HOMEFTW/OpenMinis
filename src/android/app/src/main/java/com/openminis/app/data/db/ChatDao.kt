@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.RawQuery
+import androidx.room.Upsert
 import androidx.sqlite.db.SupportSQLiteQuery
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -116,6 +117,9 @@ interface ChatDao {
     @Query("SELECT * FROM sessions ORDER BY updated_at DESC")
     suspend fun listSessions(): List<ChatSessionEntity>
 
+    @Query("SELECT id FROM sessions")
+    suspend fun listSessionIds(): List<String>
+
     /**
      * [T-android-moveto-perf] Bounded, pre-filtered session list for pickers
      * that only ever show recent sessions (the "Move to" sheet).
@@ -144,7 +148,8 @@ interface ChatDao {
     @Query("SELECT * FROM sessions WHERE id = :id")
     suspend fun getSession(id: String): ChatSessionEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    // REPLACE deletes the parent row and cascades into messages/markers.
+    @Upsert
     suspend fun insertSession(session: ChatSessionEntity)
 
     @Query("UPDATE sessions SET title = :title, updated_at = :updatedAt WHERE id = :id")
@@ -318,6 +323,9 @@ interface ChatDao {
     suspend fun insertMessageRaw(message: MessageEntity)
 
     suspend fun insertMessage(message: MessageEntity) = insertMessageRaw(message.forBoundedStorage())
+
+    @Query("SELECT COALESCE(updated_at, created_at) FROM messages WHERE id = :id")
+    suspend fun messageUpdatedAt(id: String): Long?
 
     /**
      * [T-android-voice-correction] User messages newer than [since] (epoch ms),

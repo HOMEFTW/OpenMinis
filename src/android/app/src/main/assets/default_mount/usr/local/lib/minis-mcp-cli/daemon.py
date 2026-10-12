@@ -202,6 +202,9 @@ class MCPServerProcess:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait()
+        if self.proc.stdout:
+            self.proc.stdout.close()
         log.info("[%s] stopped", self.name)
 
 
@@ -314,12 +317,21 @@ class MCPPool:
         self._on_active()
         return session
 
-    def call_with_retry(self, name, fn):
+    def call_with_retry(self, name, fn, retry_safe=True):
         for attempt in range(2):
             session = self.get(name)
             try:
                 return fn(session)
             except MCPError as exc:
+                if exc.code == "OUTCOME_UNKNOWN":
+                    self.evict(name)
+                    raise
+                if not retry_safe and exc.code in ("STDIO_CRASH", "TIMEOUT"):
+                    self.evict(name)
+                    raise MCPError("OUTCOME_UNKNOWN", (
+                        "[%s] tool reply was lost; the operation may have completed. "
+                        "It was not retried. Check the resulting state before calling again."
+                        % name)) from exc
                 if exc.code in ("STDIO_CRASH", "TIMEOUT") and attempt == 0:
                     log.warning("[%s] %s, retrying", name, exc.code)
                     self.evict(name)
@@ -438,7 +450,8 @@ class DaemonServer:
             if cmd == "call":
                 tool = data.get("tool", "")
                 args = data.get("args") or {}
-                result = self.pool.call_with_retry(server, lambda s: s.call_tool(tool, args))
+                result = self.pool.call_with_retry(
+                    server, lambda s: s.call_tool(tool, args), retry_safe=False)
                 return {"ok": True, "result": {"server": server, "tool": tool, "result": result}}
 
             if cmd == "ping":

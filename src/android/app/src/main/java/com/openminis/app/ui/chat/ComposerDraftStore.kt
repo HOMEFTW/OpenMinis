@@ -34,6 +34,12 @@ internal class ComposerDraftStore(private val prefs: android.content.SharedPrefe
         else editor.putString(id, draft.encode())
         editor.apply()
     }
+    fun saveConfirmed(id: String, draft: ComposerDraft) {
+        val editor = prefs.edit()
+        if (draft.text.isEmpty() && draft.attachments.isEmpty()) editor.remove(id)
+        else editor.putString(id, draft.encode())
+        check(editor.commit()) { "Cannot persist the shared composer draft" }
+    }
     fun move(from: String, to: String, latest: ComposerDraft) {
         val editor = prefs.edit().remove(from)
         if (latest.text.isEmpty() && latest.attachments.isEmpty()) editor.remove(to)

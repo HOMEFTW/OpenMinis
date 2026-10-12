@@ -693,7 +693,7 @@ fun ChatScreen(
     // version increments while the user is mid-session). Runs on every
     // bufferVersion bump.
     val shareBufferVersion by com.openminis.app.share.ShareCoordinator.bufferVersion.collectAsState()
-    androidx.compose.runtime.LaunchedEffect(shareBufferVersion) {
+    androidx.compose.runtime.LaunchedEffect(sessionId, shareBufferVersion) {
         if (shareBufferVersion == 0) return@LaunchedEffect
         // [XSessionDiag] sessionId is passed for LOGGING ONLY — consumeBuffer
         // ignores it for every decision (see its KDoc). It records which chat
@@ -707,41 +707,22 @@ fun ChatScreen(
             "ChatScreen",
             "[Share] injecting ${pending.items.size} item(s) into chat session=$sessionId",
         )
-        val sharedDir = com.openminis.app.share.SharedShareStore.sharedFileDirectory(context)
-        // [T-android-share-buffer-merge] Accumulate locally rather than
-        // reading `inputText` inside the loop. `inputText` is captured from
-        // composition and does NOT observe the setInputText calls made here,
-        // so every text item was appended to the same stale base and only the
-        // last one survived — a two-text share landed as just the second one
-        // even after the store-level merge delivered both.
-        var draft = inputText
-        for (item in pending.items) {
-            when (item.kind) {
-                com.openminis.app.share.PendingShare.Item.Kind.INLINE_TEXT -> {
-                    val sep = if (draft.isNotEmpty()) "\n" else ""
-                    val needsTrailingSpace = item.value.startsWith("http://") ||
-                        item.value.startsWith("https://")
-                    draft = draft + sep + item.value +
-                        if (needsTrailingSpace) " " else ""
-                    viewModel.setInputText(draft)
-                }
-                com.openminis.app.share.PendingShare.Item.Kind.ATTACHMENT -> {
-                    viewModel.addAttachmentFromStagedShare(java.io.File(sharedDir, item.value))
-                }
+        try {
+            viewModel.acceptPendingShare(pending)
+            com.openminis.app.share.ShareCoordinator.acknowledgeConsumed(context, pending)
+            com.openminis.app.logging.AppLogger.info("ChatScreen", "[Share] composer persisted session=$sessionId")
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.openminis.app.share.SharedShareStore.cleanSharedFiles(context)
             }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            com.openminis.app.share.ShareCoordinator.releaseConsumption(context, pending)
+            throw error
+        } catch (error: Exception) {
+            com.openminis.app.share.ShareCoordinator.releaseConsumption(context, pending)
+            com.openminis.app.logging.AppLogger.error("ChatScreen", "[Share] import failed: ${error.message}")
+            android.widget.Toast.makeText(context, context.getString(com.openminis.app.R.string.share_import_failed),
+                android.widget.Toast.LENGTH_LONG).show()
         }
-        // [XSessionDiag] Hypothesis 2: the composer state AFTER injection. If the
-        // reported corrupted input was assembled here, this line holds it verbatim
-        // (head-truncated) together with the session that received it — which is
-        // the direct check against a user's "I only typed 你好" report.
-        com.openminis.app.logging.AppLogger.info(
-            "XSessionDiag",
-            "[XSessionDiag] share/injected: session=${sessionId.take(8)} " +
-                "items=${pending.items.size} draftLen=${draft.length} " +
-                "draftHead=\"${draft.take(200).replace("\n", "\\n")}\"",
-        )
-        viewModel.markShareInjected()
-        com.openminis.app.share.SharedShareStore.cleanSharedFiles(context)
     }
 
     // T311: publish "this is the active chat" while ChatScreen is composed,

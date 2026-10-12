@@ -21,6 +21,8 @@ import com.openminis.app.provider.safeOptString
 import com.openminis.app.provider.SseEventReader
 import com.openminis.app.provider.parseToolInputObject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
@@ -79,19 +81,22 @@ class GeminiProvider(
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string() ?: ""
-
-        if (!response.isSuccessful) {
-            throw mapHttpError(response.code, responseBody)
+        val call = client.newCall(request)
+        val callCancellation = cancelOnCancellation { call.cancel() }
+        try {
+            call.execute().use { response ->
+                val responseBody = response.body?.string() ?: ""
+                if (!response.isSuccessful) throw mapHttpError(response.code, responseBody)
+                val json = JSONObject(responseBody)
+                LLMResponse(extractText(json), extractFinishReason(json) ?: "end_turn",
+                    extractUsage(json), extractInlineMedia(json))
+            }
+        } catch (error: Throwable) {
+            currentCoroutineContext().ensureActive()
+            throw error
+        } finally {
+            callCancellation.cancel()
         }
-
-        val json = JSONObject(responseBody)
-        val text = extractText(json)
-        val finishReason = extractFinishReason(json)
-        val usage = extractUsage(json)
-        val mediaAttachments = extractInlineMedia(json)
-        LLMResponse(text, finishReason ?: "end_turn", usage, mediaAttachments)
     }
 
     override fun streamMessageClamped(

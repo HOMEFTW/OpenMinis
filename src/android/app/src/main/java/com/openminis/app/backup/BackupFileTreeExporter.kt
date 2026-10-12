@@ -97,12 +97,27 @@ class BackupFileTreeExporter(
             }
             if (!entry.isFile) continue // sockets, fifos, dangling symlinks
 
+            includeFile(entry, logicalPath, sessionId, category, result)
+        }
+        return result
+    }
+
+    /** A referenced media file lives outside the session workspace tree. */
+    fun exportFile(file: File, logicalPath: String, category: BackupCategory, sessionId: String? = null): Result {
+        if (isCancelled()) throw kotlinx.coroutines.CancellationException("Backup stopped")
+        val result = Result()
+        includeFile(file, logicalPath, sessionId, category, result)
+        return result
+    }
+
+    private fun includeFile(entry: File, logicalPath: String, sessionId: String?, category: BackupCategory, result: Result) {
+
             // Snapshot cut-off. `> 0` guards against a filesystem reporting 0
             // for an unknown mtime, which must not read as "ancient".
             val modified = entry.lastModified()
             if (modified > 0 && modified > snapshotAtMillis) {
                 result.filesAfterSnapshot += 1
-                continue
+                return
             }
 
             when (val outcome = addFile(entry, logicalPath, sessionId, category, result)) {
@@ -138,8 +153,6 @@ class BackupFileTreeExporter(
                     result.filesSkipped += 1
                 }
             }
-        }
-        return result
     }
 
     private fun addFile(

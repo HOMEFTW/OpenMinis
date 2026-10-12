@@ -55,6 +55,9 @@ data class LLMModel(
     val outputModalities: List<String>? = if (isGPTImage25Id(id)) listOf("image") else null,
     // OpenRouter catalog role: tts/stt/none. null keeps legacy/manual modality routing.
     val voiceRole: String? = null,
+    /** Derived from ModelEntry; it is not provider catalog data or backup wire data. */
+    @kotlinx.serialization.Transient
+    val entryThinkingCeiling: ThinkingLevel? = null,
 ) {
     val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
     val isGPT61Sol: Boolean get() = matchesModelId(id, "gpt-6.1-sol")

@@ -985,6 +985,7 @@
     <string name="provider_list_import_provider">Import Provider</string>
     <string name="share_provider_json_title">检测到服务商配置</string>
     <string name="share_expired_toast">分享内容已过期，请重新分享。</string>
+    <string name="share_import_failed">分享内容导入失败，已保留以便重试。</string>
     <string name="share_provider_json_message">这个 JSON 文件看起来是导出的服务商配置。你想怎么处理？</string>
     <string name="share_provider_json_import">导入为服务商</string>
     <string name="share_provider_json_attach">作为聊天附件添加</string>

@@ -76,7 +76,8 @@ class TerminalSession(private val context: Context) {
 
     enum class State { IDLE, BOOTING, RUNNING, STOPPED }
 
-    private val _state = MutableStateFlow(State.IDLE)
+    private val lifecycle = TerminalSessionLifecycle()
+    private val _state = lifecycle.state
     val state: StateFlow<State> = _state.asStateFlow()
 
     /** Raw PTY output bytes (not sanitized — feed directly into TerminalEmulator). */
@@ -90,8 +91,8 @@ class TerminalSession(private val context: Context) {
     private val _clearVersion = MutableStateFlow(0)
     val clearVersion: StateFlow<Int> = _clearVersion.asStateFlow()
 
-    private var masterFd: Int = -1
-    private var childPid: Int = 0
+    @Volatile private var masterFd: Int = -1
+    @Volatile private var childPid: Int = 0
     private var readerJob: Job? = null
 
     /**
@@ -121,13 +122,14 @@ class TerminalSession(private val context: Context) {
      * target geometry — otherwise boots at 80×24 and expects a resize callback.
      */
     fun start(sessionId: String? = null, initialCols: Int = DEFAULT_COLS, initialRows: Int = DEFAULT_ROWS) {
-        if (_state.value == State.RUNNING) return
-        _state.value = State.BOOTING
-        cols = initialCols
-        rows = initialRows
-        // Fresh per PTY incarnation, so a retry is judged on its own output
-        // rather than inheriting the dead attempt's.
-        sawOutput = false
+        val instance = lifecycle.begin() ?: return
+        lifecycle.withCurrent(instance) {
+            cols = initialCols
+            rows = initialRows
+            // Fresh per PTY incarnation, so a retry is judged on its own output
+            // rather than inheriting the dead attempt's.
+            sawOutput = false
+        }
 
         scope.launch {
             try {
@@ -173,38 +175,48 @@ class TerminalSession(private val context: Context) {
                 val cwd = File(cmd).parentFile?.absolutePath
 
                 val outPid = IntArray(1)
+                if (!lifecycle.isCurrent(instance)) return@launch
                 val fd = PtyBridge.forkExec(cmd, argv, envp, cwd, cols, rows, outPid)
                 if (fd < 0) {
                     Log.e(TAG, "forkExec failed: errno=${-fd}")
-                    _outputBytes.emit("Failed to start PTY: errno=${-fd}\r\n".toByteArray())
-                    _state.value = State.STOPPED
+                    lifecycle.withCurrent(instance) {
+                        _outputBytes.tryEmit("Failed to start PTY: errno=${-fd}\r\n".toByteArray())
+                        _state.value = State.STOPPED
+                    }
                     return@launch
                 }
-                masterFd = fd
-                childPid = outPid[0]
-                _state.value = State.RUNNING
-                liveSessions.add(WeakReference(this@TerminalSession))
+                val pid = outPid[0]
+                val spawnedAt = System.currentTimeMillis()
+                val instanceNoSeccomp = useNoSeccomp
+                if (!lifecycle.withCurrent(instance) {
+                    masterFd = fd
+                    childPid = pid
+                    _state.value = State.RUNNING
+                    liveSessions.add(WeakReference(this@TerminalSession))
+                    readerJob = scope.launch { readLoop(instance, fd) }
+                }) {
+                    // stop() may have arrived while forkExec was in native code.
+                    PtyBridge.closeFd(fd)
+                    if (pid > 0) {
+                        PtyBridge.sendSignal(pid, 15)
+                        scope.launch { PtyBridge.waitFor(pid) }
+                    }
+                    return@launch
+                }
                 Log.i(TAG, "PTY started: fd=$fd pid=$childPid cols=$cols rows=$rows")
 
-                if (sessionId != null) {
-                    kotlinx.coroutines.delay(300)
-                    writeInput("cd /var/minis && clear\n".toByteArray())
-                }
                 // [T-android-session-private-mounts] Say which files this
                 // terminal sees. Written to the screen, not typed into the
                 // shell, so it never lands in history. Delayed past the
                 // `clear` above so it is not wiped.
                 scope.launch {
                     kotlinx.coroutines.delay(if (sessionId != null) 600 else 300)
-                    _outputBytes.emit(banner(sessionId).toByteArray())
+                    lifecycle.withCurrent(instance) { _outputBytes.tryEmit(banner(sessionId).toByteArray()) }
                 }
 
-                readerJob = scope.launch { readLoop() }
-
                 // Wait for child exit in a sibling coroutine.
-                val spawnedAt = System.currentTimeMillis()
                 scope.launch {
-                    val status = PtyBridge.waitFor(childPid)
+                    val status = PtyBridge.waitFor(pid)
                     Log.i(TAG, "Child exited: status=$status")
 
                     // [T-android-seccomp-selfheal / GH#186] PtyBridge reports a
@@ -214,56 +226,63 @@ class TerminalSession(private val context: Context) {
                     // PROOT_NO_SECCOMP=1 rather than leaving the user staring
                     // at a dead terminal they cannot fix from the UI.
                     val aliveMs = System.currentTimeMillis() - spawnedAt
-                    if (SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
+                    lifecycle.withCurrent(instance) {
+                        val retry = SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
                             exitCode = if (status < 0) -status else null,
                             durationMs = aliveMs,
                             producedOutput = sawOutput,
-                            alreadyRetried = useNoSeccomp,
+                            alreadyRetried = instanceNoSeccomp,
                         )
-                    ) {
-                        com.openminis.app.logging.AppLogger.warning(
-                            TAG,
-                            SeccompFallbackPolicy.retryLogLine(-status, aliveMs, "interactive terminal"),
-                        )
-                        useNoSeccomp = true
-                        masterFd = -1
-                        childPid = 0
-                        readerJob?.cancel()
-                        readerJob = null
-                        start(sessionId, cols, rows)
-                        return@launch
+                        releasePty(signalChild = false)
+                        _state.value = State.STOPPED
+                        if (retry) {
+                            com.openminis.app.logging.AppLogger.warning(
+                                TAG,
+                                SeccompFallbackPolicy.retryLogLine(-status, aliveMs, "interactive terminal"),
+                            )
+                            useNoSeccomp = true
+                            start(sessionId, cols, rows)
+                        } else {
+                            _outputBytes.tryEmit("\r\n[Process exited: $status]\r\n".toByteArray())
+                        }
                     }
-
-                    _outputBytes.emit("\r\n[Process exited: $status]\r\n".toByteArray())
-                    _state.value = State.STOPPED
+                }
+                if (sessionId != null) {
+                    kotlinx.coroutines.delay(300)
+                    writeInput("cd /var/minis && clear\n".toByteArray(), instance)
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "Failed to start PTY session", t)
-                _outputBytes.emit("Error: ${t.message}\r\n".toByteArray())
-                _state.value = State.STOPPED
+                lifecycle.withCurrent(instance) {
+                    Log.e(TAG, "Failed to start PTY session", t)
+                    releasePty(signalChild = true)
+                    _outputBytes.tryEmit("Error: ${t.message}\r\n".toByteArray())
+                    _state.value = State.STOPPED
+                }
             }
         }
     }
 
-    private suspend fun readLoop() {
-        val fd = masterFd
+    private suspend fun readLoop(instance: Long, fd: Int) {
         val buf = ByteArray(READ_BUFFER_SIZE)
-        while (_state.value == State.RUNNING) {
+        while (lifecycle.isCurrent(instance)) {
             val n = PtyBridge.readBytes(fd, buf, 0, buf.size)
             if (n <= 0) {
                 // EOF or error → child exited / fd closed
                 if (n < 0) Log.d(TAG, "readBytes returned errno=${-n}")
                 break
             }
-            sawOutput = true
-            _outputBytes.emit(buf.copyOf(n))
+            lifecycle.withCurrent(instance) {
+                sawOutput = true
+                _outputBytes.tryEmit(buf.copyOf(n))
+            }
         }
     }
 
     /** Send raw bytes to PTY master. Suitable for keystrokes, control codes, etc. */
     fun sendRawBytes(bytes: ByteArray) {
-        if (bytes.isEmpty() || masterFd < 0) return
-        scope.launch { writeInput(bytes) }
+        if (bytes.isEmpty()) return
+        val instance = lifecycle.runningToken() ?: return
+        scope.launch { writeInput(bytes, instance) }
     }
 
     /**
@@ -338,6 +357,10 @@ class TerminalSession(private val context: Context) {
     }
 
     fun stop() {
+        lifecycle.stop { releasePty(signalChild = true) }
+    }
+
+    private fun releasePty(signalChild: Boolean) {
         readerJob?.cancel()
         readerJob = null
         val fd = masterFd
@@ -345,8 +368,7 @@ class TerminalSession(private val context: Context) {
         masterFd = -1
         childPid = 0
         if (fd >= 0) PtyBridge.closeFd(fd)
-        if (pid > 0) PtyBridge.sendSignal(pid, 15) // SIGTERM
-        if (_state.value != State.STOPPED) _state.value = State.STOPPED
+        if (signalChild && pid > 0) PtyBridge.sendSignal(pid, 15) // SIGTERM
         liveSessions.removeAll { it.get() === this || it.get() == null }
     }
 
@@ -381,16 +403,17 @@ class TerminalSession(private val context: Context) {
         _clearVersion.value = _clearVersion.value + 1
     }
 
-    private suspend fun writeInput(bytes: ByteArray) {
-        val fd = masterFd
-        if (fd < 0) return
+    private suspend fun writeInput(bytes: ByteArray, instance: Long) {
         // PTY master writes may return a short count at PIPE_BUF (~4096) boundaries
         // or under backpressure. Loop until all bytes are written; cap per-call size
         // to CHUNK so large pastes don't monopolize the PTY or block the caller.
         var off = 0
         while (off < bytes.size) {
             val take = minOf(CHUNK_SIZE, bytes.size - off)
-            val rc = PtyBridge.writeBytes(fd, bytes, off, take)
+            var rc = -1
+            if (!lifecycle.withCurrent(instance) {
+                if (masterFd >= 0) rc = PtyBridge.writeBytes(masterFd, bytes, off, take)
+            }) return
             if (rc < 0) {
                 Log.w(TAG, "writeBytes failed: errno=${-rc}")
                 return

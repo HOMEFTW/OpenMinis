@@ -1,6 +1,7 @@
 package com.openminis.app.share
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.openminis.app.logging.AppLogger
 import org.json.JSONObject
 import java.io.File
@@ -50,9 +51,11 @@ object SharedShareStore {
      * [MERGE_MAX_AGE_MS]; an older record is treated as abandoned and
      * replaced (its staged files are cleaned so they don't leak).
      */
-    fun savePendingShare(context: Context, share: PendingShare) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val existing = loadPendingShare(context)
+    fun savePendingShare(context: Context, share: PendingShare) = savePendingShare(preferences(context), share)
+
+    @Synchronized
+    internal fun savePendingShare(prefs: SharedPreferences, share: PendingShare) {
+        val existing = loadPendingShare(prefs)
         val now = System.currentTimeMillis()
         val merged = if (existing != null && now - existing.timestampMs <= MERGE_MAX_AGE_MS) {
             // De-dupe by (kind, value) so a double-delivered intent doesn't
@@ -75,12 +78,14 @@ object SharedShareStore {
         } else {
             share
         }
-        prefs.edit().putString(KEY_PENDING_SHARE, merged.toJson().toString()).apply()
+        check(prefs.edit().putString(KEY_PENDING_SHARE, merged.toJson().toString()).commit()) { "Cannot persist pending share" }
         AppLogger.info(TAG, "saved pending share with ${merged.items.size} item(s)")
     }
 
-    fun loadPendingShare(context: Context): PendingShare? {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    fun loadPendingShare(context: Context): PendingShare? = loadPendingShare(preferences(context))
+
+    @Synchronized
+    internal fun loadPendingShare(prefs: SharedPreferences): PendingShare? {
         val raw = prefs.getString(KEY_PENDING_SHARE, null) ?: return null
         return try {
             PendingShare.fromJson(JSONObject(raw))
@@ -90,10 +95,38 @@ object SharedShareStore {
         }
     }
 
-    fun clearPendingShare(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().remove(KEY_PENDING_SHARE).apply()
+    fun clearPendingShare(context: Context) = clearPendingShare(preferences(context))
+
+    @Synchronized
+    private fun clearPendingShare(prefs: SharedPreferences) {
+        check(prefs.edit().remove(KEY_PENDING_SHARE).commit()) { "Cannot clear pending share" }
     }
+
+    fun acknowledgeConsumed(context: Context, consumed: PendingShare): PendingShare? =
+        acknowledgeConsumed(preferences(context), consumed)
+
+    /** Clear this delivered snapshot only; a producer may have merged newer items meanwhile. */
+    @Synchronized
+    internal fun acknowledgeConsumed(prefs: SharedPreferences, consumed: PendingShare): PendingShare? {
+        val current = loadPendingShare(prefs) ?: return null
+        val delivered = consumed.items.toSet()
+        val remaining = current.items.filterNot { it in delivered }
+        if (remaining.isEmpty()) {
+            clearPendingShare(prefs)
+            return null
+        }
+        val next = current.copy(items = remaining)
+        check(prefs.edit().putString(KEY_PENDING_SHARE, next.toJson().toString()).commit()) { "Cannot acknowledge share" }
+        return next
+    }
+
+    @Synchronized
+    fun discardPendingShare(context: Context, expected: PendingShare) {
+        val prefs = preferences(context)
+        if (loadPendingShare(prefs) == expected) clearPendingShare(prefs)
+    }
+
+    private fun preferences(context: Context) = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
      * Remove staged binary attachments. Call after consumption or on stale buffer.
@@ -109,9 +142,14 @@ object SharedShareStore {
      * broken attachments. Callers that know about a live buffer now exclude it.
      */
     fun cleanSharedFiles(context: Context, keep: Set<String> = emptySet()) {
+        val protected = keep + loadPendingShare(context)?.items.orEmpty()
+            .filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }.map { it.value }
         val dir = sharedFileDirectory(context)
+        // The producer copies bytes before publishing its prefs record. A
+        // fresh UUID-named file may still be in that publication window.
+        val staleBefore = System.currentTimeMillis() - MERGE_MAX_AGE_MS
         dir.listFiles()?.forEach { f ->
-            if (f.name !in keep) runCatching { f.delete() }
+            if (f.name !in protected && f.lastModified() < staleBefore) runCatching { f.delete() }
         }
     }
 }

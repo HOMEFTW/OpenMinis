@@ -301,6 +301,7 @@ interface LLMProvider {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): LLMResponse {
+        model.validateEntryThinkingCeiling(thinkingLevel)
         val budgeted = budgetProviderRequest(
             messages,
             imageParts,
@@ -322,6 +323,7 @@ interface LLMProvider {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): Flow<LLMStreamChunk> {
+        model.validateEntryThinkingCeiling(thinkingLevel)
         val budgeted = budgetProviderRequest(
             messages,
             imageParts,
@@ -367,8 +369,7 @@ interface LLMProvider {
      * `model`.
      */
     fun clampThinkingLevel(level: ThinkingLevel): ThinkingLevel {
-        val ceiling = model.catalogMaxThinkingLevel
-        return model.normalizeThinkingLevel(if (level.rank > ceiling.rank) ceiling else level)
+        return model.clampThinkingLevel(level)
     }
 }
 

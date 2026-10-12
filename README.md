@@ -7,9 +7,9 @@
 
 OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手机上使用 Linux 沙箱、文件工作区、浏览器、技能和记忆。本 fork 保留原项目架构，仅增加 Android 端改动；它不是上游官方发行版。
 
-**[下载 Android 1.16 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+**[下载 Android 1.16.1 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.1/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.1) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
 
-**1.16 · 2026-10-09**：新增 GPT / DeepSeek / Claude 品牌图标切换，修复自动标题、长对话渲染、图片尺寸和子代理超时恢复；补齐音频文件转写、端点证书配置及近期记忆日志开关。源码以 [1.16 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16) 为准。
+**1.16.1 · 2026-10-12**：修复备份恢复、会话副本、草稿与分享持久化、模型配置刷新和思考上限；加强并发调度、定时任务保活、MCP、文件工具及浏览器/终端生命周期，更新检查改用本 fork。保留 GPT / DeepSeek / Claude 三套品牌图标。源码以 [1.16.1 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16.1) 为准，详见 [修复与验收记录](docs/fixes/2026-10-12-functional-reliability.md)。
 
 ## 应用品牌图标
 
@@ -59,6 +59,9 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 | 凭据与日志 | 加密存储失败时保留原数据，使用有提示的进程内临时存储；日志和分享副本脱敏。 |
 | 终端显示 | 修复回车覆盖、ANSI 和 OSC 序列处理，保留合法 `null`、空白和文本。 |
 | 启动与草稿 | 修复重复会话列表，恢复最后查看的对话；持久保存草稿并提供草稿箱。 |
+| 数据恢复与分享 | 恢复已有会话时保留消息和压缩标记，旧备份不覆盖较新正文；备份包含嵌套媒体引用，副本独立保存资源，分享在草稿保存成功后才确认消费。 |
+| 工具可靠性 | MCP 副作用结果丢失时报告结果未知，避免自动重复执行；正确处理 SSE 事件。同文件编辑与写入协调，大文件窗口读取限制内存使用，过期浏览器/终端回调不影响新请求。 |
+| 调度与配置 | 并发准入、排队和取消避免名额泄漏；定时任务队列保活到接管或终态。后续请求刷新凭据与服务商配置，统一执行条目思考上限。 |
 | 上游同步 | 同步公开 Android 源码中的模型刷新、浏览器生命周期、语音重试、子会话备份、存储清理及 PRoot 沙箱更新，保留本 fork 的上下文、图片预算与会话通信能力。详见 [同步记录](docs/superpowers/plans/2026-10-08-remaining-sync.md)。 |
 | 日常使用 | 新增任务中心、跨会话作品库、保留原历史的编辑分支、分类错误建议、Markdown 导出和备份预览。 |
 | 任务工具 | 新增任务成果列表、轮数预算、上限及重试提醒，以及服务商实际调用自检。 |
@@ -134,11 +137,11 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
-2026-10-09 本机验证：通过项目构建脚本运行 **2368 项 JVM 单元测试**，2366 通过、0 失败、0 错误、2 项既有 Windows 平台相关跳过。覆盖长文本、图片尺寸、标题保护、图标切换、语音取消、证书握手和子代理异步收尾。APK 构建及 v2 签名校验通过。
+2026-10-12，1.16.1 本机验证：通过项目构建脚本运行 **2480 项 JVM 单元测试**，2478 通过、0 失败、0 错误、2 项 Windows POSIX 权限相关跳过。覆盖备份合并、媒体独立复制、分享持久化、并发取消、模型配置快照、思考上限、文件窗口和过期回调隔离；MCP Python 回归 32 项通过，64 MiB JVM 堆下读取约 96 MiB 多行及单行文件的 head/tail 通过。APK v2 签名、ZIP 完整性、DEX 校验和及对齐检查通过；44 个品牌/启动图标资源与上一版一致，沿用本 fork 原签名。
 
-安装包 SHA-256 见 [1.16 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16) 附带的校验文件。
+安装包 SHA-256 见 [1.16.1 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.1) 附带的校验文件。
 
-历史设备测试记录：分支功能的设备测试曾单独编译通过；整套既有设备测试曾因过期的 `mountedSessionId` 引用无法编译，本轮未重新验证该问题。
+完整 Android 仪器测试包已编译通过，旧 `mountedSessionId` 引用已更新为逐命令挂载、会话所有权和取消断言；新增真实 Room 合并及取消/异常回滚测试。当前没有连接 ADB 设备，尚未执行仪器测试。
 
 这是本地执行记录，不代表 GitHub CI 或真机验收。尚未完成真机界面、跨会话真实模型互通、后台运行及 Keystore 异常验证；开发验证使用模拟接口，没有自动调用用户的付费 API。上下文 Token 预算仍为校准估算，不是精确 tokenizer 计数。
 
@@ -147,6 +150,7 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 ## 更多说明
 
 - [2026-10-09 上游问题修复及验证边界](docs/superpowers/plans/2026-10-09-upstream-issues.md)
+- [2026-10-12 功能缺陷修复及验收记录](docs/fixes/2026-10-12-functional-reliability.md)
 - [三套品牌图标实施记录](docs/superpowers/plans/2026-10-09-brand-icons.md)
 - [会话通信：手动转发、AI 请求、排队与权限](docs/android-session-communication.md)
 - [日常使用增强：八项功能、入口及限制](docs/android-daily-use.md)

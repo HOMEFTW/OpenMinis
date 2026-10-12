@@ -1027,20 +1027,12 @@ class SessionListViewModel(
 
     fun duplicateSession(id: String) {
         viewModelScope.launch {
-            val session = chatRepository.getSession(id) ?: return@launch
-            val messages = chatRepository.loadMessages(id)
-            val newSession = chatRepository.createSession(
-                modelId = session.modelId,
-                title = "${session.title ?: "Chat"} (Copy)",
-            )
-            for (msg in messages) {
-                chatRepository.appendMessage(
-                    sessionId = newSession.id,
-                    role = msg.role,
-                    partsJson = msg.partsJson,
-                    tokenUsage = msg.tokenUsage,
-                    reasoningContent = msg.reasoningContent,
-                )
+            try {
+                com.openminis.app.data.SessionForkManager(chatRepository, filesDir = context.filesDir).duplicateSession(id)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                AppLogger.warning(TAG, "Session copy failed: ${failure.message}")
             }
         }
     }

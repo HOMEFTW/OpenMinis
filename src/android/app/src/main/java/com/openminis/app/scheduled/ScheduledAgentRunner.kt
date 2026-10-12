@@ -9,6 +9,7 @@ import com.openminis.app.MinisApp
 import com.openminis.app.debug.HeadlessChatRunner
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.service.AgentForegroundService
+import com.openminis.app.service.SessionActivityTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,7 +55,9 @@ object ScheduledAgentRunner {
     private fun queue(context: Context): ScheduledDeliveryQueue {
         deliveryQueue?.let { return it }
         val prefs = context.getSharedPreferences("minis_scheduled_deliveries", Context.MODE_PRIVATE)
-        val queue = ScheduledDeliveryQueue(prefs.getString("pending", null)) { json ->
+        val queue = ScheduledDeliveryQueue(prefs.getString("pending", null), onChanged = { pending ->
+            SessionActivityTracker.setPendingWork("scheduled-queue", pending.map { it.executionId }.toSet())
+        }) { json ->
             check(prefs.edit().putString("pending", json).commit()) { "Scheduled delivery persistence failed" }
         }
         deliveryQueue = queue
@@ -184,42 +187,48 @@ object ScheduledAgentRunner {
             return null
         }
 
-        // Kick the FGS so the agent loop survives Doze / screen-off. The
-        // existing service is idempotent and reused by chat UI; we pass a
-        // generic status string so it shows up in the ongoing notification.
+        val handoffOwner = "scheduled-handoff/$executionId"
         try {
-            AgentForegroundService.startService(
-                context = app,
-                sessionCount = 1,
-                toolStatus = "Scheduled: ${task.label.ifBlank { "task" }}",
+            // Kick the FGS so the agent loop survives Doze / screen-off. The
+            // existing service is idempotent and reused by chat UI; we pass a
+            // generic status string so it shows up in the ongoing notification.
+            try {
+                SessionActivityTracker.setPendingWork(handoffOwner, setOf(executionId))
+                AgentForegroundService.startService(
+                    context = app,
+                    sessionCount = 1,
+                    toolStatus = "Scheduled: ${task.label.ifBlank { "task" }}",
+                )
+            } catch (t: Throwable) {
+                AppLogger.error(TAG, "task ${task.id} handoff failed: ${t.message}")
+                recordFailure(app, task, executionId, null, "handoff_failed: ${t.message}")
+                return null
+            }
+
+            val sessionId = try {
+                withContext(Dispatchers.IO) { resolveSessionId(app, task) }
+            } catch (t: Throwable) {
+                AppLogger.error(TAG, "task ${task.id} session resolution failed: ${t.message}")
+                recordFailure(app, task, executionId, null, "session_resolution_failed: ${t.message}")
+                return null
+            } ?: run {
+                recordFailure(app, task, executionId, null, "session_not_found_or_provider_unavailable")
+                return null
+            }
+
+            AppLogger.info(
+                TAG,
+                "running task=${task.id} label=\"${task.label}\" " +
+                    "mode=${task.targetMode.encode()} session=$sessionId wait=$waitForCompletion",
             )
-        } catch (t: Throwable) {
-            AppLogger.error(TAG, "task ${task.id} handoff failed: ${t.message}")
-            recordFailure(app, task, executionId, null, "handoff_failed: ${t.message}")
-            return null
+
+            val queue = queue(app)
+            queue.enqueue(ScheduledDelivery(task, sessionId, executionId, firedAt, scheduledFire))
+            if (waitForCompletion) queue.deliveries.first { pending -> pending.none { it.executionId == executionId } }
+            return sessionId
+        } finally {
+            SessionActivityTracker.setPendingWork(handoffOwner, emptySet())
         }
-
-        val sessionId = try {
-            withContext(Dispatchers.IO) { resolveSessionId(app, task) }
-        } catch (t: Throwable) {
-            AppLogger.error(TAG, "task ${task.id} session resolution failed: ${t.message}")
-            recordFailure(app, task, executionId, null, "session_resolution_failed: ${t.message}")
-            return null
-        } ?: run {
-            recordFailure(app, task, executionId, null, "session_not_found_or_provider_unavailable")
-            return null
-        }
-
-        AppLogger.info(
-            TAG,
-            "running task=${task.id} label=\"${task.label}\" " +
-                "mode=${task.targetMode.encode()} session=$sessionId wait=$waitForCompletion",
-        )
-
-        val queue = queue(app)
-        queue.enqueue(ScheduledDelivery(task, sessionId, executionId, firedAt, scheduledFire))
-        if (waitForCompletion) queue.deliveries.first { pending -> pending.none { it.executionId == executionId } }
-        return sessionId
     }
 
     /** Persist and announce one terminal result for one trigger. */

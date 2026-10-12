@@ -31,10 +31,11 @@ _ENV_RE = re.compile(r"\$\$?\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 
 class MCPError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, status_code=None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.status_code = status_code
 
 
 def expand_env(value):
@@ -52,28 +53,44 @@ def _expand_headers(headers):
     return out
 
 
-def _parse_response(resp):
+def _parse_response(resp, want_id=None):
     """Extract the JSON-RPC object from either a JSON body or an SSE stream."""
     ctype = resp.headers.get("content-type", "")
     text = resp.text
     if "text/event-stream" in ctype:
-        # SSE: pull the last `data:` payload that parses as JSON-RPC.
-        result = None
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("data:"):
-                payload = line[len("data:"):].strip()
+        events = []
+        data = []
+        def dispatch():
+            if data:
+                payload = "\n".join(data)
+                data.clear()
+                if not payload:
+                    return
                 try:
-                    result = json.loads(payload)
-                except ValueError:
-                    continue
-        if result is None:
-            raise MCPError("PARSE_ERROR", "no JSON-RPC payload in SSE stream")
-        return result
-    try:
-        return json.loads(text)
-    except ValueError as exc:
-        raise MCPError("PARSE_ERROR", "invalid JSON response: %s" % exc)
+                    events.append(json.loads(payload))
+                except ValueError as exc:
+                    raise MCPError("PARSE_ERROR", "invalid JSON in SSE event: %s" % exc)
+        for line in text.removeprefix("\ufeff").splitlines():
+            if not line:
+                dispatch()
+            elif line.startswith("data:"):
+                value = line[5:]
+                data.append(value[1:] if value.startswith(" ") else value)
+            elif line == "data":
+                data.append("")
+        dispatch()  # tolerate a final event without a blank line
+    else:
+        try:
+            events = [json.loads(text)]
+        except ValueError as exc:
+            raise MCPError("PARSE_ERROR", "invalid JSON response: %s" % exc)
+    for event in events:
+        # Notifications and responses to other requests cannot replace this reply.
+        if (isinstance(event, dict) and event.get("jsonrpc") == "2.0"
+                and "id" in event and (want_id is None or event["id"] == want_id)
+                and ("result" in event or "error" in event)):
+            return event
+    raise MCPError("PARSE_ERROR", "no JSON-RPC response for request %r" % want_id)
 
 
 # --- OAuth token bridge ------------------------------------------------------
@@ -315,11 +332,12 @@ class HTTPTransport:
             return self._post(method, params=params, notify=notify, _oauth_retried=True)
         if resp.status_code >= 400:
             raise MCPError(
-                "CONNECTION_ERROR", "HTTP %d: %s" % (resp.status_code, resp.text[:200])
+                "CONNECTION_ERROR", "HTTP %d: %s" % (resp.status_code, resp.text[:200]),
+                status_code=resp.status_code,
             )
         if notify:
             return None
-        rpc = _parse_response(resp)
+        rpc = _parse_response(resp, body["id"])
         if isinstance(rpc, dict) and rpc.get("error"):
             err = rpc["error"]
             raise MCPError("MCP_ERROR", err.get("message", json.dumps(err)))
@@ -365,10 +383,10 @@ class HTTPTransport:
         initialize being rejected AND a server that has forgotten our session
         (restart / eviction), both of which self-heal by a fresh handshake."""
         msg = str(err).lower()
-        return (
-            "already initialized" in msg
-            or "session" in msg          # "no valid session", "session expired/not found", …
-        )
+        # A tool's JSON-RPC error mentioning "session" is not evidence that
+        # it was rejected before execution. Only an HTTP session rejection is.
+        return (err.code == "CONNECTION_ERROR" and err.status_code in (400, 404)
+                and ("already initialized" in msg or "session" in msg))
 
     def _call_with_reconnect(self, do_call):
         """Run `do_call` after ensuring a handshake, and if it fails with a
@@ -390,9 +408,18 @@ class HTTPTransport:
         return (result or {}).get("tools", [])
 
     def call_tool(self, tool, arguments):
-        return self._call_with_reconnect(
-            lambda: self._post("tools/call", {"name": tool, "arguments": arguments or {}})
-        )
+        try:
+            return self._call_with_reconnect(
+                lambda: self._post("tools/call", {"name": tool, "arguments": arguments or {}})
+            )
+        except MCPError as exc:
+            if exc.code == "TIMEOUT" or (exc.code == "CONNECTION_ERROR" and exc.status_code is None):
+                self._reset_session()
+                raise MCPError("OUTCOME_UNKNOWN", (
+                    "tool reply was lost; the operation may have completed. "
+                    "It was not retried. Check the resulting state before calling again."
+                )) from exc
+            raise
 
     def ping(self):
         """Reachability check via a fresh anonymous handshake.
