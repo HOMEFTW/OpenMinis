@@ -2,6 +2,8 @@ package com.openminis.app.sandbox
 
 import android.content.Context
 import android.util.Log
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
+import com.openminis.app.data.storage.SessionStorageReferences
 import java.io.File
 import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +86,41 @@ internal class FreshProcessShell(
 
     private suspend fun executeInternal(
         command: String, timeout: Long, envVars: Map<String, String>, lineCallback: ((String) -> Unit)?,
+    ): Pair<String, Int> {
+        val ids = setOf(sessionId, SessionWorkspaceRegistry.owner(sessionId)) +
+            SessionStorageReferences.idsForFiles(*sessionBindMounts.values.map(::File).toTypedArray())
+        val storageLease = SessionStorageMaintenanceGate.shared.acquire(ids)
+        var spawnedProcess: Process? = null
+        try {
+            return executeInternalWithReservedStorage(command, timeout, envVars, lineCallback) {
+                spawnedProcess = it
+            }
+        } finally {
+            val process = spawnedProcess
+            if (process == null) {
+                storageLease.close()
+            } else {
+                // A completed command can leave proot tracing a detached daemon.
+                // Its actual process exit, rather than the command status, releases files.
+                workers.launch {
+                    try {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                            // Suspending between exit checks does not pin an IO worker
+                            // for each long-lived tracer.
+                            while (process.isAlive) kotlinx.coroutines.delay(1_000L)
+                            process.waitFor()
+                        }
+                    } finally {
+                        storageLease.close()
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun executeInternalWithReservedStorage(
+        command: String, timeout: Long, envVars: Map<String, String>, lineCallback: ((String) -> Unit)?,
+        onSpawn: (Process) -> Unit,
     ): Pair<String, Int> = withContext(Dispatchers.IO) {
         if (stopped) return@withContext Pair("[Cancelled]", CANCELLED_EXIT)
         // [T-android-fresh-exit-status-file] Where the runner reports the
@@ -109,6 +146,7 @@ internal class FreshProcessShell(
         // the session's long-lived shell; a fresh process is owned by this
         // call frame and would otherwise be unreachable, so tapping Stop
         // would leave the command running with no way to cancel it.
+        onSpawn(process)
         live = process
         if (stopped) {
             // Stop arrived between the check and the spawn. Honour it rather

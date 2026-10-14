@@ -2,6 +2,7 @@ package com.openminis.app.sandbox
 
 import android.content.Context
 import com.openminis.app.data.repository.EnvVarRepository
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
@@ -27,6 +28,18 @@ object ExecutionCoordinator {
         lineCallback: ((String) -> Unit)? = null,
         fsSessionId: String = sessionId,
     ): CommandResult = commands.run(sessionId) {
+        executeWithReservedStorage(sessionId, command, timeout, lineCallback, fsSessionId)
+    }
+
+    private suspend fun executeWithReservedStorage(
+        sessionId: String,
+        command: String,
+        timeout: Long,
+        lineCallback: ((String) -> Unit)?,
+        fsSessionId: String,
+    ): CommandResult = SessionStorageMaintenanceGate.shared.withSessionActivity(
+        setOf(sessionId, fsSessionId, SessionWorkspaceRegistry.owner(fsSessionId)),
+    ) {
         bootLock.withLock {
             if (!PRootKernel.isBooted) PRootKernel.boot(appContext)
         }

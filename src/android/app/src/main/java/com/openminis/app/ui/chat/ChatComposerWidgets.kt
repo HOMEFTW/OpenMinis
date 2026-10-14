@@ -537,6 +537,7 @@ internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun ToolPreviewThumbnail(
     block: AssistantBlock,
     toolAccent: Color,
@@ -555,6 +556,8 @@ private fun ToolPreviewThumbnail(
      * DIRECT child — so one level is the behaviour to match.
      */
     punchThroughDepth: Int = 0,
+    pendingQuestion: PendingUserQuestion? = null,
+    onTogglePreview: () -> Unit = {},
 ) {
     val args = remember(block.toolArgs) {
         try { org.json.JSONObject(block.toolArgs) } catch (_: Exception) { org.json.JSONObject() }
@@ -679,9 +682,22 @@ private fun ToolPreviewThumbnail(
                     inset += step
                 }
             }
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onTogglePreview),
     ) {
         when (block.toolName) {
+            "request_user_input", "ask_user", "ask_question" -> {
+                val preview = pendingQuestion?.takeIf { it.id == block.id } ?: remember(block.toolArgs, block.content) {
+                    runCatching {
+                        val parsed = com.openminis.app.agent.jobs.UserQuestionTool.parse(block.id, block.toolArgs)
+                        val answered = runCatching { org.json.JSONObject(block.content).optJSONObject("answers") }.getOrNull()
+                        val answers = parsed.questions.mapNotNull { q -> answered?.optString(q.id)?.takeIf { it.isNotBlank() }?.let { q.id to it } }.toMap()
+                        parsed.copy(answers = answers, selections = answers.mapValues { (id, value) ->
+                            UserQuestionSelection(value, parsed.questions.first { it.id == id }.options.none { it.label == value })
+                        })
+                    }.getOrNull()
+                }
+                if (preview != null) UserQuestionMiniature(preview)
+            }
             "shell_execute" -> {
                 // iOS: command title + last 12 lines of output in green mono
                 val command = extractShellCommand(args, block)
@@ -949,6 +965,7 @@ private fun ToolPreviewThumbnail(
                         toolAccent = toolAccentColor(inner.toolName),
                         onClick = onClick,
                         punchThroughDepth = punchThroughDepth + 1,
+                        onTogglePreview = onTogglePreview,
                     )
                 } else {
                     HelperThumbContent(block)
@@ -1026,6 +1043,8 @@ internal fun FloatingToolStatusBar(
     // dueling local-remember sheets, no LaunchedEffect(lastIndex) page
     // jumps when a new tool starts mid-view).
     onOpenDetail: (String) -> Unit = {},
+    pendingQuestion: PendingUserQuestion? = null,
+    onTogglePreview: () -> Unit = {},
 ) {
     var currentIndex by remember { mutableStateOf(toolBlocks.lastIndex.coerceAtLeast(0)) }
     val lastIndex = toolBlocks.lastIndex
@@ -1101,6 +1120,7 @@ internal fun FloatingToolStatusBar(
                 .shadow(elevation = 8.dp, shape = RoundedCornerShape(10.dp), ambientColor = Color.Black.copy(alpha = 0.06f), spotColor = Color.Black.copy(alpha = 0.12f))
                 .background(ChatColors.inputBg, RoundedCornerShape(10.dp))
                 .border(0.5.dp, ChatColors.toolBorder, RoundedCornerShape(10.dp))
+                .combinedClickable(onClick = onOpenCurrentDetail, onLongClick = onTogglePreview)
                 .padding(start = barStartPadding, end = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1143,10 +1163,12 @@ internal fun FloatingToolStatusBar(
                 maxLines = 1,
                 modifier = Modifier
                     .weight(1f)
-                    .clickable(
+                    .combinedClickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
-                    ) { onOpenCurrentDetail() },
+                        onClick = onOpenCurrentDetail,
+                        onLongClick = onTogglePreview,
+                    ),
                 overflow = TextOverflow.Ellipsis,
             )
 
@@ -1252,6 +1274,8 @@ internal fun FloatingToolStatusBar(
                     toolAccent = toolAccent,
                     onClick = { onOpenCurrentDetail() },
                     fallbackImagePath = fallbackImagePath,
+                    pendingQuestion = pendingQuestion,
+                    onTogglePreview = onTogglePreview,
                 )
             }
         }

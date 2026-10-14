@@ -12,13 +12,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -26,8 +27,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
@@ -36,6 +39,9 @@ import com.openminis.app.ui.components.DialogTextField
 import com.openminis.app.ui.settings.SettingsSection
 import com.openminis.app.ui.settings.SkillRowItem
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.ui.markdown.MarkdownText
+import java.text.DateFormat
+import java.util.Date
 
 /**
  * Bottom sheet showing all skills with per-session enable/disable toggles.
@@ -66,7 +72,7 @@ fun SessionSkillsSheet(
     // already covered on Android by the `__new__<uuid>` route arg (every
     // draft has its own stable session id), unlike iOS which previously
     // coerced nil to "" and bled overrides across drafts.
-    val overrides = remember(skills) {
+    val overrides = remember(skills, sessionId, skillRepository) {
         mutableStateMapOf<String, Boolean>().apply {
             for (skill in skills) {
                 put(skill.id, skillRepository.isEnabledForSession(skill.id, sessionId))
@@ -74,25 +80,32 @@ fun SessionSkillsSheet(
         }
     }
 
-    var searchQuery by remember { mutableStateOf("") }
-    val filteredSkills by remember(skills) {
-        derivedStateOf {
-            val q = searchQuery.trim().lowercase()
-            if (q.isEmpty()) skills
-            else skills.filter {
-                it.name.lowercase().contains(q) || it.description.lowercase().contains(q)
-            }
-        }
+    var searchQuery by remember(sessionId) { mutableStateOf("") }
+    val filteredSkills = remember(skills, searchQuery) { filterSessionSkills(skills, searchQuery) }
+    var selectedSkillId by remember(sessionId) { mutableStateOf<String?>(null) }
+    val selectedSkill = skills.find { it.id == selectedSkillId }
+    val clipboard = LocalClipboardManager.current
+    val listScroll = rememberScrollState()
+
+    fun setEnabled(ids: List<String>, enabled: Boolean) {
+        setSessionSheetOverrides(sessionId, ids, enabled, overrides, skillRepository::setSessionOverride)
     }
 
     StandardChatSheet(
         title = stringResource(R.string.session_skills_title),
         onDismiss = onDismiss,
+        leadingAction = if (selectedSkill != null) {
+            { SessionSheetBackAction { selectedSkillId = null } }
+        } else null,
     ) {
+        if (selectedSkill != null) {
+            SessionSkillDetails(selectedSkill)
+            return@StandardChatSheet
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(listScroll),
         ) {
             if (skills.isEmpty()) {
                 EmptySkillsCard()
@@ -103,6 +116,13 @@ fun SessionSkillsSheet(
                     onValueChange = { searchQuery = it },
                     placeholder = stringResource(R.string.skills_search_placeholder),
                     singleLine = true,
+                    trailingIcon = if (searchQuery.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = stringResource(R.string.model_picker_search_clear))
+                            }
+                        }
+                    } else null,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
@@ -130,12 +150,8 @@ fun SessionSkillsSheet(
                     // Enable/Disable All operate on the FILTERED subset so a
                     // user can bulk-toggle the result of a search.
                     MinisTextButton(
-                        onClick = {
-                            for (skill in filteredSkills) {
-                                overrides[skill.id] = true
-                                skillRepository.setSessionOverride(sessionId, skill.id, true)
-                            }
-                        },
+                        onClick = { setEnabled(filteredSkills.map { it.id }, true) },
+                        enabled = filteredSkills.isNotEmpty(),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             horizontal = 8.dp, vertical = 0.dp,
                         ),
@@ -143,12 +159,8 @@ fun SessionSkillsSheet(
                         Text(stringResource(R.string.session_skills_enable_all), fontSize = 12.sp)
                     }
                     MinisTextButton(
-                        onClick = {
-                            for (skill in filteredSkills) {
-                                overrides[skill.id] = false
-                                skillRepository.setSessionOverride(sessionId, skill.id, false)
-                            }
-                        },
+                        onClick = { setEnabled(filteredSkills.map { it.id }, false) },
+                        enabled = filteredSkills.isNotEmpty(),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             horizontal = 8.dp, vertical = 0.dp,
                         ),
@@ -171,14 +183,16 @@ fun SessionSkillsSheet(
                         footer = stringResource(R.string.session_skills_footer),
                     ) {
                         filteredSkills.forEachIndexed { index, skill ->
+                            val sourceUrl = sessionSkillSourceUrl(skill)
                             SkillRowItem(
                                 name = skill.name,
                                 description = skill.description,
                                 importSource = skill.importSource,
                                 isEnabled = overrides[skill.id] ?: skill.isEnabled,
-                                onToggle = { enabled ->
-                                    overrides[skill.id] = enabled
-                                    skillRepository.setSessionOverride(sessionId, skill.id, enabled)
+                                onToggle = { enabled -> setEnabled(listOf(skill.id), enabled) },
+                                onClick = { selectedSkillId = skill.id },
+                                onLongClick = sourceUrl?.let { url ->
+                                    { clipboard.setText(AnnotatedString(url)) }
                                 },
                                 showDivider = index < filteredSkills.size - 1,
                             )
@@ -189,6 +203,36 @@ fun SessionSkillsSheet(
                 Spacer(modifier = Modifier.padding(bottom = 24.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun SessionSkillDetails(skill: SkillRepository.Skill) {
+    val source = stringResource(
+        when (skill.importSource) {
+            SkillRepository.ImportSource.URL -> R.string.skill_detail_source_url
+            SkillRepository.ImportSource.FILE -> R.string.skill_detail_source_file
+            SkillRepository.ImportSource.BUNDLED -> R.string.skill_detail_source_bundled
+            SkillRepository.ImportSource.SESSION -> R.string.skill_detail_source_session
+        },
+    )
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        SettingsSection(header = stringResource(R.string.skill_detail_section_meta)) {
+            SessionSheetDetailField(stringResource(R.string.skill_detail_label_name), skill.name)
+            SessionSheetDetailField(stringResource(R.string.skill_detail_label_version), skill.version)
+            SessionSheetDetailField(
+                stringResource(R.string.skill_detail_label_modified),
+                DateFormat.getDateTimeInstance().format(Date(skill.updatedAt)),
+            )
+            SessionSheetDetailField(stringResource(R.string.skill_detail_label_source), source)
+        }
+        SettingsSection(header = stringResource(R.string.skill_detail_section_description)) {
+            if (skill.description.isNotBlank()) {
+                Text(skill.description, modifier = Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium)
+            }
+            MarkdownText(markdown = skill.body, modifier = Modifier.padding(14.dp))
+        }
+        Spacer(modifier = Modifier.padding(bottom = 24.dp))
     }
 }
 

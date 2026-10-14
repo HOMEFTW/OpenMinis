@@ -39,8 +39,7 @@ export UV_LINK_MODE=symlink
 # link2symlink turns into .l2s.* sentinels written INTO .git/objects/pack/.
 # Git chmods that directory to 0555, so the sentinel bookkeeping (which runs
 # as the real uid, not the faked root) fails and the pack files become
-# undeletable. Copying instead of hardlinking keeps Git off that path
-# entirely. Costs disk on a local clone; sandbox repos are small.
+# undeletable. PRootKernel supplies core.createObject=rename through Git's
+# environment and repairs the invalid "copy" mode left by older profiles.
 #
 # Only affects NEW operations -- it cannot repair already-stuck files.
-git config --system core.createObject copy 2>/dev/null || true

@@ -488,6 +488,10 @@
             android:name=".offload.ScheduledNotificationReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".service.UserQuestionActionReceiver"
+            android:exported="false" />
+
         <!-- [T-android-scheduled-tasks-design] AlarmManager target for
              user-defined scheduled tasks (Settings → home top-right
              schedule icon). The receiver dispatches to ScheduledAgentRunner

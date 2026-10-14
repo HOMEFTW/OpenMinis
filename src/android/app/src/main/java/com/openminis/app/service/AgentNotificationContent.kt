@@ -20,17 +20,21 @@ import com.openminis.app.ui.chat.toolIconResFor
  *  - [GENERATING] the model is streaming the visible reply
  *  - [IDLE]       service alive with nothing running (presence only)
  */
-internal enum class AgentPhase { COMPLETED, TOOL, THINKING, GENERATING, IDLE }
+internal enum class AgentPhase { COMPLETED, WAITING, TOOL, THINKING, GENERATING, QUEUED, IDLE }
 
 internal fun resolveAgentPhase(
     isCompleted: Boolean,
     toolName: String?,
     isThinking: Boolean,
     hasActiveSessions: Boolean,
+    isWaitingForAnswer: Boolean = false,
+    hasQueuedWork: Boolean = false,
 ): AgentPhase = when {
+    isWaitingForAnswer && hasActiveSessions -> AgentPhase.WAITING
+    !hasActiveSessions && hasQueuedWork -> AgentPhase.QUEUED
     isCompleted -> AgentPhase.COMPLETED
-    toolName != null -> AgentPhase.TOOL
     !hasActiveSessions -> AgentPhase.IDLE
+    toolName != null -> AgentPhase.TOOL
     isThinking -> AgentPhase.THINKING
     else -> AgentPhase.GENERATING
 }
@@ -46,10 +50,16 @@ internal fun resolveAgentPhase(
 @DrawableRes
 internal fun notificationSmallIconFor(phase: AgentPhase, toolName: String?, brandIcon: Int = R.drawable.ic_launcher_monochrome): Int = when (phase) {
     AgentPhase.COMPLETED -> R.drawable.ic_notification_completed
+    AgentPhase.WAITING -> R.drawable.ic_tool_question
     AgentPhase.TOOL -> toolIconResFor(toolName)
     AgentPhase.THINKING -> R.drawable.ic_tool_psychology
-    AgentPhase.GENERATING, AgentPhase.IDLE -> brandIcon
+    AgentPhase.GENERATING, AgentPhase.QUEUED, AgentPhase.IDLE -> brandIcon
 }
+
+internal fun notificationShowsTimer(phase: AgentPhase): Boolean = phase != AgentPhase.IDLE && phase != AgentPhase.QUEUED
+
+internal fun shouldPromoteAgentNotification(phase: AgentPhase, completionPending: Boolean): Boolean =
+    notificationShowsTimer(phase) && (phase != AgentPhase.COMPLETED || completionPending)
 
 /**
  * Title for the [AgentPhase.TOOL] row: the model-supplied `tool_title`

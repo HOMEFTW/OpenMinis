@@ -1,6 +1,7 @@
 package com.openminis.app.sandbox
 
 import android.content.ContextWrapper
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
 import java.io.*
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
@@ -77,6 +78,44 @@ class FreshProcessShellTest {
         shell.stop()
         assertEquals(130, shell.execute("ignored", 1000).second)
         assertFalse(spawned)
+    } }
+
+    @Test fun detachedProcessKeepsSessionAndMountedOwnerReservedUntilActualExit() = inDirectory { dir -> runBlocking {
+        val exited = CountDownLatch(1)
+        val process = object : Process() {
+            val source = BlockingStream()
+            override fun getInputStream(): InputStream = source
+            override fun getErrorStream(): InputStream = ByteArrayInputStream(byteArrayOf())
+            override fun getOutputStream(): OutputStream = ByteArrayOutputStream()
+            override fun waitFor(): Int { exited.await(); return 0 }
+            override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = exited.await(timeout, unit)
+            override fun isAlive(): Boolean = exited.count > 0
+            override fun exitValue(): Int { if (isAlive) throw IllegalThreadStateException(); return 0 }
+            override fun destroy() { exited.countDown(); source.close() }
+        }
+        val sid = "detached-${java.util.UUID.randomUUID()}"
+        val owner = "mounted-${java.util.UUID.randomUUID()}"
+        val gate = SessionStorageMaintenanceGate.shared
+        val shell = FreshProcessShell(ContextWrapper(null), sid,
+            mapOf("/var/minis/workspace" to File(dir, "minis-sessions/$owner/workspace").absolutePath),
+            statusDirectory = dir, processFactory = { _, _, status ->
+                File(status).writeText("0")
+                process
+            })
+        try {
+            val result = withTimeout(5000) { shell.execute("detached", 60000) }
+            assertEquals(0, result.second)
+            assertTrue("Detached process must keep running", process.isAlive)
+            gate.withOrphanMaintenance { maintenance ->
+                assertNull("Command return must not release its session files", maintenance.claimIfUnreserved(sid))
+                assertNull("The process also owns its mounted workspace", maintenance.claimIfUnreserved(owner))
+            }
+        } finally {
+            process.destroy()
+            withTimeout(5000) {
+                while (sid in gate.reservedSessionIds() || owner in gate.reservedSessionIds()) delay(10)
+            }
+        }
     } }
 
     @Test fun stdoutAndStderrKeepBoundedHeadAndTail() {

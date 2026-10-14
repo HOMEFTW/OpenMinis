@@ -233,7 +233,7 @@ internal fun StorageManagementScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = !state.isClearingLogs) { showClearLogsDialog = true }
+                            .clickable(enabled = !state.isClearingLogs && !state.orphanBusy) { showClearLogsDialog = true }
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -256,6 +256,40 @@ internal fun StorageManagementScreen(
                     }
                 }
 
+            }
+            item(key = "orphan-files") {
+                SettingsSection(footer = stringResource(R.string.storage_clear_orphaned_sessions_footer)) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        val busy = state.orphan is StorageUsageViewModel.OrphanState.Scanning ||
+                            state.orphan is StorageUsageViewModel.OrphanState.Cleaning
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (busy) {
+                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(10.dp))
+                                Text(stringResource(if (state.orphan is StorageUsageViewModel.OrphanState.Scanning)
+                                    R.string.storage_orphan_scan_status else R.string.storage_clearing_status))
+                            } else {
+                                MinisTextButton(
+                                    onClick = vm::scanOrphanedFiles,
+                                    enabled = !state.isLoading && !state.batchBusy && !state.isClearingLogs && !state.orphanBusy,
+                                ) { Text(stringResource(R.string.storage_clear_orphaned_sessions)) }
+                            }
+                        }
+                        val message = when (val orphan = state.orphan) {
+                            StorageUsageViewModel.OrphanState.NoneFound -> stringResource(R.string.storage_orphan_none)
+                            StorageUsageViewModel.OrphanState.ScanFailed -> stringResource(R.string.storage_orphan_scan_failed)
+                            is StorageUsageViewModel.OrphanState.Done -> stringResource(
+                                R.string.storage_orphan_result, orphan.result.cleaned,
+                                Formatter.formatFileSize(context, orphan.result.freed), orphan.result.kept, orphan.result.failed,
+                            )
+                            else -> null
+                        }
+                        if (message != null) {
+                            Text(message, style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+                        }
+                    }
+                }
             }
             item(key = "sessions-header") {
                 SettingsSection(header = stringResource(R.string.storage_section_sessions)) {
@@ -317,13 +351,25 @@ internal fun StorageManagementScreen(
         }
         if (state.selecting) {
             StorageSelectionBar(
-                busy = state.batchBusy,
+                busy = state.batchBusy || state.orphanBusy,
                 hasSelection = state.selectedIds.isNotEmpty(),
                 canClear = state.selectedSize > 0,
                 onClear = { showBatchClearDialog = true },
                 onDelete = { showBatchDeleteDialog = true },
             )
         }
+    }
+
+    (state.orphan as? StorageUsageViewModel.OrphanState.Confirm)?.let { confirm ->
+        val size = Formatter.formatFileSize(context, confirm.plan.bytes)
+        MinisAlertDialog(
+            onDismissRequest = vm::dismissOrphanConfirmation,
+            title = stringResource(R.string.storage_orphan_confirm_title),
+            text = stringResource(R.string.storage_orphan_confirm_message, confirm.plan.targets.size, size),
+            confirmText = stringResource(R.string.storage_clear_confirm_button, size),
+            isDestructive = true,
+            onConfirm = vm::cleanConfirmedOrphans,
+        )
     }
 
     if (showClearLogsDialog) {

@@ -4,18 +4,25 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import java.io.InterruptedIOException
 
-/** Trim only old reasoning, never the current user/tool cycle. Stored transcripts are unchanged. */
+/** Trim old unsigned reasoning, preserving recent steps and opaque replay. Stored transcripts are unchanged. */
 internal fun trimOldReasoning(
-    history: List<LLMMessage>, tokensToFree: Int, countTokens: (String) -> Int,
+    history: List<LLMMessage>, tokensToFree: Int,
+    visibleHistory: List<LLMMessage> = history,
+    countTokens: (String) -> Int,
 ): List<LLMMessage> {
     if (tokensToFree <= 0) return history
-    val latestUser = history.indexOfLast { it.role == LLMMessage.Role.USER &&
-        it.contentParts.none { part -> part is AgentContentPart.ToolResult } }
-    val end = minOf((history.size - 4).coerceAtLeast(0), latestUser.coerceAtLeast(0))
+    val end = (history.size - 4).coerceAtLeast(0)
     var remaining = tokensToFree
+    val visibleRows = visibleHistory.mapNotNull { it.dbMessageId }.toSet()
+    // Persisted rows have cheap stable IDs. Do not hash every image payload
+    // just to match the few synthetic messages without a row ID.
+    val visibleAnonymous = visibleHistory.filter { it.dbMessageId == null }
     return history.mapIndexed { index, message ->
         val reasoning = message.reasoningContent
-        if (index < end && remaining > 0 && !reasoning.isNullOrEmpty()) {
+        val isVisible = message.dbMessageId?.let { it in visibleRows } ?:
+            visibleAnonymous.any { it === message || it == message }
+        val signed = message.hasSignedToolReplay() || message.contentParts.any { it is AgentContentPart.ToolUse && !it.thoughtSignature.isNullOrBlank() }
+        if (index < end && isVisible && remaining > 0 && message.role == LLMMessage.Role.ASSISTANT && !signed && !reasoning.isNullOrEmpty()) {
             remaining -= countTokens(reasoning)
             message.copy(reasoningContent = "")
         } else message

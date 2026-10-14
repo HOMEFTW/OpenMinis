@@ -1,7 +1,9 @@
 package com.openminis.app.ui.settings
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,9 +43,10 @@ import com.openminis.app.data.repository.SkillRepository
  *   │ description (up to 2 lines, tertiary text)               │
  *   └──────────────────────────────────────────────────────────┘
  *
- * Pass [onClick] to make the row navigate (Settings page); leave null in
- * sheet contexts where the row is only a switch host.
+ * Pass [onClick] to open details. [onLongClick] optionally exposes a source
+ * action while the child switch keeps its independent toggle interaction.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SkillRowItem(
     name: String,
@@ -53,12 +56,22 @@ fun SkillRowItem(
     onToggle: (Boolean) -> Unit,
     onClick: (() -> Unit)? = null,
     showDivider: Boolean = true,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                .then(
+                    when {
+                        onLongClick != null -> Modifier.combinedClickable(
+                            onClick = { onClick?.invoke() },
+                            onLongClick = onLongClick,
+                        )
+                        onClick != null -> Modifier.clickable(onClick = onClick)
+                        else -> Modifier
+                    },
+                )
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

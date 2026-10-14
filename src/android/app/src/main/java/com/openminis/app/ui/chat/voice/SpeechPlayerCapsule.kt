@@ -20,9 +20,11 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,6 +66,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.sp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
@@ -137,6 +142,7 @@ fun SpeechPlayerCapsule(
     val enabled by VoiceOutputState.isEnabled.collectAsState()
     val muted by VoiceOutputState.isMuted.collectAsState()
     val speed by VoiceOutputState.speed.collectAsState()
+    val volume by VoiceOutputState.volume.collectAsState()
     val speaking by VoiceOutputState.isSpeaking.collectAsState()
     val synthesizing by VoiceOutputState.isSynthesizing.collectAsState()
     val modelLabel by VoiceOutputState.activeModelLabel.collectAsState()
@@ -347,12 +353,15 @@ fun SpeechPlayerCapsule(
                         muted = muted,
                         synthesizing = synthesizing,
                         speed = speed,
+                        volume = volume,
                         modelLabel = modelLabel
                             ?: systemVoiceLabel
                             ?: stringResource(R.string.tts_capsule_system_engine),
                         onMuteToggle = { VoiceOutputState.setMuted(!muted); bumpIdle() },
                         onModelTap = { showModelPicker = true; bumpIdle() },
                         onSpeedTap = { VoiceOutputState.nextSpeed(); bumpIdle() },
+                        onVolumeChange = { VoiceOutputState.setVolume(it, persist = false); bumpIdle() },
+                        onVolumeFinished = { VoiceOutputState.setVolume(VoiceOutputState.volume.value); bumpIdle() },
                         onClose = { VoiceOutputState.setEnabled(false) },
                     )
                 } else {
@@ -439,25 +448,26 @@ private fun ExpandedCapsule(
     muted: Boolean,
     synthesizing: Boolean,
     speed: Float,
+    volume: Float,
     modelLabel: String,
     onMuteToggle: () -> Unit,
     onModelTap: () -> Unit,
     onSpeedTap: () -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    onVolumeFinished: () -> Unit,
     onClose: () -> Unit,
 ) {
-    // [T-android-tts-capsule-height] Height is PINNED to the compact button's
-    // 40dp so expand↔collapse is a pure width morph with no vertical jump.
-    // Letting content drive the height made the capsule ~56dp: Compose Text
-    // reserves the font's full ascent/descent leading (includeFontPadding) on
-    // top of the padding — the same inflation the read-replies pill had to
-    // correct. A fixed frame with centered content sidesteps per-text
-    // lineHeight surgery entirely.
+    // The existing control row stays 40dp; the volume row is visible only
+    // when expanded. The outer capsule is measured for drag/IME clamping.
+    Column(
+        Modifier.widthIn(min = 240.dp, max = 300.dp)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f), RoundedCornerShape(20.dp))
+            .border(0.5.dp, Color.Gray.copy(alpha = 0.25f), RoundedCornerShape(20.dp)),
+    ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .height(40.dp)
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f), RoundedCornerShape(50))
-            .border(0.5.dp, Color.Gray.copy(alpha = 0.25f), RoundedCornerShape(50))
+            .fillMaxWidth().height(40.dp)
             .padding(horizontal = 14.dp),
     ) {
         // Speaker = mute toggle (temporary silence; capsule stays visible).
@@ -471,7 +481,7 @@ private fun ExpandedCapsule(
         // Model chip — tap to switch the TTS model.
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.widthIn(max = 130.dp).clickable(onClick = onModelTap),
+            modifier = Modifier.weight(1f).clickable(onClick = onModelTap),
         ) {
             Icon(
                 Icons.Default.GraphicEq,
@@ -486,6 +496,7 @@ private fun ExpandedCapsule(
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(3.dp))
             // [T-android-tts-capsule-unified-picker] iOS shows
@@ -540,6 +551,22 @@ private fun ExpandedCapsule(
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp).clickable(onClick = onClose),
         )
+    }
+    val volumeLabel = stringResource(R.string.tts_capsule_volume)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(volumeLabel, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        Spacer(Modifier.width(8.dp))
+        Slider(
+            value = volume, onValueChange = onVolumeChange, onValueChangeFinished = onVolumeFinished,
+            valueRange = 0f..1f,
+            modifier = Modifier.weight(1f).height(36.dp).semantics { contentDescription = volumeLabel },
+        )
+        Spacer(Modifier.width(8.dp))
+        Text("${(volume * 100).toInt()}%", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
     }
 }
 

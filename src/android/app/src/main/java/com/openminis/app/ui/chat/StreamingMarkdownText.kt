@@ -1675,24 +1675,22 @@ private fun splitParagraphOnWideMath(text: String): List<MdBlock> {
 private data class ListItem(val text: String, val children: List<MdBlock> = emptyList())
 
 /**
- * [T-android-math-overflow-wrap] A list item whose text holds wide inline
- * math renders as [ListItem.children]: its prose as paragraphs and each wide
- * formula as a display block that fits (and wraps to) the line. Top-level
- * paragraphs already get this split ([splitParagraphOnWideMath]); list items
- * kept the formula inline, in a fixed-size slot up to 22em wide, so on a
- * phone a long formula in a list ran past the right edge and was clipped —
- * the iOS report behind 7238a39d4. Items without wide math are unchanged.
+ * Parse multiline item content as blocks so nested tables/lists/code keep
+ * their structure. Single-line items retain the existing wide-math split.
+ * Recursion shares the normal parser's nesting and work limits.
  */
-private fun ListItem.withWideMathSplit(): ListItem {
-    val split = splitParagraphOnWideMath(text)
-    return if (split.any { it is MdBlock.MathDisplay }) copy(children = split) else this
+private suspend fun ListItem.withParsedContent(depth: Int): ListItem {
+    val content = text.trimEnd('\n', '\r')
+    val split = if ('\n' in content) parseMarkdownBlocks(content, depth + 1) else splitParagraphOnWideMath(content)
+    return copy(text = content, children = if (split.any { it !is MdBlock.Paragraph }) split else emptyList())
 }
 private data class TaskItem(val checked: Boolean, val text: String, val children: List<MdBlock> = emptyList())
 
-/** [T-android-math-overflow-wrap] Same wide-math split as [ListItem.withWideMathSplit]. */
-private fun TaskItem.withWideMathSplit(): TaskItem {
-    val split = splitParagraphOnWideMath(text)
-    return if (split.any { it is MdBlock.MathDisplay }) copy(children = split) else this
+/** Task item content follows the same block rules as an ordinary list item. */
+private suspend fun TaskItem.withParsedContent(depth: Int): TaskItem {
+    val content = text.trimEnd('\n', '\r')
+    val split = if ('\n' in content) parseMarkdownBlocks(content, depth + 1) else splitParagraphOnWideMath(content)
+    return copy(text = content, children = if (split.any { it !is MdBlock.Paragraph }) split else emptyList())
 }
 
 // ─── Block parser ───────────────────────────────────────────────────────────
@@ -2121,6 +2119,7 @@ private suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<M
 
             // Table (line contains | and next line is separator)
             trimmed.contains('|') && i + 1 < lines.size &&
+                !trimmed.matches(bulletListItemRegex) && !trimmed.matches(numberedListItemRegex) &&
                 lines[i + 1].trim().matches(tableSeparatorRegex) -> {
                 val tableLines = mutableListOf<String>()
                 while (i < lines.size && (lines[i].contains('|') ||
@@ -2153,15 +2152,29 @@ private suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<M
             trimmed.matches(taskListItemRegex) -> {
                 val items = mutableListOf<TaskItem>()
                 val rawLines = mutableListOf<String>()
-                while (i < lines.size && lines[i].trimStart().matches(taskListItemRegex)) {
-                    rawLines.add(lines[i])
-                    val t = lines[i].trimStart()
-                    val checked = t.contains("[x]", ignoreCase = true)
-                    val text = t.replaceFirst(taskListPrefixRegex, "")
-                    items.add(TaskItem(checked, text))
+                val baseIndent = line.length - trimmed.length
+                var contentIndent = baseIndent
+                while (i < lines.size) {
+                    val l = lines[i]
+                    val t = l.trimStart()
+                    val indent = l.length - t.length
+                    if (t.isNotEmpty() && !t.matches(taskListItemRegex) && indent <= baseIndent) break
+                    rawLines.add(l)
+                    if (t.isEmpty() || indent > baseIndent) {
+                        if (items.isNotEmpty()) {
+                            val last = items.last()
+                            val continuation = if (t.isEmpty()) "" else l.drop(minOf(indent, contentIndent))
+                            items[items.lastIndex] = last.copy(text = last.text + "\n" + continuation)
+                        }
+                    } else {
+                        val prefix = taskListPrefixRegex.find(t)!!.value
+                        contentIndent = baseIndent + prefix.length
+                        val checked = prefix.contains("[x]", ignoreCase = true)
+                        items.add(TaskItem(checked, t.drop(prefix.length)))
+                    }
                     i++
                 }
-                blocks.add(MdBlock.TaskList(rawLines.joinToString("\n"), items.map { it.withWideMathSplit() }))
+                blocks.add(MdBlock.TaskList(rawLines.dropLastWhile { it.isBlank() }.joinToString("\n"), items.map { it.withParsedContent(depth) }))
             }
 
             // Unordered list
@@ -2169,25 +2182,28 @@ private suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<M
                 val items = mutableListOf<ListItem>()
                 val rawLines = mutableListOf<String>()
                 val baseIndent = line.length - trimmed.length
+                var contentIndent = baseIndent
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
                     val indent = l.length - t.length
-                    if (t.isEmpty()) { i++; continue }
-                    if (!t.matches(bulletListItemRegex) && indent <= baseIndent) break
-                    if (indent > baseIndent) {
+                    if (t.isNotEmpty() && !t.matches(bulletListItemRegex) && indent <= baseIndent) break
+                    rawLines.add(l)
+                    if (t.isEmpty() || indent > baseIndent) {
                         // Continuation or nested — append to last item
                         if (items.isNotEmpty()) {
                             val last = items.last()
-                            items[items.lastIndex] = last.copy(text = last.text + "\n" + t)
+                            val continuation = if (t.isEmpty()) "" else l.drop(minOf(indent, contentIndent))
+                            items[items.lastIndex] = last.copy(text = last.text + "\n" + continuation)
                         }
                     } else {
-                        rawLines.add(l)
-                        items.add(ListItem(t.replaceFirst(bulletListPrefixRegex, "")))
+                        val prefix = bulletListPrefixRegex.find(t)!!.value
+                        contentIndent = baseIndent + prefix.length
+                        items.add(ListItem(t.drop(prefix.length)))
                     }
                     i++
                 }
-                blocks.add(MdBlock.UnorderedList(rawLines.joinToString("\n"), items.map { it.withWideMathSplit() }))
+                blocks.add(MdBlock.UnorderedList(rawLines.dropLastWhile { it.isBlank() }.joinToString("\n"), items.map { it.withParsedContent(depth) }))
             }
 
             // Ordered list
@@ -2197,24 +2213,27 @@ private suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<M
                 val startMatch = numberedListStartRegex.find(trimmed)
                 val startNum = startMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
                 val baseIndent = line.length - trimmed.length
+                var contentIndent = baseIndent
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
                     val indent = l.length - t.length
-                    if (t.isEmpty()) { i++; continue }
-                    if (!t.matches(numberedListItemRegex) && indent <= baseIndent) break
-                    if (indent > baseIndent) {
+                    if (t.isNotEmpty() && !t.matches(numberedListItemRegex) && indent <= baseIndent) break
+                    rawLines.add(l)
+                    if (t.isEmpty() || indent > baseIndent) {
                         if (items.isNotEmpty()) {
                             val last = items.last()
-                            items[items.lastIndex] = last.copy(text = last.text + "\n" + t)
+                            val continuation = if (t.isEmpty()) "" else l.drop(minOf(indent, contentIndent))
+                            items[items.lastIndex] = last.copy(text = last.text + "\n" + continuation)
                         }
                     } else {
-                        rawLines.add(l)
-                        items.add(ListItem(t.replaceFirst(numberedListPrefixRegex, "")))
+                        val prefix = numberedListPrefixRegex.find(t)!!.value
+                        contentIndent = baseIndent + prefix.length
+                        items.add(ListItem(t.drop(prefix.length)))
                     }
                     i++
                 }
-                blocks.add(MdBlock.OrderedList(rawLines.joinToString("\n"), items.map { it.withWideMathSplit() }, startNum))
+                blocks.add(MdBlock.OrderedList(rawLines.dropLastWhile { it.isBlank() }.joinToString("\n"), items.map { it.withParsedContent(depth) }, startNum))
             }
 
             // Empty line
@@ -2791,9 +2810,8 @@ private fun RenderInlineMath(latex: String, fontSize: TextUnit) {
 }
 
 /**
- * One list item's content: its inline text, or — when it holds wide math
- * ([withWideMathSplit]) — its prose paragraphs with each wide formula as a
- * display block in between.
+ * One list item's inline text or parsed child blocks, including nested tables
+ * and wide formulas. Paragraphs retain the item's checked/unchecked color.
  */
 @Composable
 private fun RenderListItemBody(item: ListItem, colors: MdColors, modifier: Modifier) =
@@ -2822,13 +2840,14 @@ private fun RenderListItemBody(
         for (child in children) {
             when (child) {
                 is MdBlock.MathDisplay -> RenderMathDisplay(child.latex)
-                else -> MdText(
+                is MdBlock.Paragraph -> MdText(
                     text = MarkdownParseCaches.inline(child.raw, colors),
                     fontSize = BaseFontSize,
                     lineHeight = BaseLineHeight,
                     color = textColor,
                     inlineContent = rememberKatexInlineContent(BaseFontSize, MarkdownParseCaches.mathLatex(child.raw)),
                 )
+                else -> RenderBlock(child)
             }
         }
     }

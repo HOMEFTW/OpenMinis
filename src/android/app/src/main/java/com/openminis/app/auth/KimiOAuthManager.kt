@@ -5,6 +5,9 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import com.openminis.app.data.repository.ProviderRepository
+import com.openminis.app.provider.usage.readProviderResponse
+import com.openminis.app.provider.usage.kimiSubscriptionOAuthToken
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -108,16 +111,15 @@ class KimiOAuthManager(
      * POST a form-urlencoded body (the ONLY body shape auth.kimi.com
      * accepts — JSON gets "client_id is required"). Returns (httpStatus, json).
      */
-    private fun postForm(url: String, params: Map<String, String>): Pair<Int, JSONObject> {
+    private suspend fun postForm(url: String, params: Map<String, String>): Pair<Int, JSONObject> {
         val formBody = params.entries.joinToString("&") { "${it.key}=${Uri.encode(it.value)}" }
         val request = Request.Builder()
             .url(url)
             .post(formBody.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
             .build()
-        val response = httpClient.newCall(request).execute()
-        val code = response.code
-        val body = response.body?.string() ?: ""
-        response.close()
+        val response = httpClient.newCall(request).readProviderResponse()
+        val code = response.status
+        val body = response.body
         val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
         return code to json
     }
@@ -277,6 +279,8 @@ class KimiOAuthManager(
                 }
                 Log.w(TAG, "Token refresh transient failure — keeping token")
                 return@withLock RefreshOutcome.TRANSIENT
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Token refresh transient error — keeping token: ${e.message}")
                 return@withLock RefreshOutcome.TRANSIENT
@@ -285,8 +289,11 @@ class KimiOAuthManager(
     }
 
     /** 5-minute-buffered valid token (Claude parity, overrides the 4h base). */
-    override suspend fun validAccessToken(): String? = withContext(Dispatchers.IO) {
-        loadManualBearerToken()?.takeIf { it.isNotBlank() }?.let { return@withContext it }
+    override suspend fun validAccessToken(): String? = validAccessToken(allowManualOverride = true)
+
+    /** Subscription usage must identify the OAuth account, even when inference uses a proxy override. */
+    internal suspend fun validAccessToken(allowManualOverride: Boolean): String? = withContext(Dispatchers.IO) {
+        if (allowManualOverride) loadManualBearerToken()?.takeIf { it.isNotBlank() }?.let { return@withContext it }
         if (needsReauth()) return@withContext null
         val stored = loadStoredTokens() ?: return@withContext null
         val token = stored.optString("access_token", "").ifEmpty { return@withContext null }
@@ -295,9 +302,11 @@ class KimiOAuthManager(
 
         val needsRefresh = stored.optString("refresh_token", "").isNotEmpty() &&
             expireAt > 0 && (expireAt - now) <= REFRESH_BUFFER_MS
-        if (!needsRefresh) return@withContext token
+        if (!needsRefresh) return@withContext if (allowManualOverride) token else kimiSubscriptionOAuthToken(stored, now)
 
         refreshTokenClassified()
-        currentUsableAccessToken()
+        if (allowManualOverride) currentUsableAccessToken() else synchronized(credentialLock) {
+            if (needsReauth()) null else kimiSubscriptionOAuthToken(loadStoredTokens(), System.currentTimeMillis())
+        }
     }
 }

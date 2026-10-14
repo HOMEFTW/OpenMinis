@@ -45,7 +45,10 @@ internal class StderrDrain(
                 if (n < 0) break
                 for (i in 0 until n) {
                     val c = buffer[i]
-                    if (c == '\n' || line.length >= 16_384) {
+                    // Permit one extra char at the cap to keep a UTF-16 pair
+                    // together instead of inserting a newline between its halves.
+                    val completesPair = c.isLowSurrogate() && line.lastOrNull()?.isHighSurrogate() == true
+                    if (c == '\n' || (line.length >= 16_384 && !completesPair)) {
                         val text = line.toString()
                         if (isProotDebugLine(text)) log(text) else synchronized(kept) { kept.append(text).append('\n') }
                         line.clear()

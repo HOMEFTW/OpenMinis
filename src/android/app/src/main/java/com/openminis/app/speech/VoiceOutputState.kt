@@ -29,6 +29,7 @@ object VoiceOutputState {
     private const val KEY_ENABLED = "readReplies"
     private const val KEY_MUTED = "readReplies.muted"
     private const val KEY_SPEED = "readReplies.speed"
+    private const val KEY_VOLUME = "readReplies.volume"
     private const val KEY_SYSTEM_VOICE = "readReplies.systemVoice"
     private const val KEY_SYSTEM_VOICE_LABEL = "readReplies.systemVoiceLabel"
 
@@ -59,6 +60,9 @@ object VoiceOutputState {
 
     private val _speed = MutableStateFlow(1.0f)
     val speed: StateFlow<Float> = _speed.asStateFlow()
+
+    private val _volume = MutableStateFlow(1.0f)
+    val volume: StateFlow<Float> = _volume.asStateFlow()
 
     /**
      * [T-android-tts-capsule-drag] Persisted drag offset in DP from the resting
@@ -175,6 +179,7 @@ object VoiceOutputState {
         _isEnabled.value = p.getBoolean(KEY_ENABLED, false)
         _isMuted.value = p.getBoolean(KEY_MUTED, false)
         _speed.value = p.getFloat(KEY_SPEED, 1.0f)
+        _volume.value = boundedVolume(p.getFloat(KEY_VOLUME, 1.0f))
         _systemVoiceName.value = p.getString(KEY_SYSTEM_VOICE, null)
         _systemVoiceLabel.value = p.getString(KEY_SYSTEM_VOICE_LABEL, null)
         // [T-android-tts-capsule-drag] Both keys must be present: a half-written
@@ -249,6 +254,19 @@ object VoiceOutputState {
         _speed.value = value
         prefs?.edit()?.putFloat(KEY_SPEED, value)?.apply()
     }
+
+    /** Apply live gain while dragging; persist once on release. Does not change system media volume. */
+    fun setVolume(value: Float, persist: Boolean = true) {
+        val gain = boundedVolume(value)
+        if (_volume.value != gain) {
+            _volume.value = gain
+            val live = synchronized(players) { players.toList() }
+            live.forEach { it.setPlaybackVolume(gain) }
+        }
+        if (persist) prefs?.edit()?.putFloat(KEY_VOLUME, gain)?.apply()
+    }
+
+    private fun boundedVolume(value: Float): Float = if (value.isFinite()) value.coerceIn(0f, 1f) else 1f
 
     /** Cycle 1× → 1.25× → 1.5× → 2× → 1×. */
     fun nextSpeed() {

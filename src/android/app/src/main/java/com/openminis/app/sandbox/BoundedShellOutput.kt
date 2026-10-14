@@ -19,8 +19,13 @@ internal class BoundedShellOutput(private val keepEach: Int = 20_000) {
     fun isNotEmpty() = total != 0L
     fun last(): Char = if (tail.isNotEmpty()) tail.last() else head.last()
     override fun toString(): String {
-        val omitted = total - head.length - tail.length
-        return if (omitted <= 0) head.toString() + tail
-        else "$head\n[... $omitted characters omitted ...]\n$tail"
+        if (total <= head.length + tail.length) return head.toString() + tail
+        // A retention boundary can split a surrogate pair even after the byte
+        // stream was decoded correctly. Trim the dangling halves only when
+        // text was omitted; an untruncated head/tail pair still joins intact.
+        val headEnd = head.length - if (head.lastOrNull()?.isHighSurrogate() == true) 1 else 0
+        val tailStart = if (tail.firstOrNull()?.isLowSurrogate() == true) 1 else 0
+        val omitted = total - headEnd - (tail.length - tailStart)
+        return "${head.substring(0, headEnd)}\n[... $omitted characters omitted ...]\n${tail.substring(tailStart)}"
     }
 }

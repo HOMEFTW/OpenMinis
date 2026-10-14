@@ -849,6 +849,7 @@ internal fun ToolCallPill(
 // ─── Thinking Block (iOS: collapsible "Deep Thinking" section, blue tint) ────
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: Boolean = true) {
     // Per-block expand state, keyed by block.id so the user's manual toggle on
     // an earlier (finished) thinking block survives recomposition while a
@@ -864,7 +865,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     // fights the user). Read once at mount — mirrors iOS ThinkingBlockView,
     // where the same UserDefaults gate sits at the one-shot auto-expand site.
     val context = LocalContext.current
-    val autoExpandThinking = remember { autoExpandThinkingEnabled(context) }
+    var autoExpandThinking by remember { mutableStateOf(autoExpandThinkingEnabled(context)) }
     var expanded by remember(block.id) { mutableStateOf(autoExpandThinking && isLast && isStreaming) }
     var userTouched by remember(block.id) { mutableStateOf(false) }
     LaunchedEffect(block.id, isStreaming) {
@@ -909,7 +910,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable {
+                .combinedClickable(onClick = {
                     userTouched = true
                     // [T-thinking-render-perf-android] Over the hard cap the
                     // inline scroller is bypassed entirely; tapping the header
@@ -917,7 +918,14 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     // the (never-shown) inline expansion.
                     if (overHardCap) showFullContent = true
                     else expanded = !expanded
-                },
+                }, onLongClick = {
+                    val prefs = com.openminis.app.ui.settings.getAppearancePrefs(context)
+                    val next = !prefs.getBoolean(com.openminis.app.ui.settings.KEY_AUTO_EXPAND_THINKING, true)
+                    prefs.edit().putBoolean(com.openminis.app.ui.settings.KEY_AUTO_EXPAND_THINKING, next).apply()
+                    autoExpandThinking = next
+                    if (isStreaming && isLast && !overHardCap) { userTouched = true; expanded = next }
+                    android.widget.Toast.makeText(context, if (next) R.string.thinking_stream_expand_enabled else R.string.thinking_stream_expand_disabled, android.widget.Toast.LENGTH_SHORT).show()
+                }),
         ) {
             if (isStreaming && block.toolStatus != ToolBlockStatus.SUCCESS) {
                 // iOS: ProgressView().controlSize(.mini) while streaming

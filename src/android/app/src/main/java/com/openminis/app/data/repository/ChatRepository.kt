@@ -10,6 +10,10 @@ import com.openminis.app.data.model.ModelAttributionSnapshot
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
+import com.openminis.app.data.storage.SessionStorageReferences
+import com.openminis.app.data.storage.SessionStorageOwners
+import com.openminis.app.sandbox.SessionWorkspaceRegistry
 
 class ChatRepository(internal val dao: ChatDao) {
 
@@ -41,7 +45,11 @@ class ChatRepository(internal val dao: ChatDao) {
             memoryEnabled = if (memoryEnabled) 1 else 0,
             thinkingOverride = thinkingOverride,
         )
-        dao.insertSession(session)
+        val storageOwners = SessionStorageOwners.collect(listOfNotNull(session.id, parentSessionId),
+            { dao.getSession(it)?.parentSessionId }, SessionWorkspaceRegistry::owner)
+        SessionStorageMaintenanceGate.shared.withSessionActivity(storageOwners) {
+            dao.insertSession(session)
+        }
         return session
     }
 
@@ -438,7 +446,11 @@ class ChatRepository(internal val dao: ChatDao) {
      * target tool_use. Mirrors iOS ChatStore.updateMessageParts.
      */
     suspend fun updateMessageParts(id: String, partsJson: String) =
-        dao.updateMessageParts(id, boundedMessagePartsJson(partsJson))
+        SessionStorageMaintenanceGate.shared.withSessionActivity(SessionStorageReferences.idsForWrite(partsJson).let {
+            it + it.map(SessionWorkspaceRegistry::owner)
+        }) {
+            dao.updateMessageParts(id, boundedMessagePartsJson(partsJson))
+        }
 
     /** [T-error-persist-android] Set/clear the error sticker on a row by id. */
     suspend fun updateMessageErrorInfo(messageId: String, errorInfo: String?) =
@@ -549,7 +561,11 @@ class ChatRepository(internal val dao: ChatDao) {
         tokenUsage: String? = null,
         reasoningContent: String? = null,
         modelSnapshot: ModelAttributionSnapshot? = null,
-    ): MessageEntity {
+    ): MessageEntity = SessionStorageMaintenanceGate.shared.withSessionActivity(
+        (setOf(sessionId) + SessionStorageReferences.idsForWrite(partsJson)).let {
+            it + it.map(SessionWorkspaceRegistry::owner)
+        },
+    ) {
         val sortOrder = dao.nextSortOrder(sessionId)
         val now = System.currentTimeMillis()
         // Bound payload strings while preserving tool pairing and media references.
@@ -587,7 +603,7 @@ class ChatRepository(internal val dao: ChatDao) {
         } else {
             dao.touchSession(sessionId, now)
         }
-        return message
+        message
     }
 
     /**

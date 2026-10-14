@@ -3802,10 +3802,13 @@ fun ChatScreen(
                         }
                     }
                     pendingUserQuestion?.let { request ->
-                        item(key = "question:${request.id}", contentType = "question") {
-                            UserQuestionCard(request) { answers ->
-                                viewModel.answerUserQuestion(request.id, answers)
-                            }
+                        item(key = "question:${request.instanceId}", contentType = "question") {
+                            UserQuestionCard(
+                                request,
+                                onSelect = { id, value, other -> viewModel.selectUserQuestion(request, id, value, other) },
+                                onSubmit = { viewModel.submitUserQuestion(request) },
+                                onCancel = { viewModel.dismissUserQuestion(request) },
+                            )
                         }
                     }
                     if (canResume && !isStreaming && error == null && !lastAssistantHasError) {
@@ -4412,6 +4415,10 @@ fun ChatScreen(
                     ) {
                         FloatingToolStatusBar(
                             toolBlocks = lastToolBlocks,
+                            pendingQuestion = pendingUserQuestion,
+                            onTogglePreview = {
+                                appearancePrefs.edit().putBoolean(com.openminis.app.ui.settings.KEY_TOOL_PREVIEW, !toolPreviewEnabled).apply()
+                            },
                             // T14: per-card stop on the floating bar — same
                             // global cancel as the message-list pill button.
                             onStop = { pendingStop = { viewModel.cancelStream() } },

@@ -451,6 +451,13 @@ class ReadAloudPlayer(context: Context) {
      * Write [data] to a cache file and play it to completion. Same approach as
      * QuickTestSheet — MediaPlayer needs a file/descriptor, not a byte array.
      */
+    fun setPlaybackVolume(value: Float) {
+        val gain = if (value.isFinite()) value.coerceIn(0f, 1f) else 1f
+        runCatching { player?.setVolume(gain, gain) }
+        // Android's system engine applies this from the next utterance.
+        system.speechVolume = gain
+    }
+
     private suspend fun playBytes(data: ByteArray) {
         val file = withContext(Dispatchers.IO) {
             File(appContext.cacheDir, "readaloud_tts.audio").apply { writeBytes(data) }
@@ -476,6 +483,8 @@ class ReadAloudPlayer(context: Context) {
                 // will silently mute focus-less media playback. Focus denial is
                 // logged but non-fatal — muting is the exception, not the rule.
                 mp.setAudioAttributes(playbackAttributes)
+                val volume = VoiceOutputState.volume.value
+                mp.setVolume(volume, volume)
                 requestAudioFocus()
                 mp.setDataSource(file.absolutePath)
                 mp.setOnCompletionListener { finish() }
@@ -555,6 +564,7 @@ class ReadAloudPlayer(context: Context) {
         // the property setter forwards to tts.setSpeechRate, so mid-reply
         // speed changes take effect from the next sentence.
         system.speechRate = VoiceOutputState.speed.value
+        system.speechVolume = VoiceOutputState.volume.value
         // [T-android-system-voice-catalog] Apply the picked system voice (null
         // = engine default / auto language), and surface its label on the
         // capsule chip — matching iOS, whose chip shows "Tingting (Chinese)"

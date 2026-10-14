@@ -52,6 +52,7 @@ import com.openminis.app.R
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.data.repository.ProviderRepository
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
@@ -1377,10 +1378,21 @@ class ChatViewModel(
     private var scheduledInsertionRunIds: Set<String> = emptySet()
     private var suspendedRunIds: Set<String> = emptySet()
     private val delegateResults = com.openminis.app.agent.jobs.DelegateResultLedger()
-    private val userQuestions = com.openminis.app.agent.jobs.UserQuestionBroker()
+    private val userQuestions = com.openminis.app.agent.jobs.UserQuestionBroker(onChanged = ::publishUserQuestion)
     val pendingUserQuestion: StateFlow<PendingUserQuestion?> = userQuestions.pending
 
-    fun answerUserQuestion(id: String, answers: Map<String, String>): Boolean = userQuestions.answer(id, answers)
+    private fun publishUserQuestion(request: PendingUserQuestion?) {
+        com.openminis.app.agent.jobs.UserQuestionRegistry.update(activeSessionId, request, userQuestions)
+    }
+
+    fun selectUserQuestion(request: PendingUserQuestion, questionId: String, value: String, asOther: Boolean): Boolean =
+        userQuestions.select(request.id, request.instanceId, questionId, value, asOther)
+
+    fun submitUserQuestion(request: PendingUserQuestion): Boolean = request.currentQuestion?.let {
+        userQuestions.submitSelected(request.id, request.instanceId, it.id)
+    } ?: false
+
+    fun dismissUserQuestion(request: PendingUserQuestion): Boolean = userQuestions.dismiss(request.id, request.instanceId)
 
     fun hasWorkInFlight(): Boolean = _isStreaming.value || streamJob?.isActive == true ||
         sendSetupJobs.values.any { it.isActive } || scheduledInsertionJob?.isActive == true ||
@@ -6944,19 +6956,26 @@ class ChatViewModel(
         if (index < 0) return null
         val message = messages[index]
         val branchId = UUID.randomUUID().toString()
+        val sid = realSessionId.ifEmpty { sessionId }
+        val storageLease = SessionStorageMaintenanceGate.shared.acquire(setOf(sid, fsSessionId, branchId))
+        if (_isStreaming.value || creatingEditBranch) {
+            storageLease.close()
+            return null
+        }
         creatingEditBranch = true
-        val branchMedia = EditBranchMedia(java.io.File(context.filesDir, "media"), branchId)
+        var branchMedia: EditBranchMedia? = null
         return try {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                val sid = realSessionId.ifEmpty { sessionId }
+                val resources = EditBranchMedia(java.io.File(context.filesDir, "media"), branchId)
+                branchMedia = resources
                 val row = BubbleRowLocator.locateUserRow(messages, index, chatRepository.loadMessages(sid)).row
                     ?: throw IllegalStateException("Message is not persisted")
                 val copyContext = kotlinx.coroutines.currentCoroutineContext()
-                branchMedia.copyWorkspace(sid) { copyContext.ensureActive() }
+                resources.copyWorkspace(sid) { copyContext.ensureActive() }
                 val attached = (message.imageUris + message.attachmentUris).mapIndexed { index, uri ->
                     val name = message.attachmentNames.getOrNull(index) ?: uri.lastPathSegment ?: "attachment"
-                    branchMedia.directory.mkdirs()
-                    val stored = java.io.File(branchMedia.directory, UUID.randomUUID().toString() + "." + name.substringAfterLast('.', "bin").takeIf { it.all(Char::isLetterOrDigit) }.orEmpty())
+                    resources.directory.mkdirs()
+                    val stored = java.io.File(resources.directory, UUID.randomUUID().toString() + "." + name.substringAfterLast('.', "bin").takeIf { it.all(Char::isLetterOrDigit) }.orEmpty())
                     context.contentResolver.openInputStream(uri)?.use { input -> stored.outputStream().use { input.copyTo(it) } }
                         ?: throw java.io.IOException("Attachment is no longer readable")
                     DraftAttachment(UUID.randomUUID().toString(), name, android.net.Uri.fromFile(stored).toString(),
@@ -6966,22 +6985,25 @@ class ChatViewModel(
                 val text = message.content.replace(Regex("<user-attached-files>[\\s\\S]*?</user-attached-files>"), "").trim()
                 composerDraftStore.save(branchId, ComposerDraft(text, attached))
                 chatRepository.dao.createEditBranch(sid, row.id, branchId,
-                    context.getString(com.openminis.app.R.string.daily_branch_title, _sessionTitle.value), branchMedia::rewrite)
+                    context.getString(com.openminis.app.R.string.daily_branch_title, _sessionTitle.value), resources::rewrite)
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
                 if (chatRepository.dao.getSession(branchId) == null) {
                     composerDraftStore.save(branchId, ComposerDraft("", emptyList()))
-                    branchMedia.cleanup()
+                    branchMedia?.cleanup()
                 }
             }
             throw e
         } catch (e: Exception) {
             composerDraftStore.save(branchId, ComposerDraft("", emptyList()))
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { branchMedia.cleanup() }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { branchMedia?.cleanup() }
             _error.value = context.getString(com.openminis.app.R.string.daily_branch_failed)
             null
-        } finally { creatingEditBranch = false }
+        } finally {
+            storageLease.close()
+            creatingEditBranch = false
+        }
     }
 
     fun editMessage(messageId: String): String? {
@@ -8915,6 +8937,20 @@ class ChatViewModel(
         prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
         allowQueueInsertion: Boolean = true,
         loopDetector: ToolLoopDetector = toolLoopDetector,
+    ) = SessionStorageMaintenanceGate.shared.withSessionActivity(setOf(activeSessionId, fsSessionId)) {
+        runAgentLoopWithReservedStorage(provider, systemPrompt, fallbackProviders, fallbackStrategy,
+            runIds, prefill, allowQueueInsertion, loopDetector)
+    }
+
+    private suspend fun runAgentLoopWithReservedStorage(
+        provider: LLMProvider,
+        systemPrompt: String?,
+        fallbackProviders: List<FallbackCandidate>,
+        fallbackStrategy: com.openminis.app.data.model.FallbackStrategy,
+        runIds: MutableSet<String>,
+        prefill: List<com.openminis.app.scheduled.PrefilledToolCall>,
+        allowQueueInsertion: Boolean,
+        loopDetector: ToolLoopDetector,
     ) {
         AppLogger.info(TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
         val capturedBudgetLimit = helperConfig?.maxTurns ?: TaskBudgetPrefs.limit(context)
@@ -9081,6 +9117,7 @@ class ChatViewModel(
         // we surface a real error instead of a silent blank bubble. Mirrors iOS
         // AIChatViewModel.didInjectEmptyToolReminderThisRun.
         var didInjectEmptyToolReminder = false
+        var misplacedToolRetries = 0
         var didRecoverContextOverflow = false
         // [T-android-readaloud-stop-stale] One-shot per REPLY (not per turn):
         // the first text delta stops any Read Aloud still playing from the
@@ -9252,7 +9289,7 @@ class ChatViewModel(
             val pressurePolicy = currentContextPolicy(currentProvider.model)?.first ?: ContextPolicy.forContextWindow(contextWindow)
             if (pressurePolicy.shouldOffload(estimatedInputTokens)) {
                 val trimmed = trimOldReasoning(agentHistory, estimatedInputTokens - pressurePolicy.offloadTarget,
-                    BPETokenizer::countTokens)
+                    visibleHistory = outgoingMessages, countTokens = BPETokenizer::countTokens)
                 if (trimmed != agentHistory) {
                     agentHistory.clear()
                     agentHistory.addAll(trimmed)
@@ -9294,6 +9331,24 @@ class ChatViewModel(
                 tools = outgoingTools,
                 model = currentProvider.model,
             )
+
+            if (pressurePolicy.shouldOffload(estimatedInputTokens)) {
+                val collapsed = offloadOldToolSteps(
+                    agentHistory, estimatedInputTokens - pressurePolicy.offloadTarget,
+                    countTokens = { estimateBudgetTokens(listOf(it), null, emptyList(), currentProvider.model) },
+                    write = { snapshot ->
+                        ContextOffload.offloadContent(context, fsSessionId, snapshot, "step_${UUID.randomUUID()}", "history_step")
+                            .takeIf { it.isNotBlank() }
+                    },
+                    visibleHistory = outgoingMessages,
+                )
+                if (collapsed != agentHistory) {
+                    agentHistory.clear()
+                    agentHistory.addAll(collapsed)
+                    outgoingMessages = rebuildOutgoingHistory()
+                    estimatedInputTokens = estimateBudgetTokens(outgoingMessages, systemPrompt, outgoingTools, currentProvider.model)
+                }
+            }
 
             // [T-android-auto-compact-inloop] In-loop context guard (iOS
             // f70ac173). checkContextBeforeSend only runs at the SEND entry
@@ -10359,6 +10414,32 @@ class ChatViewModel(
                     break
                 }
 
+                when (MisplacedToolRecovery.action(
+                    isDeepSeek = currentProvider is com.openminis.app.provider.deepseek.DeepSeekProvider || MisplacedToolRecovery.isDeepSeekModel(currentProvider.model.id),
+                    reasoning = turnReasoningContent,
+                    availableTools = outgoingTools.map { it.name }.toSet(),
+                    hasToolCalls = false, finishReason = turnFinishReason, retries = misplacedToolRetries,
+                )) {
+                    MisplacedToolRecovery.Action.RETRY -> {
+                        misplacedToolRetries++
+                        AppLogger.warning(TAG_STREAM, "DeepSeek call appeared only in thinking; requesting a formal call (attempt=$misplacedToolRetries)")
+                        val retried = MisplacedToolRecovery.retryHistory(agentHistory)
+                        agentHistory.clear()
+                        agentHistory.addAll(retried)
+                        continue
+                    }
+                    MisplacedToolRecovery.Action.RESUME -> {
+                        val hint = context.getString(R.string.error_tool_in_thinking_resume)
+                        persistRunError(assistantId, hint)
+                        markLiveInterruption()
+                        _canResume.value = true
+                        finishRuns(runIds, ChatRunStatus.Error, hint)
+                        loopExitedNormally = true
+                        break
+                    }
+                    MisplacedToolRecovery.Action.NONE -> Unit
+                }
+
                 // [T-android-silent-stream-drop] A turn's stopReason comes ONLY
                 // from the SSE terminal event, which always carries a concrete
                 // reason. A null therefore means the stream closed WITHOUT one —
@@ -11017,14 +11098,21 @@ class ChatViewModel(
 
         return when (name) {
             com.openminis.app.agent.jobs.UserQuestionTool.NAME,
-            com.openminis.app.agent.jobs.UserQuestionTool.ALIAS -> {
+            com.openminis.app.agent.jobs.UserQuestionTool.ALIAS,
+            com.openminis.app.agent.jobs.UserQuestionTool.LEGACY_ALIAS -> {
                 if (isHelper || runStates.value.values.any { !it.status.isTerminal && it.runId in programmaticRunIds }) {
                     ToolExecutionResult("Error: User input is unavailable in an unattended or sub-agent run. Return the missing information to the caller.", false)
                 } else {
                     val request = try { com.openminis.app.agent.jobs.UserQuestionTool.parse(toolId, argsJson) }
                     catch (e: Exception) { return ToolExecutionResult("Error: ${e.message}", false) }
-                    val answers = userQuestions.ask(request)
-                    ToolExecutionResult(JSONObject().put("answers", JSONObject(answers)).toString(), true, toolTitle = toolTitle)
+                    try {
+                        val answers = userQuestions.ask(request)
+                        ToolExecutionResult(JSONObject().put("answers", JSONObject(answers)).toString(), true, toolTitle = toolTitle)
+                    } catch (e: com.openminis.app.agent.jobs.UserQuestionExpiredException) {
+                        ToolExecutionResult("Error: ${e.message}", false, timedOut = true, toolTitle = toolTitle)
+                    } catch (e: com.openminis.app.agent.jobs.UserQuestionDismissedException) {
+                        ToolExecutionResult("Error: ${e.message}", false, toolTitle = toolTitle)
+                    }
                 }
             }
             com.openminis.app.tools.SessionMessageTool.NAME ->
@@ -13307,6 +13395,13 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      * AIChatViewModel.swift L1552-1645).
      */
     private fun prepareUserAttachments(
+        attachments: List<InputAttachment>,
+        sessionId: String,
+    ): PreparedAttachments = SessionStorageMaintenanceGate.shared.withSynchronousActivity(setOf(sessionId)) {
+        prepareUserAttachmentsWithReservedStorage(attachments, sessionId)
+    }
+
+    private fun prepareUserAttachmentsWithReservedStorage(
         attachments: List<InputAttachment>,
         sessionId: String,
     ): PreparedAttachments {

@@ -183,6 +183,7 @@ class AgentForegroundService : Service() {
     // foreground (the user saw the reply in-app).
     private var hasCompletionPending = false
     private var wasBusy = false
+    private var questionNotifications: UserQuestionNotifications? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -205,6 +206,7 @@ class AgentForegroundService : Service() {
         startTimeMs = SystemClock.elapsedRealtime()
         acquireWakeLock()
         startOverlayObserver()
+        startQuestionObserver()
         Log.d(TAG, "Service created")
     }
 
@@ -410,6 +412,8 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         releaseWakeLock()
+        questionNotifications?.clear()
+        questionNotifications = null
         try {
             overlayController?.hide()
         } catch (_: Throwable) {}
@@ -417,6 +421,22 @@ class AgentForegroundService : Service() {
         overlayScope.cancel()
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
+    }
+
+    private fun startQuestionObserver() {
+        val app = (applicationContext as? MinisApp)?.takeIf { it.subsystemsReady() } ?: return
+        questionNotifications = UserQuestionNotifications(this)
+        overlayScope.launch {
+            combine(com.openminis.app.agent.jobs.UserQuestionRegistry.pending, app.isAppForegroundFlow) { pending, foreground ->
+                pending to foreground
+            }.collect { (pending, foreground) ->
+                questionNotifications?.update(pending, foreground)
+                if (SessionActivityTracker.shouldRunServiceNow()) {
+                    refreshOngoingNotification()
+                    ensureChipTicker()
+                }
+            }
+        }
     }
 
     /**
@@ -898,6 +918,7 @@ class AgentForegroundService : Service() {
 
     private fun isPromotedChipActive(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return false
+        if (SessionActivityTracker.activeSessions.value.isEmpty()) return false
         val minisApp = (applicationContext as? MinisApp)?.takeIf { it.subsystemsReady() }
         val userEnabled = minisApp?.backgroundSettingsRepository?.dynamicIslandEnabled?.value == true
         return DynamicIslandSupport.isDynamicIslandActive(this, userEnabled)
@@ -1081,8 +1102,16 @@ class AgentForegroundService : Service() {
         // the task ended rather than continuing to tick.
         val finishedWallMs = elapsedRealtimeToWallClock(endMs, nowElapsedMs, nowWallMs)
 
+        val waitingEntry = com.openminis.app.agent.jobs.UserQuestionRegistry.pending.value.entries
+            .filter { it.key in SessionActivityTracker.activeSessions.value }
+            .minByOrNull { it.value.expiresAtElapsedMs }
+        val waitingQuestion = waitingEntry?.value
         val mainIntent = Intent(this, Class.forName("com.openminis.app.MainActivity")).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            (waitingEntry?.key ?: SessionActivityTracker.currentSessionId.value)?.let {
+                action = Intent.ACTION_VIEW
+                data = android.net.Uri.Builder().scheme("minis").authority("session").appendPath(it).build()
+            }
         }
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -1101,8 +1130,9 @@ class AgentForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val visibleSessionCount = maxOf(1, sessionCount, SessionActivityTracker.presentSessions.value.size)
         val sessionLabel = resources.getQuantityString(
-            R.plurals.bg_service_sessions, sessionCount, sessionCount,
+            R.plurals.bg_service_sessions, visibleSessionCount, visibleSessionCount,
         )
 
         // T-bg-overlay phase 1: enrich the ongoing notification.
@@ -1130,20 +1160,28 @@ class AgentForegroundService : Service() {
             toolName = toolName,
             isThinking = SessionActivityTracker.isThinking.value,
             hasActiveSessions = hasActiveSessions,
+            isWaitingForAnswer = waitingQuestion != null,
+            hasQueuedWork = SessionActivityTracker.pendingWork.value.isNotEmpty(),
         )
         val smallIcon = notificationSmallIconFor(phase, toolName, com.openminis.app.data.repository.AppIconRepository.current(this).notificationRes)
         val soulName = SoulStore.cachedMetadata.value.name.ifBlank { SoulMetadata.DEFAULT.name }
         val titleText = when (phase) {
             AgentPhase.COMPLETED -> getString(R.string.bg_service_notification_title_completed)
+            AgentPhase.WAITING -> getString(R.string.bg_service_notification_waiting_title)
             AgentPhase.TOOL -> toolRowTitle(toolName!!, toolTitle)
             AgentPhase.THINKING, AgentPhase.GENERATING -> soulName
-            AgentPhase.IDLE -> getString(R.string.bg_service_notification_title)
+            AgentPhase.QUEUED -> getString(R.string.bg_service_notification_queued_title)
+            AgentPhase.IDLE -> getString(R.string.app_name)
         }
         val collapsedText = when (phase) {
             // Completed is a RESTING state: the chronometer is off, so the
             // total run time has to stay in the text or it would vanish.
             AgentPhase.COMPLETED ->
                 getString(R.string.bg_service_notification_text_completed, sessionLabel, timeString)
+            AgentPhase.WAITING -> getString(
+                R.string.bg_service_notification_waiting_text, sessionLabel,
+                waitingQuestion!!.currentIndex + 1, waitingQuestion.questions.size,
+            )
             // [T-android-notification-chronometer] No baked-in time while
             // running — the system Chronometer (compat branch) or the ticked
             // shortCriticalText (promoted branch) renders the clock.
@@ -1162,7 +1200,8 @@ class AgentForegroundService : Service() {
                 sessionLabel,
                 getString(R.string.overlay_streaming),
             )
-            AgentPhase.IDLE -> getString(R.string.bg_service_notification_text_running, sessionLabel, toolStatus)
+            AgentPhase.QUEUED -> getString(R.string.bg_service_notification_queued_text)
+            AgentPhase.IDLE -> getString(if (SessionActivityTracker.presentSessions.value.isNotEmpty()) R.string.notif_in_session else R.string.bg_service_notification_idle_text)
         }
 
         // [T-android-live-update-chip] Short critical text — the ≤7-char
@@ -1175,7 +1214,9 @@ class AgentForegroundService : Service() {
         // user recorded. With the timer always present the chip is
         // [tool glyph][m:ss] on every skin — the same compact shape as the
         // iOS Dynamic Island and the system screen-recorder chip.
-        val shortCritical = chipTimerText(elapsedMs)
+        val waitingMs = waitingQuestion?.remainingMs(nowElapsedMs)
+        val countdownWallMs = nowWallMs + (waitingMs ?: 0L)
+        val shortCritical = chipTimerText(waitingMs ?: elapsedMs)
 
         // [T-android-dynamic-island] Tier 3: Android 16 (Baklava) Live Updates.
         // When the device is capable AND the user enabled the toggle, build the
@@ -1201,7 +1242,7 @@ class AgentForegroundService : Service() {
             this,
             dynamicIslandUserEnabled,
         )
-        if (dynamicIslandOn && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+        if (dynamicIslandOn && shouldPromoteAgentNotification(phase, SessionActivityTracker.overlayCompletionPending.value) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
             return buildPromotedNotification(
                 titleText = titleText,
                 collapsedText = collapsedText,
@@ -1209,6 +1250,8 @@ class AgentForegroundService : Service() {
                 smallIcon = smallIcon,
                 isToolRunning = isToolRunning,
                 isCompleted = isCompleted,
+                isWaiting = phase == AgentPhase.WAITING,
+                countdownWallMs = countdownWallMs,
                 runStartWallMs = runStartWallMs,
                 finishedWallMs = finishedWallMs,
                 contentIntent = pendingIntent,
@@ -1228,9 +1271,10 @@ class AgentForegroundService : Service() {
             // be rate-limited as a notification flood and cost wakeups.
             // Completed freezes at the finish instant (chronometer off, `when`
             // pinned there); running counts up from the run's start.
-            .setShowWhen(true)
-            .setWhen(if (isCompleted) finishedWallMs else runStartWallMs)
-            .setUsesChronometer(!isCompleted)
+            .setShowWhen(notificationShowsTimer(phase))
+            .setWhen(if (phase == AgentPhase.WAITING) countdownWallMs else if (isCompleted) finishedWallMs else runStartWallMs)
+            .setUsesChronometer(notificationShowsTimer(phase) && !isCompleted)
+            .setChronometerCountDown(phase == AgentPhase.WAITING)
             .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -1238,7 +1282,7 @@ class AgentForegroundService : Service() {
 
         // [T-android-live-update-completed] Same rule as the promoted branch:
         // no Stop once there is nothing left to stop.
-        if (!isCompleted) {
+        if (hasActiveSessions) {
             builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 getString(R.string.bg_service_stop_action),
@@ -1246,7 +1290,7 @@ class AgentForegroundService : Service() {
             )
         }
 
-        if (isToolRunning) {
+        if (isToolRunning && hasActiveSessions && phase != AgentPhase.WAITING) {
             // Tools rarely report determinate progress (shell/browser/a11y
             // are open-ended). Always indeterminate while a tool is in
             // flight; explicitly drop progress when not, so the bar
@@ -1275,6 +1319,8 @@ class AgentForegroundService : Service() {
         smallIcon: Int,
         isToolRunning: Boolean,
         isCompleted: Boolean,
+        isWaiting: Boolean,
+        countdownWallMs: Long,
         runStartWallMs: Long,
         finishedWallMs: Long,
         contentIntent: PendingIntent,
@@ -1304,7 +1350,7 @@ class AgentForegroundService : Service() {
             .addProgressSegment(Notification.ProgressStyle.Segment(100))
             .setStyledByProgress(false)
             .setProgressTrackerIcon(null)
-            .setProgressIndeterminate(isToolRunning && !isCompleted)
+            .setProgressIndeterminate(isToolRunning && !isCompleted && !isWaiting)
             .setProgress(if (isCompleted) 100 else 0)
 
         val builder = Notification.Builder(this, CHANNEL_ID)
@@ -1317,8 +1363,9 @@ class AgentForegroundService : Service() {
             // branch — the promoted chip is precisely where a frozen clock was
             // most visible, since it stays on screen for the whole run.
             .setShowWhen(true)
-            .setWhen(if (isCompleted) finishedWallMs else runStartWallMs)
+            .setWhen(if (isWaiting) countdownWallMs else if (isCompleted) finishedWallMs else runStartWallMs)
             .setUsesChronometer(!isCompleted)
+            .setChronometerCountDown(isWaiting)
             .setOnlyAlertOnce(true)
             .setContentIntent(contentIntent)
             // Explicitly NOT colorized and NOT a group summary — both would

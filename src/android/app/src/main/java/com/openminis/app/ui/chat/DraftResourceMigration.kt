@@ -3,16 +3,22 @@ package com.openminis.app.ui.chat
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
+import com.openminis.app.data.storage.SessionStorageReferences
 
 /** Move resources without deleting a source that has not reached its destination. */
 internal object DraftResourceMigration {
-    fun migrate(source: File, destination: File): Boolean {
+    fun migrate(source: File, destination: File): Boolean = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
+        SessionStorageReferences.idsForFiles(source, destination),
+    ) { migrateReserved(source, destination) }
+
+    private fun migrateReserved(source: File, destination: File): Boolean {
         if (!source.exists()) return true
         if (!source.isDirectory || (!destination.isDirectory && !destination.mkdirs())) return false
         var complete = true
         for (name in listOf("attachments", "offloads", "workspace", "browser")) {
             val child = File(source, name)
-            if (child.exists() && !move(child, File(destination, name))) complete = false
+            if (child.exists() && !moveReserved(child, File(destination, name))) complete = false
         }
         // An unknown or unreadable entry must survive too. Never recursively
         // delete the draft merely because the known subdirectories were visited.
@@ -20,7 +26,11 @@ internal object DraftResourceMigration {
         return complete && !source.exists()
     }
 
-    fun move(source: File, destination: File): Boolean = runCatching {
+    fun move(source: File, destination: File): Boolean = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
+        SessionStorageReferences.idsForFiles(source, destination),
+    ) { moveReserved(source, destination) }
+
+    private fun moveReserved(source: File, destination: File): Boolean = runCatching {
         if (!source.exists()) return@runCatching true
         val parent = destination.parentFile ?: return@runCatching false
         if (!parent.isDirectory && !parent.mkdirs()) return@runCatching false
@@ -29,7 +39,7 @@ internal object DraftResourceMigration {
             if (!destination.isDirectory && !destination.mkdirs()) return@runCatching false
             val children = source.listFiles() ?: return@runCatching false
             var complete = true
-            children.forEach { if (!move(it, File(destination, it.name))) complete = false }
+            children.forEach { if (!moveReserved(it, File(destination, it.name))) complete = false }
             complete && source.delete()
         } else {
             if (destination.exists()) {

@@ -12,6 +12,31 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionConcurrencyManagerTest {
+    @Test fun sixConversationsRunAndTheSeventhWaitsUntilOneFinishes() = runTest {
+        val holders = (0 until 6).map { "six-conversations-$it" }
+        var admitted = false
+        val seventh = launch {
+            SessionConcurrencyManager.acquireSlot("seventh-conversation")
+            try { admitted = true } finally { SessionConcurrencyManager.releaseSlot("seventh-conversation") }
+        }
+        // Start the holders before dispatching the queued coroutine.
+        try {
+            holders.forEach { SessionConcurrencyManager.acquireSlot(it) }
+            runCurrent()
+            assertEquals(holders.toSet(), SessionConcurrencyManager.runningSessions.value)
+            assertFalse(admitted)
+            assertEquals(listOf("seventh-conversation"), SessionConcurrencyManager.suspendedSessions.value)
+            SessionConcurrencyManager.releaseSlot(holders.first())
+            runCurrent()
+            seventh.join()
+            assertTrue(admitted)
+        } finally {
+            seventh.cancel()
+            holders.forEach(SessionConcurrencyManager::releaseSlot)
+            SessionConcurrencyManager.releaseSlot("seventh-conversation")
+        }
+    }
+
     @Test fun cancelledHandoffReturnsTheSlotBeforeTheWaiterRuns() = runTest {
         val holders = (0 until SessionConcurrencyManager.MAX_CONCURRENT).map { "handoff-$it" }
         try {

@@ -77,6 +77,8 @@ import com.openminis.app.ui.components.MinisSmallOutlinedButton
 import com.openminis.app.ui.components.MinisSmallTextButton
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.ui.components.SectionTextField
+import com.openminis.app.ui.components.openExternalUrl
+import com.openminis.app.provider.usage.officialProviderConsole
 
 private const val TAG = "ProviderDetail"
 
@@ -227,6 +229,10 @@ fun ProviderDetailScreen(
                             keyVisible = false
                         },
                     )
+                }
+                if (instance.providerType == ProviderType.kimiCode && !isOAuthProvider) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                    KimiSubscriptionUsageBlock(instance.id, storedKey)
                 }
             }
         }
@@ -531,6 +537,17 @@ fun ProviderDetailScreen(
                 },
                 showDivider = false,
             )
+        }
+
+        officialProviderConsole(instance.customBaseURL)?.let { consoleURL ->
+            SettingsSection(header = null) {
+                SettingsRow(
+                    title = stringResource(R.string.provider_official_console),
+                    subtitle = consoleURL,
+                    onClick = { openExternalUrl(exportContext, consoleURL) },
+                    showDivider = false,
+                )
+            }
         }
 
         // ─── Voice Service (dual visibility) ────────────────────────
@@ -1139,6 +1156,10 @@ private fun OAuthCredentialBlock(
             Text(stringResource(R.string.provider_detail_sign_in))
         }
         OAuthProgressLine(isAuthenticating = isAuthenticating, phase = oauthPhase, error = authError)
+    }
+    if (instance.providerType == ProviderType.kimiCode) {
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        KimiSubscriptionUsageBlock(instance.id, displayedKey)
     }
 }
 

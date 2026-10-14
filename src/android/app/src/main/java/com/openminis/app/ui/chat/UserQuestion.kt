@@ -4,7 +4,23 @@ package com.openminis.app.ui.chat
 data class PendingUserQuestion(
     val id: String,
     val questions: List<UserQuestionPrompt>,
-)
+    val title: String = "",
+    val timeoutMs: Long = 300_000L,
+    val instanceId: String = "",
+    val expiresAtElapsedMs: Long = 0L,
+    val answers: Map<String, String> = emptyMap(),
+    val selections: Map<String, UserQuestionSelection> = emptyMap(),
+    val freeTextDrafts: Map<String, String> = emptyMap(),
+) {
+    val currentIndex: Int get() = questions.indexOfFirst { it.id !in answers }
+    val currentQuestion: UserQuestionPrompt? get() = questions.getOrNull(currentIndex)
+
+    fun remainingMs(nowElapsedMs: Long): Long = (expiresAtElapsedMs - nowElapsedMs).coerceAtLeast(0L)
+}
+
+enum class UserQuestionKind { CHOICE, TEXT, CONFIRMATION }
+
+data class UserQuestionSelection(val value: String, val isOther: Boolean = false)
 
 data class UserQuestionPrompt(
     val id: String,
@@ -12,6 +28,7 @@ data class UserQuestionPrompt(
     val header: String = "",
     val options: List<UserQuestionOption> = emptyList(),
     val allowOther: Boolean = true,
+    val kind: UserQuestionKind = if (options.isEmpty()) UserQuestionKind.TEXT else UserQuestionKind.CHOICE,
 )
 
 data class UserQuestionOption(val label: String, val description: String = "")

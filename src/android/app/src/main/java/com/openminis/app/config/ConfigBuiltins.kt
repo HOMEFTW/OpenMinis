@@ -385,6 +385,16 @@ internal object ConfigBuiltins {
                 defaultValue = true,
             )
         )
+        r.register(
+            PrefsBoolField(
+                path = "chat.confirmBeforeStopping",
+                displayName = "Confirm before stopping",
+                description = "Ask before stopping a running task or subagent.",
+                prefs = appearancePrefs,
+                key = com.openminis.app.ui.settings.KEY_CONFIRM_BEFORE_STOPPING,
+                defaultValue = true,
+            )
+        )
         // [T-keyboard-auto-pop default flip] On by default — iOS gates
         // the existing post-stream auto-focus behind this. Android
         // currently does not auto-focus on stream end (it only

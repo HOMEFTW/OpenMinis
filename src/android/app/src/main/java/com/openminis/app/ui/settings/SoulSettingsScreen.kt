@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,6 +56,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -736,12 +738,14 @@ private fun LangPicker(lang: String, onLangChange: (String) -> Unit) {
                     MinisButton(
                         onClick = { onLangChange(key) },
                         modifier = Modifier.weight(1f),
-                    ) { Text(label) }
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                    ) { Text(label, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 } else {
                     MinisOutlinedButton(
                         onClick = { onLangChange(key) },
                         modifier = Modifier.weight(1f),
-                    ) { Text(label) }
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                    ) { Text(label, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 }
             }
         }

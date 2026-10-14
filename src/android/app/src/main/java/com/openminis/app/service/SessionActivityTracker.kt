@@ -439,6 +439,7 @@ object SessionActivityTracker {
      * user who never enabled the overlay keeps the old teardown timing exactly.
      */
     private val _overlayCompletionPending = MutableStateFlow(false)
+    val overlayCompletionPending: StateFlow<Boolean> = _overlayCompletionPending.asStateFlow()
 
     @Synchronized
     fun setOverlayCompletionPending(pending: Boolean) {

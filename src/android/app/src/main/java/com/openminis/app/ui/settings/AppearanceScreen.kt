@@ -45,6 +45,7 @@ import androidx.compose.material.icons.outlined.Launch
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.ScreenLockPortrait
+import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
@@ -101,6 +102,7 @@ const val KEY_SHOW_CHAT_TITLE = "appearance.show_chat_title"  // Boolean, defaul
 // `@AppStorage("chat.autoExpandThinking")` so future config sync reads the same
 // value. Read at block-mount time in ThinkingBlock.
 const val KEY_AUTO_EXPAND_THINKING = "chat.autoExpandThinking"  // Boolean, default true
+const val KEY_CONFIRM_BEFORE_STOPPING = "chat.confirmBeforeStopping"  // Boolean, default true
 // [T-android-auto-grouping] When a chat's title is first generated, also file
 // it into a matching EXISTING group. Rides the title-generation call — no
 // second round-trip. Key name matches iOS `autoGroupingEnabled` so a future
@@ -144,6 +146,9 @@ fun showChatTitleEnabled(context: Context): Boolean =
  *  user taps it. */
 fun autoExpandThinkingEnabled(context: Context): Boolean =
     getAppearancePrefs(context).getBoolean(KEY_AUTO_EXPAND_THINKING, true)
+
+fun confirmBeforeStoppingEnabled(context: Context): Boolean =
+    getAppearancePrefs(context).getBoolean(KEY_CONFIRM_BEFORE_STOPPING, true)
 
 /** Font scale levels matching iOS: XS(-2) Small(-1) Default(0) Medium(1) Large(2) XL(3) */
 /**
@@ -261,6 +266,7 @@ fun AppearanceScreen(
     var returnKeyBehavior by remember { mutableIntStateOf(prefs.getInt(KEY_RETURN_KEY_BEHAVIOR, 0)) }
     var keepScreenAwake by remember { mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_AWAKE, false)) }
     var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
+    var confirmBeforeStopping by remember { mutableStateOf(prefs.getBoolean(KEY_CONFIRM_BEFORE_STOPPING, true)) }
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
@@ -412,6 +418,23 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     keepScreenAwake = it
                     prefs.edit().putBoolean(KEY_KEEP_SCREEN_AWAKE, it).apply()
+                },
+                showDivider = false,
+            )
+        }
+
+        SettingsSection(
+            header = stringResource(R.string.appearance_confirm_stop_title),
+            footer = stringResource(R.string.appearance_confirm_stop_footer),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.Outlined.StopCircle,
+                iconColor = tileOrange,
+                title = stringResource(R.string.appearance_confirm_stop_title),
+                checked = confirmBeforeStopping,
+                onCheckedChange = {
+                    confirmBeforeStopping = it
+                    prefs.edit().putBoolean(KEY_CONFIRM_BEFORE_STOPPING, it).apply()
                 },
                 showDivider = false,
             )

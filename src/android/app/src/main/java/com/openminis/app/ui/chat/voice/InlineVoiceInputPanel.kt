@@ -46,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -1164,9 +1168,31 @@ private fun TranscriptArea(
     val bandMax = screenH * 0.6f - ExpandedBase
     if (isEditing) {
         val focus = remember { FocusRequester() }
+        var editValue by remember { mutableStateOf(TextFieldValue(transcript, TextRange(transcript.length))) }
+        var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+        LaunchedEffect(transcript) {
+            if (editValue.text != transcript) {
+                editValue = TextFieldValue(transcript, TextRange(transcript.length))
+            }
+        }
+        val selectWord by rememberUpdatedState<(androidx.compose.ui.geometry.Offset) -> Unit> { position ->
+            val layout = textLayout
+            if (layout != null && layout.layoutInput.text.text == editValue.text) {
+                editValue = selectTranscriptWord(editValue, layout.getOffsetForPosition(position), layout::getWordBoundary)
+            }
+        }
+        val context = LocalContext.current
+        val doubleTapSlop = remember(context) {
+            android.view.ViewConfiguration.get(context).scaledDoubleTapSlop.toFloat()
+        }
         BasicTextField(
-            value = transcript,
-            onValueChange = onTranscriptChange,
+            value = editValue,
+            onValueChange = { value ->
+                val textChanged = value.text != editValue.text
+                editValue = value
+                if (textChanged) onTranscriptChange(value.text)
+            },
+            onTextLayout = { textLayout = it },
             textStyle = TextStyle(
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 16.sp,
@@ -1178,7 +1204,10 @@ private fun TranscriptArea(
                 .heightIn(min = 28.dp, max = bandMax)
                 .padding(horizontal = 32.dp)
                 .verticalScroll(rememberScrollState())
-                .focusRequester(focus),
+                .focusRequester(focus)
+                .pointerInput(doubleTapSlop) {
+                    observeVoiceDoubleTaps(doubleTapSlop) { selectWord(it) }
+                },
         )
         LaunchedEffect(Unit) { focus.requestFocus() }
     } else {

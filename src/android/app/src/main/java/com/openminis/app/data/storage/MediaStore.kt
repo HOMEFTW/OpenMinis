@@ -9,16 +9,17 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
-class MediaStore(context: Context) {
+class MediaStore internal constructor(filesDir: File) {
+    constructor(context: Context) : this(context.filesDir)
 
-    val mediaBaseDir: File = File(context.filesDir, "media")
+    val mediaBaseDir: File = File(filesDir, "media")
 
     fun saveMedia(
         data: ByteArray,
         mimeType: String,
         sessionId: String,
         originalFileName: String? = null,
-    ): MediaRef {
+    ): MediaRef = SessionStorageMaintenanceGate.shared.withSynchronousActivity(setOf(sessionId)) {
         val id = UUID.randomUUID().toString()
         val dateDir = SimpleDateFormat("yyyy/MM/dd", Locale.US).format(Date())
         val originalExt = originalFileName
@@ -30,7 +31,7 @@ class MediaStore(context: Context) {
         val file = File(mediaBaseDir, relativePath)
         file.parentFile?.mkdirs()
         file.writeBytes(data)
-        return MediaRef(
+        MediaRef(
             id = id,
             relativePath = relativePath,
             mimeType = mimeType,
@@ -54,27 +55,36 @@ class MediaStore(context: Context) {
         sessionId: String,
         originalFileName: String? = null,
     ): MediaRef? {
-        val id = UUID.randomUUID().toString()
-        val dateDir = SimpleDateFormat("yyyy/MM/dd", Locale.US).format(Date())
-        val originalExt = originalFileName
-            ?.substringAfterLast('.', "")
-            ?.takeIf { it.length in 1..10 && it.all { c -> c.isLetterOrDigit() } }
-            ?.lowercase()
-        val ext = originalExt ?: extensionFor(mimeType)
-        val relativePath = "$dateDir/$sessionId/$id.$ext"
-        val file = File(mediaBaseDir, relativePath)
-        file.parentFile?.mkdirs()
-        return try {
-            file.outputStream().use { out -> source.copyTo(out) }
-            MediaRef(
-                id = id,
-                relativePath = relativePath,
-                mimeType = mimeType,
-                originalFileName = originalFileName,
-            )
-        } catch (t: Throwable) {
-            runCatching { file.delete() }
-            null
+        val reservation = try {
+            SessionStorageMaintenanceGate.shared.reserve(setOf(sessionId))
+        } catch (_: StorageMaintenanceBusyException) {
+            return null
+        }
+        try {
+            val id = UUID.randomUUID().toString()
+            val dateDir = SimpleDateFormat("yyyy/MM/dd", Locale.US).format(Date())
+            val originalExt = originalFileName
+                ?.substringAfterLast('.', "")
+                ?.takeIf { it.length in 1..10 && it.all { c -> c.isLetterOrDigit() } }
+                ?.lowercase()
+            val ext = originalExt ?: extensionFor(mimeType)
+            val relativePath = "$dateDir/$sessionId/$id.$ext"
+            val file = File(mediaBaseDir, relativePath)
+            file.parentFile?.mkdirs()
+            return try {
+                file.outputStream().use { out -> source.copyTo(out) }
+                MediaRef(
+                    id = id,
+                    relativePath = relativePath,
+                    mimeType = mimeType,
+                    originalFileName = originalFileName,
+                )
+            } catch (t: Throwable) {
+                runCatching { file.delete() }
+                null
+            }
+        } finally {
+            reservation.close()
         }
     }
 
@@ -83,7 +93,7 @@ class MediaStore(context: Context) {
         return if (file.exists()) file.readBytes() else null
     }
 
-    fun deleteSessionMedia(sessionId: String) {
+    fun deleteSessionMedia(sessionId: String) = SessionStorageMaintenanceGate.shared.withSynchronousActivity(setOf(sessionId)) {
         mediaBaseDir.walkTopDown().forEach { dir ->
             if (dir.isDirectory && dir.name == sessionId) {
                 dir.deleteRecursively()

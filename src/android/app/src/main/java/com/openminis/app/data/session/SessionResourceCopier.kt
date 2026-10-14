@@ -1,6 +1,8 @@
 package com.openminis.app.data.session
 
 import com.openminis.app.data.storage.MediaReferences
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
+import com.openminis.app.data.storage.SessionStorageReferences
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -14,19 +16,30 @@ class SessionResourceCopier(private val filesDir: File, private val targetSessio
 
     init { storage.sessionDir(targetSessionId) }
 
-    fun rewrite(parts: String): String = MediaReferences.rewrite(parts, ::copyMedia)
+    fun rewrite(parts: String): String = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
+        setOf(targetSessionId) + SessionStorageReferences.idsForWrite(parts),
+    ) { MediaReferences.rewrite(parts, ::copyMedia) }
 
-    private fun copyMedia(path: String): String = copies.getOrPut(path) {
+    private fun copyMedia(path: String): String = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
+        setOf(targetSessionId, SessionStorageReferences.mediaOwner(path) ?: SessionStorageReferences.ALL_MEDIA),
+    ) {
+        copies.getOrPut(path) {
             val source = MediaReferences.file(storage.mediaRoot, path)
             require(source.isFile) { "Referenced media is missing: $path" }
             if (!mediaDirectory.isDirectory && !mediaDirectory.mkdirs()) throw IOException("Cannot create media directory")
             val target = File(mediaDirectory, UUID.randomUUID().toString() + "." + source.extension.ifBlank { "bin" })
             source.copyTo(target)
             target.relativeTo(storage.mediaRoot.canonicalFile).invariantSeparatorsPath
+        }
     }
 
     /** Stable Linux paths now resolve through the target session's own mount. */
-    fun copyWorkspace(sourceSessionId: String, checkActive: () -> Unit = {}) {
+    fun copyWorkspace(sourceSessionId: String, checkActive: () -> Unit = {}) =
+        SessionStorageMaintenanceGate.shared.withSynchronousActivity(setOf(sourceSessionId, targetSessionId)) {
+            copyWorkspaceReserved(sourceSessionId, checkActive)
+        }
+
+    private fun copyWorkspaceReserved(sourceSessionId: String, checkActive: () -> Unit) {
         require(sourceSessionId != targetSessionId)
         val sourceRoot = storage.sessionDir(sourceSessionId)
         val targetRoot = storage.sessionDir(targetSessionId)
@@ -65,5 +78,8 @@ class SessionResourceCopier(private val filesDir: File, private val targetSessio
         copy(sourceRoot, targetRoot)
     }
 
-    fun cleanup() { storage.deleteFiles(targetSessionId) }
+    fun cleanup() = SessionStorageMaintenanceGate.shared.withSynchronousActivity(setOf(targetSessionId)) {
+        storage.deleteFiles(targetSessionId)
+        Unit
+    }
 }

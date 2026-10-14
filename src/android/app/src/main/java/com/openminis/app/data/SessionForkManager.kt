@@ -11,6 +11,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import java.io.File
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
+import com.openminis.app.sandbox.SessionWorkspaceRegistry
+import java.io.Closeable
 
 /**
  * Clone a session (or its skill/memory artifacts) into a fresh local session.
@@ -71,7 +74,11 @@ class SessionForkManager(
             title = dupTitle,
         )
         val resources = SessionResourceCopier(filesDir, new.id)
+        var storageActivity: Closeable? = null
         try {
+        storageActivity = SessionStorageMaintenanceGate.shared.acquire(
+            setOf(sessionId, SessionWorkspaceRegistry.owner(sessionId), new.id),
+        )
         val copyContext = coroutineContext
         resources.copyWorkspace(sessionId) { copyContext.ensureActive() }
         // Mirror iOS: carry over the source's category onto the copy so the
@@ -180,6 +187,8 @@ class SessionForkManager(
                 resources.cleanup()
             }
             throw failure
+        } finally {
+            storageActivity?.close()
         }
     }
 

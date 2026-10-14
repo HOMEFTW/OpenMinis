@@ -6,17 +6,24 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
+import com.openminis.app.ui.settings.confirmBeforeStoppingEnabled
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisAlertDialog
 
 @Composable
 internal fun StopChatConfirmation(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    if (!confirmBeforeStoppingEnabled(LocalContext.current)) {
+        LaunchedEffect(Unit) { onConfirm() }
+        return
+    }
     MinisAlertDialog(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.chat_stop_dialog_title),

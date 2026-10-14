@@ -23,14 +23,39 @@ class LongConversationPolicyTest {
         assertEquals(history.drop(3), allOld.drop(3))
     }
 
-    @Test fun currentToolCycleAndLatestFourMessagesKeepReasoning() {
+    @Test fun aSingleLongTaskCanReleaseEarlyReasoningWhileKeepingTheLatestFourMessages() {
         val history = listOf(LLMMessage(LLMMessage.Role.USER, "question")) +
             (0..7).map { LLMMessage(LLMMessage.Role.ASSISTANT, "", reasoningContent = "current") }
-        assertEquals(history, trimOldReasoning(history, 1000) { it.length })
+        val singleTurnTrimmed = trimOldReasoning(history, 1000) { it.length }
+        assertEquals(history.first(), singleTurnTrimmed.first())
+        assertTrue(singleTurnTrimmed.subList(1, 5).all { it.reasoningContent == "" })
+        assertEquals(history.takeLast(4), singleTurnTrimmed.takeLast(4))
         val lastUserAtEnd = history + LLMMessage(LLMMessage.Role.USER, "next")
         val trimmed = trimOldReasoning(lastUserAtEnd, 1000) { it.length }
         assertEquals(lastUserAtEnd.takeLast(4), trimmed.takeLast(4))
         assertEquals(history, trimOldReasoning(history, 0) { it.length })
+    }
+
+    @Test fun signedProviderReplayAndGeminiSignaturesKeepTheirReasoning() {
+        val message = LLMMessage(LLMMessage.Role.ASSISTANT, "", reasoningContent = "signed thought")
+        val signed = listOf(
+            message.copy(deepSeekReplay = "opaque deepseek replay"),
+            message.copy(anthropicReplay = "opaque anthropic replay"),
+            message.copy(contentParts = listOf(AgentContentPart.ToolUse("call", "read", org.json.JSONObject(), thoughtSignature = "gemini signature"))),
+        )
+        val history = signed + List(4) { LLMMessage(LLMMessage.Role.USER, "recent") }
+        assertEquals(history, trimOldReasoning(history, 1000) { it.length })
+    }
+
+    @Test fun reasoningAlreadyOutsideTheSendViewDoesNotConsumeTheReleaseBudget() {
+        val hidden = LLMMessage(LLMMessage.Role.ASSISTANT, "summarized", reasoningContent = "hidden thought", dbMessageId = "hidden")
+        val active = LLMMessage(LLMMessage.Role.ASSISTANT, "active", reasoningContent = "active thought", dbMessageId = "active")
+        val tail = List(4) { LLMMessage(LLMMessage.Role.ASSISTANT, "recent-$it", reasoningContent = "recent thought") }
+        val history = listOf(hidden, active) + tail
+        val trimmed = trimOldReasoning(history, 1, visibleHistory = listOf(active) + tail) { it.length }
+        assertEquals(hidden, trimmed[0])
+        assertEquals("", trimmed[1].reasoningContent)
+        assertEquals(tail, trimmed.takeLast(4))
     }
 
     @Test fun certificateFailureNeverRetriesButConnectionResetCan() {

@@ -2,6 +2,7 @@ package com.openminis.app.sandbox
 
 import android.content.Context
 import android.util.Log
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.Closeable
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -132,7 +134,14 @@ class TerminalSession(private val context: Context) {
         }
 
         scope.launch {
+            var storageLease: Closeable? = null
             try {
+                if (sessionId != null) {
+                    storageLease = SessionStorageMaintenanceGate.shared.acquire(
+                        setOf(sessionId, SessionWorkspaceRegistry.owner(sessionId)),
+                    )
+                }
+                if (!lifecycle.isCurrent(instance)) return@launch
                 PRootKernel.boot(context)
 
                 if (sessionId != null) {
@@ -199,7 +208,11 @@ class TerminalSession(private val context: Context) {
                     PtyBridge.closeFd(fd)
                     if (pid > 0) {
                         PtyBridge.sendSignal(pid, 15)
-                        scope.launch { PtyBridge.waitFor(pid) }
+                        val processLease = storageLease
+                        storageLease = null
+                        scope.launch {
+                            try { PtyBridge.waitFor(pid) } finally { processLease?.close() }
+                        }
                     }
                     return@launch
                 }
@@ -215,36 +228,43 @@ class TerminalSession(private val context: Context) {
                 }
 
                 // Wait for child exit in a sibling coroutine.
+                // stop() only signals the child; keep its files reserved until reaped.
+                val processLease = storageLease
+                storageLease = null
                 scope.launch {
-                    val status = PtyBridge.waitFor(pid)
-                    Log.i(TAG, "Child exited: status=$status")
+                    try {
+                        val status = PtyBridge.waitFor(pid)
+                        Log.i(TAG, "Child exited: status=$status")
 
-                    // [T-android-seccomp-selfheal / GH#186] PtyBridge reports a
-                    // signal death as -(128+signal) (pty_bridge.c:234), so
-                    // negate before consulting the policy. If the interactive
-                    // shell died on an early fatal signal, restart it once with
-                    // PROOT_NO_SECCOMP=1 rather than leaving the user staring
-                    // at a dead terminal they cannot fix from the UI.
-                    val aliveMs = System.currentTimeMillis() - spawnedAt
-                    lifecycle.withCurrent(instance) {
-                        val retry = SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
-                            exitCode = if (status < 0) -status else null,
-                            durationMs = aliveMs,
-                            producedOutput = sawOutput,
-                            alreadyRetried = instanceNoSeccomp,
-                        )
-                        releasePty(signalChild = false)
-                        _state.value = State.STOPPED
-                        if (retry) {
-                            com.openminis.app.logging.AppLogger.warning(
-                                TAG,
-                                SeccompFallbackPolicy.retryLogLine(-status, aliveMs, "interactive terminal"),
+                        // [T-android-seccomp-selfheal / GH#186] PtyBridge reports a
+                        // signal death as -(128+signal) (pty_bridge.c:234), so
+                        // negate before consulting the policy. If the interactive
+                        // shell died on an early fatal signal, restart it once with
+                        // PROOT_NO_SECCOMP=1 rather than leaving the user staring
+                        // at a dead terminal they cannot fix from the UI.
+                        val aliveMs = System.currentTimeMillis() - spawnedAt
+                        lifecycle.withCurrent(instance) {
+                            val retry = SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
+                                exitCode = if (status < 0) -status else null,
+                                durationMs = aliveMs,
+                                producedOutput = sawOutput,
+                                alreadyRetried = instanceNoSeccomp,
                             )
-                            useNoSeccomp = true
-                            start(sessionId, cols, rows)
-                        } else {
-                            _outputBytes.tryEmit("\r\n[Process exited: $status]\r\n".toByteArray())
+                            releasePty(signalChild = false)
+                            _state.value = State.STOPPED
+                            if (retry) {
+                                com.openminis.app.logging.AppLogger.warning(
+                                    TAG,
+                                    SeccompFallbackPolicy.retryLogLine(-status, aliveMs, "interactive terminal"),
+                                )
+                                useNoSeccomp = true
+                                start(sessionId, cols, rows)
+                            } else {
+                                _outputBytes.tryEmit("\r\n[Process exited: $status]\r\n".toByteArray())
+                            }
                         }
+                    } finally {
+                        processLease?.close()
                     }
                 }
                 if (sessionId != null) {
@@ -258,6 +278,8 @@ class TerminalSession(private val context: Context) {
                     _outputBytes.tryEmit("Error: ${t.message}\r\n".toByteArray())
                     _state.value = State.STOPPED
                 }
+            } finally {
+                storageLease?.close()
             }
         }
     }

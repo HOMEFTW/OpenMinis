@@ -127,6 +127,15 @@ object PRootKernel {
         // each app update. Mirrors iOS RootfsManager.applyDefaultMountOverlay.
         rootfsManager.applyDefaultMountOverlay()
 
+        // Older profiles wrote core.createObject=copy, which Git rejects while
+        // parsing /etc/gitconfig, even when a later environment entry says rename.
+        val gitConfig = File(rootfsManager.rootfsDir, "etc/gitconfig")
+        if (gitConfig.isFile) {
+            val previous = gitConfig.readText()
+            val repaired = repairLegacyGitConfig(previous)
+            if (repaired != previous) gitConfig.writeText(repaired)
+        }
+
         // Re-apply user mirror selections — the overlay above ships stock
         // config files (pip.conf, .npmrc, repositories) and would otherwise
         // revert user-chosen mirrors on every boot. Mirrors iOS ordering in
@@ -195,6 +204,13 @@ object PRootKernel {
         // Mirrored in default_mount/etc/profile.d/minis.sh for login shells.
         customEnvironment.putIfAbsent("UV_LINK_MODE", "symlink")
 
+        // Avoid Git's object hardlinks under --link2symlink. Unlike "copy",
+        // "rename" is a supported core.createObject mode. Both login terminals
+        // and non-login Agent commands inherit these defaults.
+        customEnvironment.putIfAbsent("GIT_CONFIG_COUNT", "1")
+        customEnvironment.putIfAbsent("GIT_CONFIG_KEY_0", "core.createObject")
+        customEnvironment.putIfAbsent("GIT_CONFIG_VALUE_0", "rename")
+
         // Inject device timezone so Alpine userspace sees local time.
         // Mirrors iOS ISHShellExecutor.m:335-353 — uses POSIX TZ format with a
         // fixed name ("LCL") to avoid abbreviations like "GMT+8" which contain
@@ -238,6 +254,23 @@ object PRootKernel {
             "loader=$prootLoaderPath " +
             "bindMounts=${bindMounts.size} " +
             "offloadHandlers=${NativeOffloadServer.registeredHandlers.sorted()}")
+    }
+
+    /** Preserve other Git settings and formatting while repairing the shipped invalid mode. */
+    internal fun repairLegacyGitConfig(contents: String): String {
+        val coreSection = Regex("""(?i)^\s*\[\s*core\s*]\s*(?:[#;].*)?$""")
+        val invalidMode = Regex("""(?i)^(\s*createobject\s*=\s*)("?)copy\2(\s*(?:[#;].*)?)$""")
+        var inCore = false
+        return contents.split('\n').joinToString("\n") { line ->
+            val text = line.removeSuffix("\r")
+            if (text.trimStart().startsWith("[")) inCore = coreSection.matches(text)
+            val match = if (inCore) invalidMode.matchEntire(text) else null
+            if (match == null) line else {
+                val quote = match.groupValues[2]
+                match.groupValues[1] + quote + "rename" + quote + match.groupValues[3] +
+                    if (line.endsWith('\r')) "\r" else ""
+            }
+        }
     }
 
     fun addBindMount(linuxPath: String, hostPath: String) {

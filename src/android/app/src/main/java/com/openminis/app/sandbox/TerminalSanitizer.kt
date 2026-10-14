@@ -37,9 +37,13 @@ object TerminalSanitizer {
         if (output.length <= maxChars) return output
 
         val keepEach = maxChars / 2
-        val head = output.substring(0, keepEach)
-        val tail = output.substring(output.length - keepEach)
-        val omitted = output.length - maxChars
+        var headEnd = keepEach
+        var tailStart = output.length - keepEach
+        if (headEnd > 0 && output[headEnd - 1].isHighSurrogate() && output[headEnd].isLowSurrogate()) headEnd--
+        if (tailStart < output.length && output[tailStart].isLowSurrogate() && output[tailStart - 1].isHighSurrogate()) tailStart++
+        val head = output.substring(0, headEnd)
+        val tail = output.substring(tailStart)
+        val omitted = tailStart - headEnd
         return "$head\n\n[... $omitted characters omitted ...]\n\n$tail"
     }
 

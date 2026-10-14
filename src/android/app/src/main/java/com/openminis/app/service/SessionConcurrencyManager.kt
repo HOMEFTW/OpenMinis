@@ -15,7 +15,7 @@ import kotlin.coroutines.resume
 
 /** Limits concurrent sessions; queued sessions are admitted in FIFO order. */
 object SessionConcurrencyManager {
-    const val MAX_CONCURRENT = 5
+    const val MAX_CONCURRENT = 6
     private const val SLOT_WAIT_WARN_MS = 10_000L
 
     private val _runningSessions = MutableStateFlow<Set<String>>(emptySet())

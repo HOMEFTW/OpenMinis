@@ -9,7 +9,13 @@ import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.session.SessionDeleter
 import com.openminis.app.data.session.SessionStorage
 import com.openminis.app.data.session.SessionTree
+import com.openminis.app.data.storage.SecureOrphanDirectoryStore
+import com.openminis.app.data.storage.StorageOrphanCancelled
+import com.openminis.app.data.storage.StorageOrphanCleaner
+import com.openminis.app.data.storage.StorageOrphanPlan
+import com.openminis.app.data.storage.StorageOrphanResult
 import com.openminis.app.logging.AppLogger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -131,6 +137,19 @@ internal class StorageUsageViewModel(
 
     private val appContext = context.applicationContext
     private val storage = SessionStorage(appContext.filesDir)
+    private val orphanCleaner = StorageOrphanCleaner(
+        SecureOrphanDirectoryStore(appContext.filesDir), StorageOrphanProtection(appContext, repo)::load,
+    )
+
+    sealed interface OrphanState {
+        data object Idle : OrphanState
+        data object Scanning : OrphanState
+        data class Confirm(val plan: StorageOrphanPlan) : OrphanState
+        data object Cleaning : OrphanState
+        data object NoneFound : OrphanState
+        data object ScanFailed : OrphanState
+        data class Done(val result: StorageOrphanResult) : OrphanState
+    }
 
     data class UiState(
         val isLoading: Boolean = true,
@@ -142,9 +161,12 @@ internal class StorageUsageViewModel(
         val selecting: Boolean = false,
         val selectedIds: Set<String> = emptySet(),
         val batchBusy: Boolean = false,
+        val orphan: OrphanState = OrphanState.Idle,
     ) {
         val totalSessionSize: Long get() = SessionStorageRows.total(rows)
         val selectedSize: Long get() = rows.filter { it.id in selectedIds }.sumOf { it.totalSize }
+        val orphanBusy: Boolean get() = orphan is OrphanState.Scanning || orphan is OrphanState.Confirm ||
+            orphan is OrphanState.Cleaning
     }
 
     /** Outcome of a batch action, shown once as a toast. */
@@ -189,7 +211,7 @@ internal class StorageUsageViewModel(
                     rows = SessionStorageRows.sorted(rows),
                 )
             }
-            _state.update { scanned.copy(selecting = it.selecting, selectedIds = it.selectedIds) }
+            _state.update { scanned.copy(selecting = it.selecting, selectedIds = it.selectedIds, orphan = it.orphan) }
             AppLogger.info(
                 TAG,
                 "full scan: ${scanned.rows.size} sessions in ${System.currentTimeMillis() - started}ms",
@@ -233,7 +255,7 @@ internal class StorageUsageViewModel(
     }
 
     fun clearLogsAndCaches() {
-        if (_state.value.isClearingLogs) return
+        if (_state.value.isClearingLogs || _state.value.orphanBusy) return
         _state.update { it.copy(isClearingLogs = true) }
         viewModelScope.launch {
             val size = withContext(Dispatchers.IO) {
@@ -241,6 +263,56 @@ internal class StorageUsageViewModel(
                 LogsAndCachesCleaner.size(appContext)
             }
             _state.update { it.copy(isClearingLogs = false, logsCachesSize = size) }
+        }
+    }
+
+    /** Only a user's tap scans for orphans. init/scanAll never deletes or prepares a deletion. */
+    fun scanOrphanedFiles() {
+        val current = _state.value
+        if (current.isLoading || current.batchBusy || current.isClearingLogs || current.orphanBusy) return
+        _state.update { it.copy(orphan = OrphanState.Scanning) }
+        viewModelScope.launch {
+            try {
+                val plan = withContext(Dispatchers.IO) { orphanCleaner.scan() }
+                _state.update { it.copy(orphan = when {
+                    plan.targets.isNotEmpty() -> OrphanState.Confirm(plan)
+                    plan.kept > 0 -> OrphanState.Done(StorageOrphanResult(kept = plan.kept))
+                    else -> OrphanState.NoneFound
+                }) }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(orphan = OrphanState.Idle) }
+                throw e
+            } catch (e: Exception) {
+                AppLogger.warning(TAG, "orphan scan could not safely read owners or directories: ${e.javaClass.simpleName}")
+                _state.update { it.copy(orphan = OrphanState.ScanFailed) }
+            }
+        }
+    }
+
+    fun dismissOrphanConfirmation() {
+        _state.update { if (it.orphan is OrphanState.Confirm) it.copy(orphan = OrphanState.Idle) else it }
+    }
+
+    fun cleanConfirmedOrphans() {
+        val plan = (_state.value.orphan as? OrphanState.Confirm)?.plan ?: return
+        _state.update { it.copy(orphan = OrphanState.Cleaning) }
+        viewModelScope.launch {
+            var outcome: StorageOrphanResult? = null
+            try {
+                withContext(Dispatchers.IO) { outcome = orphanCleaner.clean(plan) }
+                _state.update { it.copy(orphan = OrphanState.Done(checkNotNull(outcome))) }
+            } catch (e: StorageOrphanCancelled) {
+                _state.update { it.copy(orphan = OrphanState.Done(e.result)) }
+                throw e
+            } catch (e: CancellationException) {
+                _state.update { it.copy(orphan = OrphanState.Done(outcome ?:
+                    StorageOrphanResult(kept = plan.kept + plan.targets.size))) }
+                throw e
+            } catch (e: Exception) {
+                AppLogger.warning(TAG, "orphan cleanup failed: ${e.javaClass.simpleName}")
+                _state.update { it.copy(orphan = OrphanState.Done(outcome ?:
+                    StorageOrphanResult(kept = plan.kept, failed = plan.targets.size))) }
+            }
         }
     }
 
@@ -270,7 +342,7 @@ internal class StorageUsageViewModel(
     /** Clear the selected sessions' files (their hidden children's too); rows stay. */
     fun clearSelectedFiles() {
         val ids = _state.value.selectedIds.toList()
-        if (ids.isEmpty() || _state.value.batchBusy) return
+        if (ids.isEmpty() || _state.value.batchBusy || _state.value.orphanBusy) return
         _state.update { it.copy(batchBusy = true) }
         viewModelScope.launch {
             val before = _state.value.rows.filter { it.id in ids }.sumOf { it.totalSize }
@@ -302,7 +374,7 @@ internal class StorageUsageViewModel(
     /** Delete the selected sessions through the one delete funnel; rows go. */
     fun deleteSelected() {
         val ids = _state.value.selectedIds.toList()
-        if (ids.isEmpty() || _state.value.batchBusy) return
+        if (ids.isEmpty() || _state.value.batchBusy || _state.value.orphanBusy) return
         _state.update { it.copy(batchBusy = true) }
         viewModelScope.launch {
             val before = _state.value.rows.filter { it.id in ids }.sumOf { it.totalSize }
