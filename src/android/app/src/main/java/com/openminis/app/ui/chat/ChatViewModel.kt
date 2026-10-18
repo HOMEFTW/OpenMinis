@@ -2390,13 +2390,10 @@ class ChatViewModel(
      * chat reads the same flag. The provider reads FastModePrefs directly at
      * request-build time, so this flow only drives the menu row + nav badge.
      */
-    internal val _fastModeEnabled =
-        MutableStateFlow(com.openminis.app.data.FastModePrefs.isEnabled())
-    val fastModeEnabled: StateFlow<Boolean> = _fastModeEnabled.asStateFlow()
+    val fastModeEnabled: StateFlow<Boolean> = com.openminis.app.data.FastModePrefs.enabled
 
     fun setFastModeEnabled(enabled: Boolean) {
         com.openminis.app.data.FastModePrefs.setEnabled(context, enabled)
-        _fastModeEnabled.value = enabled
     }
 
     /**
@@ -2416,27 +2413,7 @@ class ChatViewModel(
         _autoCompactEnabled.value = enabled
     }
 
-    /**
-     * [T-codex-fast-mode] Whether the Fast Mode menu row (and, when enabled,
-     * the nav ⚡ badge) is shown. Mirrors iOS activeModelSupportsFastMode
-     * (838ba929): the active model id contains "gpt" (case-insensitive —
-     * matches the official fast catalog gpt-5.6-sol/terra/luna, gpt-5.5,
-     * gpt-5.4) AND the request travels the Responses path — the instance has
-     * useResponsesAPI on (any credential/base; Responses relays like sub2api
-     * pass the tier through) OR it's the Codex OAuth route (OpenAI type +
-     * oauth credential + no custom base URL). Chat-completions providers stay
-     * excluded. Recomputes on entry/config changes like the Enhanced Cache
-     * gate above.
-     *
-     * [T-android-xai-priority] xAI is a second, independent branch: xAI's
-     * Priority Processing is the same `service_tier: "priority"` wire field
-     * and the same user-facing promise (lower latency, higher price), so it
-     * reuses this one global toggle rather than adding a competing per-provider
-     * switch. The "gpt" model-id test deliberately does NOT apply — xAI's
-     * models are the grok family — and neither does the Responses-path test,
-     * because xAI serves Priority Processing on its Chat Completions endpoint,
-     * which is the path ProviderFactory always resolves xAI to.
-     */
+    /** GPT Chat/Responses and xAI share the persisted Fast switch and badge. */
     val showFastModeToggle: StateFlow<Boolean> =
         kotlinx.coroutines.flow.combine(
             _activeEntryId,
@@ -2444,24 +2421,16 @@ class ChatViewModel(
         ) { entryId, config ->
             val entry = entryId?.let { id -> config.modelEntries.find { it.id == id } }
             val instance = entry?.let { e -> config.instances.find { it.id == e.providerInstanceId } }
-            val isCodexOAuth = instance != null &&
-                instance.providerType == com.openminis.app.data.model.ProviderType.openAI &&
-                instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth &&
-                instance.customBaseURL.isNullOrBlank()
-            val isXAI = instance?.providerType == com.openminis.app.data.model.ProviderType.xAI
             entry != null && instance != null &&
-                (
-                    isXAI ||
-                        (
-                            entry.model.id.contains("gpt", ignoreCase = true) &&
-                                (instance.useResponsesAPI || isCodexOAuth)
-                            )
-                    )
+                com.openminis.app.provider.FastModeSupport.isAvailable(instance.providerType, entry.model)
         }.stateIn(
             viewModelScope,
             kotlinx.coroutines.flow.SharingStarted.Eagerly,
             false,
         )
+
+    val showFastModeControl: Boolean
+        get() = com.openminis.app.provider.FastModeSupport.shouldShowControl(currentModelId, showFastModeToggle.value)
 
     internal val _showSlashMenu = MutableStateFlow(false)
     val showSlashMenu: StateFlow<Boolean> = _showSlashMenu.asStateFlow()

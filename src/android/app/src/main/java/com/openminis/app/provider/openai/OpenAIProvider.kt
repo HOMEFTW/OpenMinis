@@ -15,6 +15,7 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.FastModeSupport
 import com.openminis.app.provider.SseProgressWatchdog
 import com.openminis.app.provider.cancelOnCancellation
 import com.openminis.app.provider.budgetProviderRequest
@@ -145,16 +146,21 @@ class OpenAIProvider private constructor(
      */
     var supportsPriorityProcessing: Boolean = false
 
+    /** Factory disables GPT Fast on other vendors' OpenAI-compatible routes. */
+    internal var supportsGptFastMode: Boolean = true
+
     /**
-     * [T-android-xai-priority] The effective `service_tier` for this request,
-     * or null to omit the field. Consulted by both body builders.
+     * The effective `service_tier` for GPT Fast or xAI Priority Processing.
+     * OpenAI documents "priority" as an alias for "fast"; retain that wire
+     * value for existing Codex and relay compatibility. Consulted by both builders.
      *
      * Omits rather than sending `"default"` when Fast Mode is off: "default" is
      * xAI's own behaviour, so leaving the key out keeps the body byte-identical
      * to before this feature existed.
      */
     internal fun resolvedServiceTier(): String? =
-        if (supportsPriorityProcessing && com.openminis.app.data.FastModePrefs.isEnabled()) {
+        if (com.openminis.app.data.FastModePrefs.isEnabled() &&
+            (supportsPriorityProcessing || (supportsGptFastMode && FastModeSupport.isGptTextModel(model)))) {
             "priority"
         } else {
             null
@@ -1990,12 +1996,8 @@ class OpenAIProvider private constructor(
         }
         body.put("stream", stream)
 
-        // [T-android-xai-priority] xAI Priority Processing, driven by the same
-        // app-level Fast Mode toggle as Codex (FastModePrefs), read here at
-        // request-build time so a flip applies to the very next request.
-        // Emitted only for xAI-capable providers, so every other provider's
-        // body is unchanged — `service_tier` is an xAI extension and a strict
-        // OpenAI-compatible relay would 400 on the unknown key.
+        // GPT Fast and xAI Priority share the app-level toggle. Resolve it at
+        // build time so a change applies to the next request on a cached provider.
         resolvedServiceTier()?.let { body.put("service_tier", it) }
 
         if (temperature != null && !model.isGPT6Astra && !model.isGPT61Sol && !(model.isGPT6SolOrLuna && thinkingLevel.isEnabled)) {
@@ -2985,11 +2987,7 @@ class OpenAIProvider private constructor(
         val body = JSONObject()
         body.put("model", model.id)
         body.put("stream", stream)
-        // [T-android-xai-priority] xAI documents service_tier for both text
-        // inference endpoints. xAI currently always resolves to the Chat
-        // Completions path (forceChatCompletions), so this is belt-and-braces
-        // — but keeping the two builders in step means a future routing change
-        // does not silently drop the user's Fast Mode choice.
+        // Same tier policy as Chat Completions, including API keys and Codex OAuth.
         resolvedServiceTier()?.let { body.put("service_tier", it) }
         body.put("store", false)
         body.put("parallel_tool_calls", true)
@@ -3092,31 +3090,6 @@ class OpenAIProvider private constructor(
         // fields the real CLI doesn't send.
         if (maxTokens > 0 && !isOAuth) {
             body.put("max_output_tokens", maxTokens)
-        }
-
-        // [T-codex-fast-mode] Fast tier injection (mirrors iOS fb671083 +
-        // 838ba929). Wire value verified against openai/codex source
-        // (codex-rs/protocol config_types.rs): ServiceTier::Fast sends
-        // service_tier="priority" — "fast" is only the UI name, so this stays
-        // inside the codex_cli_rs client fingerprint on the OAuth route. Gate
-        // is toggle + gpt-family model only: this builder IS the Responses
-        // path, and Responses relays (e.g. sub2api) normalize/pass the tier
-        // through, so no isOAuth narrowing. Ineligible upstreams ignore the
-        // field or silently downgrade (receipt visible via the
-        // response.completed service_tier log).
-        //
-        // [T-android-xai-priority] Guarded on the key being absent so this
-        // cannot clobber a per-instance tier set above. The two gates are
-        // disjoint today (that toggle is xAI-only, this one gpt-only, and xAI
-        // never reaches this builder), so the guard changes no current
-        // behaviour — it just means neither feature can silently overwrite the
-        // other if either's routing widens later. Both want the same value
-        // anyway, so "first writer wins" loses nothing.
-        if (!body.has("service_tier") &&
-            com.openminis.app.data.FastModePrefs.isEnabled() &&
-            model.id.contains("gpt", ignoreCase = true)
-        ) {
-            body.put("service_tier", "priority")
         }
 
         if (systemPrompt != null) {

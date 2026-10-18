@@ -235,6 +235,7 @@ object ProviderFactory {
         // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
+        (provider as? OpenAIProvider)?.supportsGptFastMode = FastModeSupport.supportsGptRoute(instance.providerType)
         (provider as? OpenAIProvider)?.responseTimeoutSeconds = instance.responseTimeoutSeconds
         (provider as? OpenAIProvider)?.sessionId = sessionId
         (provider as? OpenAIProvider)?.modelOverrides = overrides?.takeIf { !it.isEmpty }

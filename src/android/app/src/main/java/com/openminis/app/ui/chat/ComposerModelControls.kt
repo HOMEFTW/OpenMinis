@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
@@ -31,6 +32,7 @@ import com.openminis.app.R
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ProviderConfig
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.ui.settings.SettingsSwitch
 import kotlin.math.roundToInt
 
 internal fun thinkingSliderLevels(available: List<ThinkingLevel>, allowOff: Boolean = true): List<ThinkingLevel> =
@@ -53,7 +55,10 @@ internal fun ComposerModelControls(
     currentThinking: ThinkingLevel,
     availableLevels: List<ThinkingLevel>,
     supportsThinking: Boolean,
+    showFastMode: Boolean,
+    supportsFastMode: Boolean,
     fastMode: Boolean,
+    onFastModeChange: (Boolean) -> Unit,
     onSelectEntry: (String) -> Unit,
     onSelectGroup: (String) -> Unit,
     onSelectThinking: (ThinkingLevel) -> Unit,
@@ -66,8 +71,11 @@ internal fun ComposerModelControls(
     val displayedLevel = levels[thinkingSliderIndex(currentThinking, levels)]
     val menuWidth = (LocalConfiguration.current.screenWidthDp - 40).coerceIn(200, 340).dp
     val modelLabel = modelName.ifBlank { stringResource(R.string.model_picker_title) }
-    val reasoningLabel = stringResource(R.string.composer_thinking_label, displayedLevel.localizedName(context))
-    LaunchedEffect(activeEntryId, supportsThinking) { openMenu = null }
+    val hasThinkingControl = supportsThinking && availableLevels.isNotEmpty()
+    val reasoningLabel = if (hasThinkingControl)
+        stringResource(R.string.composer_thinking_label, displayedLevel.localizedName(context))
+        else stringResource(R.string.composer_fast_mode_title)
+    LaunchedEffect(activeEntryId, supportsThinking, showFastMode) { openMenu = null }
 
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
@@ -140,7 +148,7 @@ internal fun ComposerModelControls(
                 }
             }
         }
-        if (supportsThinking && availableLevels.isNotEmpty()) {
+        if (hasThinkingControl || showFastMode) {
             Box(Modifier.weight(1f)) {
                 ComposerSelector(label = reasoningLabel, description = reasoningLabel, onClick = { openMenu = "thinking" })
                 DropdownMenu(
@@ -150,11 +158,39 @@ internal fun ComposerModelControls(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ) {
                     Column(Modifier.width(menuWidth).padding(16.dp)) {
-                        ThinkingLevelSlider(currentThinking, availableLevels, onSelectThinking, allowThinkingOff)
+                        if (showFastMode) {
+                            FastModeToggle(fastMode, onFastModeChange, enabled = supportsFastMode)
+                            if (hasThinkingControl) HorizontalDivider(Modifier.padding(vertical = 16.dp))
+                        }
+                        if (hasThinkingControl) {
+                            ThinkingLevelSlider(currentThinking, availableLevels, onSelectThinking, allowThinkingOff)
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun FastModeToggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boolean) {
+    val isChecked = checked && enabled
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
+                .toggleable(value = isChecked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(20.dp))
+            Text(stringResource(R.string.composer_fast_mode_title), Modifier.weight(1f),
+                style = MaterialTheme.typography.titleSmall)
+            SettingsSwitch(checked = isChecked, onCheckedChange = null, enabled = enabled)
+        }
+        Text(stringResource(if (enabled) R.string.composer_fast_mode_hint else R.string.composer_fast_mode_unavailable),
+            Modifier.padding(top = 6.dp),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -897,6 +897,7 @@ fun ChatScreen(
     val composerEntryId by viewModel.activeEntryId.collectAsState()
     val composerThinking by viewModel.thinkingLevel.collectAsState()
     val composerFastEligible by viewModel.showFastModeToggle.collectAsState()
+    val composerFastVisible = viewModel.showFastModeControl
     val composerFastOn by viewModel.fastModeEnabled.collectAsState()
     var pendingNonTextSelection by remember { mutableStateOf<PendingNonTextSelection?>(null) }
 
@@ -2941,16 +2942,8 @@ fun ChatScreen(
                                     },
                                 )
                             }
-                            // [T-codex-fast-mode] Fast Mode (iOS parity,
-                            // fb671083 + 838ba929): shown when the active model
-                            // is a gpt-family model served through the
-                            // Responses path (useResponsesAPI instance or Codex
-                            // OAuth). App-level persisted toggle; while on, the
-                            // Responses body carries service_tier="priority"
-                            // (≈1.5x faster at 2x credit burn on the ChatGPT
-                            // subscription) and the nav model row shows a ⚡
-                            // badge. Sits next to Enhanced Cache — both are
-                            // model-invocation controls (iOS 09944220 grouping).
+                            // Same persisted Fast switch as the thinking panel;
+                            // eligibility is shared with GPT Chat/Responses and xAI requests.
                             val showFastMode by viewModel.showFastModeToggle.collectAsState()
                             val fastModeOn by viewModel.fastModeEnabled.collectAsState()
                             if (showFastMode) {
@@ -4913,6 +4906,10 @@ fun ChatScreen(
                                         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
                                             ThinkingLevelPicker(
                                                 current = viewModel.thinkingLevelForDisplay(thinkingLevelState),
+                                                showFastMode = composerFastVisible,
+                                                supportsFastMode = composerFastEligible,
+                                                fastMode = composerFastOn,
+                                                onFastModeChange = viewModel::setFastModeEnabled,
                                                 allowOff = viewModel.canDisableThinking,
                                                 availableLevels = viewModel.availableThinkingLevels,
                                                 onSelect = viewModel::setThinkingLevel,
@@ -6065,7 +6062,10 @@ fun ChatScreen(
                         allowThinkingOff = viewModel.canDisableThinking,
                         availableLevels = viewModel.availableThinkingLevels,
                         supportsThinking = viewModel.currentModelSupportsReasoning,
+                        showFastMode = composerFastVisible,
+                        supportsFastMode = composerFastEligible,
                         fastMode = composerFastEligible && composerFastOn,
+                        onFastModeChange = viewModel::setFastModeEnabled,
                         onSelectEntry = { entryId ->
                             val groupId = selectedGroupId?.takeIf { id ->
                                 availableGroups.any { it.id == id && entryId in it.memberEntryIds }

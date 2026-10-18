@@ -2252,4 +2252,7 @@
     <string name="kimi_usage_network_error">无法加载用量，请检查网络后刷新。</string>
     <string name="kimi_usage_timeout">用量请求超时，请刷新重试。</string>
     <string name="kimi_usage_invalid_response">用量服务返回的数据无效。</string>
+    <string name="composer_fast_mode_title">Fast 高速模式</string>
+    <string name="composer_fast_mode_hint">对所有支持的模型请求高速处理。需要服务商支持，可能增加费用或额度消耗。</string>
+    <string name="composer_fast_mode_unavailable">Fast 暂不可用。请检查服务商是否使用 OpenAI／Responses 接口，以及模型是否启用文本输出。</string>
 </resources>

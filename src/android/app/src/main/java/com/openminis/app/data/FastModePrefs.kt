@@ -2,6 +2,9 @@ package com.openminis.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * [T-codex-fast-mode] App-level persisted Fast Mode toggle (mirrors iOS
@@ -13,7 +16,7 @@ import android.content.SharedPreferences
  * REQUEST-BUILD time so a flip applies to the very next request of an ongoing
  * session — including offload / title-gen calls that never pass through the
  * ChatViewModel. To reproduce that, [prime] captures the application context
- * once at app startup (MinisApp.onCreate) and warms a volatile cache; the
+ * once at app startup (MinisApp.onCreate) and warms a shared state flow; the
  * context-free [isEnabled] is then safe to call from any request builder.
  */
 object FastModePrefs {
@@ -23,8 +26,8 @@ object FastModePrefs {
     @Volatile
     private var appContext: Context? = null
 
-    @Volatile
-    private var cachedEnabled: Boolean = false
+    private val _enabled = MutableStateFlow(false)
+    val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -32,7 +35,7 @@ object FastModePrefs {
     /** Capture the app context and warm the cache. Called from MinisApp.onCreate. */
     fun prime(context: Context) {
         appContext = context.applicationContext
-        cachedEnabled = prefs(context).getBoolean(KEY_ENABLED, false)
+        _enabled.value = prefs(context).getBoolean(KEY_ENABLED, false)
     }
 
     /**
@@ -41,11 +44,11 @@ object FastModePrefs {
      * install, and prime runs before any request can be built).
      */
     fun isEnabled(): Boolean {
-        return cachedEnabled
+        return _enabled.value
     }
 
     fun setEnabled(context: Context, enabled: Boolean) {
-        cachedEnabled = enabled
+        _enabled.value = enabled
         prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
     }
 
@@ -59,6 +62,6 @@ object FastModePrefs {
      */
     @androidx.annotation.VisibleForTesting
     internal fun setCachedEnabledForTest(enabled: Boolean) {
-        cachedEnabled = enabled
+        _enabled.value = enabled
     }
 }

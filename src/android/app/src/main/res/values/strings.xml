@@ -2416,4 +2416,7 @@
     <string name="kimi_usage_network_error">Unable to load usage. Check your connection and refresh.</string>
     <string name="kimi_usage_timeout">The usage request timed out. Refresh to try again.</string>
     <string name="kimi_usage_invalid_response">The usage service returned an invalid response.</string>
+    <string name="composer_fast_mode_title">Fast mode</string>
+    <string name="composer_fast_mode_hint">Requests faster processing for all compatible models. Requires provider support and may increase costs or usage.</string>
+    <string name="composer_fast_mode_unavailable">Fast is unavailable for this configuration. Check that the provider uses OpenAI Chat Completions or Responses and that text output is enabled for the model.</string>
 </resources>

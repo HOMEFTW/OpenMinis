@@ -1288,7 +1288,17 @@ internal fun ThinkingLevelPicker(
     current: ThinkingLevel,
     availableLevels: List<ThinkingLevel>,
     onSelect: (ThinkingLevel) -> Unit,
+    showFastMode: Boolean,
+    supportsFastMode: Boolean,
+    fastMode: Boolean,
+    onFastModeChange: (Boolean) -> Unit,
     allowOff: Boolean = true,
 ) {
-    ThinkingLevelSlider(current, availableLevels, onSelect, allowOff)
+    Column {
+        if (showFastMode) {
+            FastModeToggle(fastMode, onFastModeChange, enabled = supportsFastMode)
+            HorizontalDivider(Modifier.padding(vertical = 16.dp))
+        }
+        ThinkingLevelSlider(current, availableLevels, onSelect, allowOff)
+    }
 }
