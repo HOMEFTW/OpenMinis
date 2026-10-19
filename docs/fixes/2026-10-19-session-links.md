@@ -17,7 +17,7 @@
 - 使用链接发送仍必须通过目标接收授权，旧通信记录 `read` 操作保持原义。
 - 用项目构建脚本运行回归与 APK 构建；真机和真实模型联调另行说明。
 
-用户已要求将本次功能补充至 1.16.3：提交并推送代码及 README，更新现有 Release 的 APK、校验文件和说明，版本号保持 1.16.3（31）；保留首发标签与旧 APK，并附上当前代码的源码 ZIP。
+本次功能补充至 1.16.3：提交并推送代码及 README，更新现有 Release 的 APK、校验文件和说明，版本号保持 1.16.3（31）；保留首发标签并附上当前代码的源码 ZIP。Release 仅提供包含会话链接的最新 APK，不含此功能的旧 APK 下架。
 
 ## 实现结果
 
@@ -42,3 +42,14 @@ UI 子任务由一个子代理实现，工具、历史和最终集成由主代�
 - 本地测试 APK：`D:/Code/outputs/openminis-session-links-20261019/OpenMinis-1.16.3-session-links-arm64-v8a.apk`，72,466,702 字节；交付副本与构建产物哈希一致。
 - SHA-256：`622c324500e416ffa603077cc6d337418e75dd869374c6e08f7aa71951eea806`。
 - `git diff --check`、中英文资源 XML 及 README 本地链接核对通过。ADB 检查没有连接设备，未执行真机安装、剪贴板／菜单交互、Android 仪器测试或真实模型联调。
+
+## GitHub 发布核对
+
+2026-10-19（香港时间），本次功能补充至既有 [Android 1.16.3 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.3)，版本号保持 1.16.3（31）。
+
+- 代码及 README 已推送至 `main`，对应提交 `8040607cb35e359729310d07f830fd7332778a34`；远端 README blob 与本地已提交版本一致。
+- Release 保持最新稳定版，非草稿、非预发布。APK 附件仅有包含会话链接的 [app-debug.apk](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk)，已下架不含会话链接的旧 APK；旧包的已校验本地副本保留，需要时可重新上传。
+- GitHub 返回的新 APK 大小为 72,466,702 字节，digest 为 `sha256:622c324500e416ffa603077cc6d337418e75dd869374c6e08f7aa71951eea806`，与构建产物一致。已从正式链接完整下载 APK 并重新计算 SHA-256，结果相同。公开 [校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk.sha256) 已回读核对，Release 正文与本地发布说明一致。
+- [本次源码 ZIP](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/OpenMinis-1.16.3-session-links-source.zip) 从提交 `8040607` 生成，14,090,479 字节，SHA-256 为 `a77eb0bb075e82b3e2df0d0573f44a947f681b5b6b174f0829d5a388ba01c311`，与 GitHub digest 一致。
+- 原 `1.16.3` 标签仍指向首发提交 `f2d6a2a4fcb92fda5e5930908f588ea81fa1b98c`。GitHub 自动生成的 Source code 归档仍是首发源码；本次 APK 对应源码使用上述固定提交及源码 ZIP。
+- 已安装首发 1.16.3 的用户需手动重新下载覆盖安装；版本号相同不会触发新版本提示。
