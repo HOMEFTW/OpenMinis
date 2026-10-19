@@ -7,11 +7,13 @@
 
 OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手机上使用 Linux 沙箱、文件工作区、浏览器、技能和记忆。本 fork 保留原项目架构，仅增加 Android 端改动；它不是上游官方发行版。
 
-**[下载 Android 1.16.2 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.2/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.2) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+**[下载 Android 1.16.3 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.3) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
 
-**1.16.2 · 2026-10-14**：补齐上游 1.15 beta 的后台提问通知、等待倒计时、MCP／Skills 菜单、朗读音量与长按开关；支持六个会话同时运行，长任务在摘要前逐步回收旧思考及工具步骤。新增手动清理孤立会话文件、Kimi Code 订阅用量和 MiniMax／OpenCode 官方控制台入口，修复 DeepSeek 工具误写进思考时的恢复、列表嵌套表格、转写双击选词、沙箱 Git 配置及 Unicode 输出边界。源码以 [1.16.2 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16.2) 为准，详见 [同步与验收记录](docs/fixes/2026-10-14-upstream115-sync.md)。
+**1.16.3 · 2026-10-19**：补齐 build34 的隐藏模型折叠与删除、用量时间范围与趋势、备份服务器编辑、ZIP64、可见会话分享、15 分钟新会话草稿、停止范围选择、语音识别回退与 200% 朗读音量等功能；新增五种语言和 minis-config 设置。自动更新仅连接 [本 fork 的 Releases](https://github.com/HOMEFTW/OpenMinis/releases)，支持稳定／测试渠道。源码与 APK 对应 [1.16.3 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16.3)，实现与验证范围见 [build34 同步记录](docs/fixes/2026-10-19-build34-sync.md)。
 
-上游 build 32／33 的 Source code 下载确实存在，但标签指向的公开源码仍声明 Android 1.14。本次按公开发布行为补齐 Android 等效实现；不是直接合并未公开的 beta 实现。保留本 fork 的模型接入、上下文设置、100 MiB 图片预算、会话通信和三套品牌图标。
+**1.16.2 · 2026-10-14**：补齐上游 1.15 beta 的后台提问通知、等待倒计时、MCP／Skills 菜单、朗读音量与长按开关；支持六个会话同时运行，长任务在摘要前逐步回收旧思考及工具步骤。新增手动清理孤立会话文件、Kimi Code 订阅用量和 MiniMax／OpenCode 官方控制台入口，修复 DeepSeek 工具误写进思考时的恢复、列表嵌套表格、转写双击选词、沙箱 Git 配置及 Unicode 输出边界。10 月 18 日补充 GPT Fast 开关及显示修复，对应源码为 [6e49d0d](https://github.com/HOMEFTW/OpenMinis/tree/6e49d0d3feabd5133fb6a29590bc84bfad404bf2)；原同步范围见 [验收记录](docs/fixes/2026-10-14-upstream115-sync.md)。
+
+上游 build 32／33／34 的 Source code 下载确实存在，但标签指向的公开源码仍声明 Android 1.14；本次实际核对 build34 归档的 2473 个文件，统一换行后与旧公开源码一致。因此按公开发布说明与 APK 补齐 Android 等效行为，未直接合并尚未公开的 beta 实现。保留本 fork 的模型接入、上下文设置、100 MiB 图片预算、会话通信和三套品牌图标。
 
 ## 应用品牌图标
 
@@ -49,13 +51,17 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 | 方面 | 改动 |
 | --- | --- |
 | 模型接入 | 支持 GPT-6 Astra / Sol / Luna、GPT-6.1 Sol 及 Image 2.5；思考参数按模型支持范围发送，GPT-6.1 Sol 默认 high。 |
+| 模型管理与 Fast | 服务商列表可折叠隐藏模型、删除 API 模型，自动刷新不恢复删除项；优先采用服务端模型限制。输入框思考档位面板及 `/thinking` 提供 GPT Fast 开关，与 `chat.speedTier` 共用状态，可用档位受模型及服务商能力限制。 |
 | DeepSeek 直连 | 独立 DeepSeek 服务商与 API Key 入口，依据官方 Harness 接口实现请求、思考回放、工具调用和流式处理，不经过 OpenAIProvider 或 AnthropicProvider。 |
 | 子代理与调度 | 子代理定义、模型选择、父子会话、后台进度、引导/停止/恢复及结果回调；定时任务支持即时执行、倒计时和忙碌会话投递。 |
 | 后台问答 | 模型提问可在后台通知中逐题回答，支持选项、允许／取消和文字回复；等待状态显示倒计时，过期或旧通知不能回答新问题。 |
 | 会话工具菜单 | MCP 支持搜索、对过滤结果批量启停和服务器详情；Skills 可查看正文，长按网址来源技能复制原始来源地址。 |
 | 服务商用量 | Kimi Code 登录后显示服务端订阅额度与刷新状态，独立于本地 Token 统计；MiniMax／OpenCode 服务商详情可打开官方控制台。 |
+| 用量趋势 | 本地统计支持今天／7 天／30 天／全部时间、缓存 Token 堆叠趋势及服务商／模型下钻，按设备本地日历日计量。 |
+| 备份恢复 | 可直接编辑备份服务器，保存失败回滚配置与凭据；历史文件原子写入，支持 ZIP64。恢复优先采用备份设置并保留设备独有项，有效 OAuth 不被过期备份替换。 |
+| 自动更新 | 手动及自动检查均连接 HOMEFTW/OpenMinis，支持稳定／测试渠道和主页更新提示；优先当前应用 APK，排除备份与仪器测试包。 |
 | 存储维护 | 扫描并确认后手动清理孤立会话目录；保护已有会话、媒体引用、草稿、迁移及运行中的任务和终端，清理前重新核验，不在启动时自动删除。 |
-| 朗读与交互 | 朗读胶囊提供独立音量滑块；长按工具状态栏开关预览，长按思考块切换流式展开；外观设置可关闭停止前确认。 |
+| 朗读与交互 | 朗读胶囊上方提供最高 200% 的独立音量滑块；长按工具状态栏开关预览，长按思考块切换流式展开；停止按钮支持长按设置和停止范围选择。 |
 | 输入区 | 模型与思考强度入口移入输入框，使用可搜索模型列表和分档滑块；保留模型分组、当前项勾选及详细选择器。 |
 | 上下文管理 | 独立设置页提供 64K / 105K / 272K / 1M 预设及 8K–1M 自定义上限；结合全局、模型与模型组限制，按服务端输入用量校准预算，计入 Anthropic 缓存 Token。 |
 | 会话通信 | 支持手动文本转发及 AI 主动请求，提供接收授权、持久化排队、关联回复和防循环保护；不自动合并两边历史。 |
@@ -65,7 +71,7 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 | 任务结果 | 区分本次运行的成功、失败、取消、超时和预算停止；排队批次分别记录，定时任务失败也写入历史。 |
 | 凭据与日志 | 加密存储失败时保留原数据，使用有提示的进程内临时存储；日志和分享副本脱敏。 |
 | 终端显示 | 修复回车覆盖、ANSI 和 OSC 序列处理，保留合法 `null`、空白和文本。 |
-| 启动与草稿 | 修复重复会话列表，恢复最后查看的对话；持久保存草稿并提供草稿箱。 |
+| 启动与草稿 | 修复重复会话列表，恢复最后查看的对话；持久保存已有会话草稿并提供草稿箱，新会话未发送文本保留 15 分钟。大会话首批列表就绪后淡入，阅读旧回复时保持位置。 |
 | 数据恢复与分享 | 恢复已有会话时保留消息和压缩标记，旧备份不覆盖较新正文；备份包含嵌套媒体引用，副本独立保存资源，分享在草稿保存成功后才确认消费。 |
 | 工具可靠性 | MCP 副作用结果丢失时报告结果未知，避免自动重复执行；正确处理 SSE 事件。同文件编辑与写入协调，大文件窗口读取限制内存使用，过期浏览器/终端回调不影响新请求。 |
 | 调度与配置 | 并发准入、排队和取消避免名额泄漏；定时任务队列保活到接管或终态。后续请求刷新凭据与服务商配置，统一执行条目思考上限。 |
@@ -76,7 +82,7 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 | 标题与反馈 | 自动标题严格解析并限制等待时间，不覆盖手动改名；关于页与反馈统一指向本 fork，反馈仅保留 GitHub Issues。 |
 | 超时恢复 | 子代理超时后可恢复原子会话，等待旧任务收尾，避免新旧运行互相覆盖。 |
 | DeepSeek 恢复 | 识别误写进思考内容的工具调用标记，最多请求两次正式工具调用，失败后提供继续入口；不直接执行思考文本，保留输出上限及断流提示。 |
-| 语音转写 | `android-speech` 支持麦克风或授权目录中的音频文件，复用系统或已配置的语音服务商，处理超时、取消及资源限制。 |
+| 语音转写 | `android-speech` 支持麦克风或授权目录中的音频文件，默认系统引擎，也可显式选服务商或自动回退；调用进程退出后停止，上传前重新校验进程身份，纠错最多三个模型按策略回退。 |
 | 端点证书 | 为指定 HTTPS 主机与端口配置 PEM CA，保留证书链和主机名校验；可清除恢复默认信任。 |
 | 记忆与兼容性 | 近期记忆日志可独立关闭；统一 Claude 认证与聊天请求头；识别特定 PRoot 断言后，对后续 Shell 使用兼容模式，不自动重放命令。 |
 
@@ -84,7 +90,7 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 
 1. 从 [Releases](https://github.com/HOMEFTW/OpenMinis/releases) 下载 APK。当前构建面向 **Android 8.0+、ARM64**，使用调试签名；不是上游官方发行版，尚未完成真机验收。
 2. 在服务商设置中填写自己的接口地址和凭据，刷新模型列表。可用模型取决于服务商和账号权限；项目不附带 API Key 或模型额度。
-3. 输入框内点击模型名切换模型，点击思考强度打开滑块。滑块只提供当前模型允许的档位；服务商自定义模型能力也会参与判断。
+3. 输入框内点击模型名切换模型，点击思考强度打开滑块。滑块只提供当前模型允许的档位；GPT 的 Fast 开关也位于该面板，下一次请求生效，可用性与费用取决于服务商。
 4. 图片模型通常作为 Agent 工具使用：在模型分组设置中开放给 Agent，再让文本模型调用 `minis-model-use`。
 
 DeepSeek 官方 Key：添加服务商时选择 **DeepSeek** 并填写密钥。旧兼容服务商配置保持不变，不会自动迁移。此入口使用官方 Harness 同款 `https://api.deepseek.com/anthropic/v1/messages` 与 `x-api-key`，由独立 DeepSeek 实现处理；不是另造私有协议。详见 [接入与验证记录](docs/superpowers/plans/2026-10-08-deepseek-native.md)。
@@ -100,11 +106,17 @@ DeepSeek 官方 Key：添加服务商时选择 **DeepSeek** 并填写密钥。�
 - **聊天菜单 → 任务预算**：10 / 25 / 50 / 100 / 200 轮，默认 200。这是执行轮数限制，不是金额限额。
 - **服务商设置 → 测试调用**：选择模型并点击发送后进行实际文本调用，可取消，可能消耗接口用量。
 - **设置 → Kimi Code 服务商详情 → 订阅用量**：使用登录凭据读取服务端额度，可手动刷新；MiniMax／OpenCode 的官方接口服务商详情提供官方控制台入口。
+- **设置 → 服务商详情 → 模型列表**：展开隐藏模型，或删除 API 模型；自动刷新不会恢复删除项，手动刷新模型列表可重新获取。
+- **设置 → Token 用量**：切换时间范围，查看缓存趋势及服务商／模型明细。
+- **设置 → 备份与恢复 → 管理目的地**：编辑已有服务器名称、路径和连接；ZIP64 备份在其他平台恢复时需要对端支持。
+- **设置 → 关于 Minis → 应用更新**：调整自动检查及稳定／测试渠道，只从本 fork 获取更新。
 - **设置 → 存储 → 清理孤立会话文件**：先扫描，再确认清理；仍被引用或正在使用的文件会保留。
 - **模型列表 → 更多模型与分组**：原有详细选择器、分组管理和模型测试。
 - **设置 → 服务商详情 → 自定义服务器证书**：粘贴 PEM CA，仅对配置的 HTTPS 主机与端口生效；同端点账号共享配置，留空可移除。
 - **设置 → 记忆 → 自动加入近期记忆日志**：默认开启，关闭后从下一轮生效，不影响全局记忆和记忆工具。
 - **设置 → 反馈问题**：[本 fork 的 GitHub Issues](https://github.com/HOMEFTW/OpenMinis/issues)。
+
+停止按钮可长按调整行为；存在插入任务或子任务时可选择停止范围。`minis-config` 可管理新增偏好和子代理列表，定时任务创建支持 `--model` 指定模型。
 
 音频工具示例：`android-speech transcribe --source /var/minis/workspace/audio.wav --engine provider`。`--source mic` 使用麦克风，`--engine auto|system|provider` 选择引擎；文件须位于授权目录，最多 25 MiB、300 秒。系统文件转写依赖 Android 13+ 及设备识别服务支持。
 
@@ -147,20 +159,22 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
-2026-10-14，1.16.2 本机验证：通过 `scripts/build_android_windows.ps1 -RunAllTests -BuildAndroidTests` 运行 **2614 项 JVM 单元测试**，2607 通过、0 失败、0 错误、7 项跳过；其中 5 项依赖 Windows 不支持的安全目录流，2 项依赖 POSIX 目录权限。覆盖后台问答的批次与回复校验、上下文回收、DeepSeek 恢复、服务商用量、存储维护及已有可靠性回归。
+2026-10-19，1.16.3 本机验证：通过 `scripts/build_android_windows.ps1 -RunAllTests -BuildAndroidTests` 运行 **361 个测试组、2761 项 JVM 单元测试**，2753 通过、0 失败、0 错误、8 项条件跳过；跳过项涉及 opt-in 的 4 GiB 大文件用例及平台文件系统／权限条件。覆盖模型默认限制、跨协议工具 ID、用量日历日与趋势、凭据刷新、备份合并／历史／服务器编辑、实际生成的 JavaScript、语音回退、权限总超时和停止范围。
 
-使用最终 Gradle 编译类在 WSL Linux 补测存储：40 项、39 通过、0 失败、1 项因 Linux 支持安全目录流而跳过的反向能力测试。Windows 跳过的 5 项安全删除测试在 Linux 全部通过，覆盖确认后新增文件、目录身份替换、符号链接及真实删除；这是 JVM 文件系统验证，不等于 Android 设备验证。
+独立 ZIP64 验证已实际完成 4 GiB＋4 KiB 和 65,537 文件往返。此前 1.16.2 在 WSL Linux 补测过 40 项存储测试，39 通过、0 失败、1 项条件跳过，Windows 跳过的 5 项安全删除测试全部通过；本次未重复该项历史验证，均不等于 Android 设备验证。
 
-应用与完整 Android 仪器测试包均编译成功并通过 v2 签名检查。应用 APK 的 ZIP 完整性、20 个 DEX 校验和及 16 KiB 页 ZIP 对齐检查通过；44 个品牌/启动图标资源与 1.16.1 一致，沿用本 fork 原签名。包内 Shell 登录脚本与源码一致、保持 LF，未重新写入旧 Git 配置。
+应用与完整 Android 仪器测试包均编译成功。应用 APK 的签名、ZIP 完整性、20 个 DEX 校验和及 16 KiB 页 ZIP 对齐检查通过；44 个品牌／启动图标资源与此前版本一致，沿用本 fork 原签名。11 个 build34 新实现类及本 fork 的更新地址已确认入包。
 
-安装包 SHA-256 见 [1.16.2 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.2) 附带的校验文件。完整清单见 [同步与验收记录](docs/fixes/2026-10-14-upstream115-sync.md)。
+安装包 SHA-256 见 [1.16.3 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.3) 附带的 [校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk.sha256)。完整清单见 [build34 同步与验收记录](docs/fixes/2026-10-19-build34-sync.md)。
 
 当前没有连接 ADB 设备，未执行真机安装、仪器测试、通知直接回复、触控选词、后台 Doze、系统 TTS 或真实服务商联调。这是本地执行记录，不代表 GitHub CI 或真机验收；开发验证使用模拟接口，没有自动调用用户的付费 API。上下文 Token 预算仍为校准估算，不是精确 tokenizer 计数。
 
-本轮也未进行真实 Claude OAuth、外部语音服务及设备录音/解码验收。PRoot 改动只缓解明确的 seccomp 断言，不代表修复所有挂载/FUSE 问题；iOS 问题不在本 fork 的修复范围。
+本轮也未进行真实备份服务器、Claude OAuth、外部语音服务及设备录音／解码验收；200% 朗读音效、悬浮窗和 WebView 需设备确认，Markdown 页内锚点暂不定位标题。PRoot 改动只缓解明确的 seccomp 断言，不代表修复所有挂载／FUSE 问题；iOS 问题不在本 fork 的修复范围。
 
 ## 更多说明
 
+- [2026-10-19 Android build34 同步与 1.16.3 验收记录](docs/fixes/2026-10-19-build34-sync.md)
+- [GPT Fast 模式与显示修复记录](docs/fixes/2026-10-17-gpt-fast-mode.md)
 - [2026-10-14 Android 1.15 beta 同步与 1.16.2 验收记录](docs/fixes/2026-10-14-upstream115-sync.md)
 - [2026-10-09 上游问题修复及验证边界](docs/superpowers/plans/2026-10-09-upstream-issues.md)
 - [2026-10-12 功能缺陷修复及验收记录](docs/fixes/2026-10-12-functional-reliability.md)
