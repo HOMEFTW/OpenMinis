@@ -1255,27 +1255,18 @@ class BrowserUseManager(
         // so we use a JS bridge callback (__minis__.resolve / __minis__.reject).
         return try {
             val raw = asyncJsRequests.await(30_000L) { token ->
-                val wrapped = """
-                    (async function(){
-                        try {
-                            var __r__ = (async function(){ $script })();
-                            var __v__ = await __r__;
-                            if (__v__ === undefined || __v__ === null) {
-                                __minis__.resolve(${JSONObject.quote(token)}, String(__v__));
-                            } else if (typeof __v__ === 'object') {
-                                __minis__.resolve(${JSONObject.quote(token)}, JSON.stringify(__v__));
-                            } else {
-                                __minis__.resolve(${JSONObject.quote(token)}, String(__v__));
-                            }
-                        } catch(e) {
-                            __minis__.reject(${JSONObject.quote(token)}, e.message || String(e));
-                        }
-                    })();
-                """.trimIndent()
+                val wrapped = BrowserUseJS.executeScript(script, token)
                 withContext(Dispatchers.Main) {
                     ensureUsable()
 
-                    webView.evaluateJavascript(wrapped, null)
+                    webView.evaluateJavascript(wrapped) { started ->
+                        // A syntax error prevents even the async try/catch
+                        // from starting. The synchronous marker distinguishes
+                        // that failure from a running promise or return null.
+                        if (started != JSONObject.quote(BrowserUseJS.EXECUTION_STARTED)) {
+                            asyncJsRequests.complete(token, BrowserUseJS.evaluationError("JavaScript did not start; check the script syntax and page state."))
+                        }
+                    }
                 }
             } ?: return BrowserActionResult.error("JavaScript execution timed out (30s)")
             val json = try { JSONObject(raw) } catch (_: Exception) { null }
@@ -1604,18 +1595,8 @@ class BrowserUseManager(
         val deferred = CompletableDeferred<String>()
         scriptWaiters.add(deferred)
         try {
-            webView.evaluateJavascript(js) { result ->
-                // Android WebView returns JSON-encoded strings, so unquote
-                val unquoted = if (result != null && result.startsWith("\"") && result.endsWith("\"")) {
-                    try {
-                        JSONObject("{\"v\":$result}").getString("v")
-                    } catch (_: Exception) {
-                        result
-                    }
-                } else {
-                    result ?: "null"
-                }
-                deferred.complete(unquoted)
+            webView.evaluateJavascript(BrowserUseJS.guardedEvaluation(js)) { result ->
+                deferred.complete(BrowserUseJS.decodeEvaluationResult(result))
             }
             withTimeoutOrNull(timeoutMs) { deferred.await() } ?: run {
                 markWedged("evaluateJavascript got no callback within ${timeoutMs / 1000}s")
@@ -1639,6 +1620,8 @@ class BrowserUseManager(
             } else {
                 BrowserActionResult(text = raw)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             BrowserActionResult.error("JavaScript error: ${e.message}")
         }
@@ -1657,6 +1640,8 @@ class BrowserUseManager(
             } else {
                 BrowserActionResult(text = raw)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             BrowserActionResult.error("JavaScript error: ${e.message}")
         }

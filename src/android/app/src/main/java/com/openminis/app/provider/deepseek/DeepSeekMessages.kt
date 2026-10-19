@@ -15,9 +15,14 @@ internal object DeepSeekMessages {
         thinking: ThinkingLevel,
     ): JSONObject {
         val wire = JSONArray()
-        val lastUser = messages.indexOfLast { it.role == LLMMessage.Role.USER }
+        val preservedIds = messages.filter { readReplay(it, model.id) != null }
+            .flatMap { it.contentParts.filterIsInstance<AgentContentPart.ToolUse>() }.map { it.id }.toSet()
+        val wireMessages = com.openminis.app.provider.ToolIdCompatibility.messages(
+            messages, com.openminis.app.provider.ToolIdCompatibility.Format.DEEPSEEK, preservedIds,
+        )
+        val lastUser = wireMessages.indexOfLast { it.role == LLMMessage.Role.USER }
         require(images.isEmpty() || lastUser >= 0) { "DeepSeek images require a user message" }
-        messages.forEachIndexed { index, message ->
+        wireMessages.forEachIndexed { index, message ->
             if (message.audioParts.isNotEmpty()) {
                 throw LLMError.ProviderError("DeepSeek Messages does not support audio input")
             }

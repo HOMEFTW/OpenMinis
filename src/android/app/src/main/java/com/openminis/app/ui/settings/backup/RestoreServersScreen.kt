@@ -72,7 +72,7 @@ fun RestoreServersScreen(
             // content worth returning to.
             AddServerForm(
                 vm = vm,
-                onCancel = { adding = false },
+                onCancel = { vm.cancelPending(); adding = false },
                 // [T-android-connect-and-save] No folder step here. The saved
                 // path is only where browsing starts, and the user browses for
                 // the .minisbak next anyway — so a successful connection saves

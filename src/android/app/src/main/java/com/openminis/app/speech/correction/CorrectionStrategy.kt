@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.ModelGroup
+import com.openminis.app.data.model.ProviderCredential
+import com.openminis.app.data.model.effectiveOutputModalities
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.provider.ProviderFactory
@@ -18,6 +21,9 @@ data class CorrectionOutcome(
 sealed class CorrectionError(message: String) : Exception(message) {
     object NoModelAvailable : CorrectionError("no correction model configured")
     object EmptyResponse : CorrectionError("model returned nothing usable")
+    internal class ModelsFailed(val failures: List<CorrectionFailure>) : CorrectionError(
+        failures.joinToString { it.kind.name },
+    )
 }
 
 /**
@@ -56,45 +62,34 @@ class LlmCorrectionStrategy(
         locale: String,
     ): CorrectionOutcome {
         val started = System.currentTimeMillis()
-        val resolved = resolveModel() ?: throw CorrectionError.NoModelAvailable
-        val (entry, groupKind) = resolved
-
-        val instance = repository.instance(entry.providerInstanceId)
-            ?: throw CorrectionError.NoModelAvailable
-        // [T-android-keyless-provider-selection] usableApiKey — a keyless
-        // self-hosted correction model is usable. See QuickTestSheet.
-        val apiKey = repository.usableApiKey(instance) ?: throw CorrectionError.NoModelAvailable
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, this.context, overrides = entry.overrides)
-
-        // [T-android-voice-correction-diag] Name the resolved model BEFORE the
-        // request. A field report on 2026-08-15 showed only
-        // "correction failed / LLMError$InvalidApiKey" with a stack — which
-        // provider instance was actually used had to be reverse-engineered by
-        // matching the stack's provider class against every configured
-        // instance on the device (it turned out to be one with no API key
-        // saved). A user's log will never support that, so the identity has to
-        // be in the line itself. Logged at the call site because only here are
-        // the instance and entry both in scope.
-        Log.i(
-            TAG,
-            "[correction] resolved instance=${instance.label} (${instance.id}) " +
-                "type=${instance.providerType} model=${entry.model.id} " +
-                "group=${groupKind} hasKey=${apiKey.isNotBlank()}",
-        )
-
+        val resolved = resolveModels() ?: throw CorrectionError.NoModelAvailable
+        val (group, groupKind, entries) = resolved
         val profile = CorrectionLanguageProfile.resolve(locale, transcript)
         val prompt = buildPrompt(transcript, candidates, context, profile)
-        val response = provider.sendMessage(
-            messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
-            systemPrompt = systemPrompt(profile),
-            maxTokens = correctionMaxTokens(transcript.length, entry.model.maxOutputTokens),
-            // Reasoning traces add latency for no benefit here, and on some
-            // providers yield empty text with finish_reason=tool_calls.
-            thinkingLevel = ThinkingLevel.OFF,
-        )
-
-        val cleaned = cleanResponse(response.text)
-        if (cleaned.isEmpty()) throw CorrectionError.EmptyResponse
+        val cleaned = tryCorrectionModels(entries, group.fallbackStrategy) { entry ->
+            val instance = repository.instance(entry.providerInstanceId)?.takeIf { it.isEnabled }
+                ?: throw CorrectionError.NoModelAvailable
+            var apiKey = repository.usableApiKey(instance)
+                ?: if (repository.hasAnyCredential(instance)) "" else throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+            if (instance.credentialType == ProviderCredential.oauth) {
+                val manager = com.openminis.app.auth.OAuthManager.forInstance(this.context, instance)
+                val fresh = manager?.validAccessToken()
+                if (manager != null && fresh == null) throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                if (fresh != null) {
+                    if (fresh != apiKey) repository.saveApiKey(instance.id, fresh)
+                    apiKey = fresh
+                }
+            }
+            val provider = ProviderFactory.create(instance, apiKey, entry.model, this.context, overrides = entry.overrides)
+            Log.i(TAG, "[correction] type=${instance.providerType} model=${entry.model.id} group=$groupKind")
+            val response = provider.sendMessage(
+                messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
+                systemPrompt = systemPrompt(profile),
+                maxTokens = correctionMaxTokens(transcript.length, entry.model.maxOutputTokens),
+                thinkingLevel = ThinkingLevel.OFF,
+            )
+            cleanResponse(response.text).ifEmpty { throw CorrectionError.EmptyResponse }
+        }
         return CorrectionOutcome(
             correctedText = cleaned,
             modelGroupUsed = groupKind,
@@ -102,21 +97,16 @@ class LlmCorrectionStrategy(
         )
     }
 
-    /**
-     * Prefer the dedicated sub-model group, fall back to the primary. Mirrors
-     * iOS CorrectionModelResolver; reuses [ProviderRepository.resolveTitleSubEntry]
-     * so correction and title generation cannot drift apart on which
-     * "lightweight model" they mean.
-     */
-    private fun resolveModel(): Pair<ModelEntry, String>? {
-        repository.resolveTitleSubEntry()?.let { return it to "sub" }
-        val primaryGroupId = repository.defaultPrimaryGroupId
-        val group = primaryGroupId?.let { repository.group(it) }
-        // [T-android-group-resolve-skip-uncredentialed] Credential-aware filter:
-        // picking a member whose provider has no credential would fail the
-        // correction request outright instead of using the next usable member.
-        val entry = group?.let { repository.availableMemberEntries(it).firstOrNull() }
-        if (entry != null) return entry to "primary"
+    private fun resolveModels(): Triple<ModelGroup, String, List<ModelEntry>>? {
+        for ((groupId, kind) in listOf(repository.defaultSubGroupId to "sub", repository.defaultPrimaryGroupId to "primary")) {
+            val group = groupId?.let(repository::group) ?: continue
+            val available = repository.availableMemberEntries(group).filter {
+                "text" in it.model.effectiveOutputModalities.orEmpty().ifEmpty { listOf("text") } &&
+                    !it.model.id.lowercase().let { id -> listOf("embedding", "embed-", "whisper").any(id::contains) }
+            }
+            val ordered = correctionModelOrder(group, available, kotlin.random.Random.nextInt())
+            if (ordered.isNotEmpty()) return Triple(group, kind, ordered)
+        }
         Log.e(TAG, "no correction model available (neither sub nor primary group resolves)")
         return null
     }

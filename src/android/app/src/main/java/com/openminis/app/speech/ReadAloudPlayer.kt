@@ -72,6 +72,7 @@ class ReadAloudPlayer(context: Context) {
 
     /** Currently playing provider audio, if any — held so [stop] can cancel it. */
     private var player: MediaPlayer? = null
+    private val volumeBoost = SpeechVolumeBoost()
 
     /**
      * Completes the in-flight [playBytes] suspension when [stop] tears the
@@ -452,8 +453,8 @@ class ReadAloudPlayer(context: Context) {
      * QuickTestSheet — MediaPlayer needs a file/descriptor, not a byte array.
      */
     fun setPlaybackVolume(value: Float) {
-        val gain = if (value.isFinite()) value.coerceIn(0f, 1f) else 1f
-        runCatching { player?.setVolume(gain, gain) }
+        val gain = boundedSpeechVolume(value)
+        runCatching { player?.let { val base = volumeBoost.apply(gain, it.audioSessionId); it.setVolume(base, base) } }
         // Android's system engine applies this from the next utterance.
         system.speechVolume = gain
     }
@@ -484,7 +485,7 @@ class ReadAloudPlayer(context: Context) {
                 // logged but non-fatal — muting is the exception, not the rule.
                 mp.setAudioAttributes(playbackAttributes)
                 val volume = VoiceOutputState.volume.value
-                mp.setVolume(volume, volume)
+                mp.setVolume(volume.coerceAtMost(1f), volume.coerceAtMost(1f))
                 requestAudioFocus()
                 mp.setDataSource(file.absolutePath)
                 mp.setOnCompletionListener { finish() }
@@ -494,6 +495,8 @@ class ReadAloudPlayer(context: Context) {
                     true
                 }
                 mp.prepare()
+                val playbackVolume = volumeBoost.apply(volume, mp.audioSessionId)
+                mp.setVolume(playbackVolume, playbackVolume)
                 // [T-android-tts-rom-compat] start() FIRST, speed second, each
                 // in its own guard. The previous order relied on
                 // setPlaybackParams-on-prepared implicitly starting playback —
@@ -636,6 +639,7 @@ class ReadAloudPlayer(context: Context) {
         (text.length * 90L + 400L).coerceIn(600L, 30_000L)
 
     private fun releasePlayer() {
+        volumeBoost.release()
         player?.runCatching {
             if (isPlaying) stop()
             release()

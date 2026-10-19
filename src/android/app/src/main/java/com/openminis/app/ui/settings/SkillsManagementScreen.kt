@@ -1,5 +1,7 @@
 package com.openminis.app.ui.settings
 
+import com.openminis.app.util.launchSafely
+
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisTextButton
@@ -501,7 +503,7 @@ private fun SkillImportSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     MinisTextButton(
-                        onClick = { fileLauncher.launch("*/*") },
+                        onClick = { fileLauncher.launchSafely(context, "*/*") },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(stringResource(R.string.skill_import_file_button)) }
                 }
@@ -771,7 +773,7 @@ fun SkillDetailScreen(
 
                 DetailRow(clickable = !isBusy, onClick = {
                     if (isBusy) return@DetailRow
-                    fileUpdateLauncher.launch("*/*")
+                    fileUpdateLauncher.launchSafely(context, "*/*")
                 }) {
                     SettingsActionIcon(Icons.Outlined.Description, SettingsIconBlue)
                     Spacer(Modifier.width(14.dp))

@@ -55,6 +55,7 @@ import com.openminis.app.data.SafMountHelper
 import com.openminis.app.ui.settings.SettingsScaffold
 import com.openminis.app.ui.settings.SettingsSection
 import com.openminis.app.ui.settings.SettingsSwitchRow
+import com.openminis.app.util.launchSafely
 
 /**
  * [T-android-rclone-ui] Backup destinations — the Android peer of iOS
@@ -72,6 +73,7 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
     val browse by vm.browse.collectAsState()
 
     var adding by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<RcloneRemoteStore.Remote?>(null) }
     // Name of the destination saved by the last completed save, so the list
     // can confirm it. Cleared once acknowledged.
     var justSaved by remember { mutableStateOf<String?>(null) }
@@ -102,22 +104,36 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
         justSaved = vm.addLocalFolder(uri.toString(), display)
     }
 
-    SettingsScaffold(title = stringResource(R.string.backup_dest_title), onBack = onBack) {
-        if (browse != null) {
+    SettingsScaffold(
+        title = stringResource(R.string.backup_dest_title),
+        onBack = {
+            if (!busy && (adding || editing != null || browse != null)) {
+                vm.cancelPending(); adding = false; editing = null
+            } else if (!busy) onBack()
+        },
+    ) {
+        if (browse != null && editing == null) {
             // Returning to the list on success is the whole point: the form
             // used to stay put, so a successful save looked identical to one
             // that silently failed and users re-saved the same destination.
             FolderBrowser(vm) { savedName ->
                 adding = false
+                editing = null
                 justSaved = savedName
             }
             return@SettingsScaffold
         }
 
-        if (adding) {
+        if (adding || editing != null) {
             AddServerForm(
                 vm = vm,
-                onCancel = { adding = false },
+                initialRemote = editing,
+                onCancel = { vm.cancelPending(); adding = false; editing = null },
+                onSaved = { savedName ->
+                    editing = null
+                    adding = false
+                    justSaved = savedName
+                },
             )
             return@SettingsScaffold
         }
@@ -167,7 +183,8 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
 
         Column(Modifier.padding(16.dp)) {
             MinisButton(
-                onClick = { adding = true },
+                onClick = { vm.clearError(); vm.clearCertificateRejection(); adding = true },
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.backup_dest_add_server)) }
 
@@ -177,15 +194,28 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
             // action for the remote-backup case the screen was built for.
             Spacer(Modifier.height(8.dp))
             MinisOutlinedButton(
-                onClick = { folderPicker.launch(null) },
+                onClick = { folderPicker.launchSafely(context, null) },
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.backup_dest_add_local_folder)) }
 
             if (remotes.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 remotes.forEach { r ->
+                    if (!RcloneRemoteStore.isLocalFolder(r.backend)) {
+                        MinisOutlinedButton(
+                            onClick = {
+                                vm.clearError()
+                                vm.clearCertificateRejection()
+                                editing = r
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        ) { Text(stringResource(R.string.build34_backup_edit_server, r.name)) }
+                    }
                     MinisOutlinedButton(
                         onClick = { vm.remove(r.name) },
+                        enabled = !busy,
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     ) { Text(stringResource(R.string.backup_dest_remove, r.name)) }
                 }
@@ -226,22 +256,28 @@ internal fun AddServerForm(
     pickFolder: Boolean = true,
     /** Called with the saved name when [pickFolder] is false. */
     onSaved: (String) -> Unit = {},
+    initialRemote: RcloneRemoteStore.Remote? = null,
 ) {
     val busy by vm.busy.collectAsState()
     val error by vm.error.collectAsState()
     val certificateRejected by vm.certificateRejected.collectAsState()
 
     var backendExpanded by remember { mutableStateOf(false) }
-    var backend by remember { mutableStateOf(RcloneBackendCatalog.all.first()) }
-    var displayName by remember { mutableStateOf("") }
-    val fieldValues = remember { mutableStateMapOf<String, String>() }
+    var backend by remember(initialRemote?.name) {
+        mutableStateOf(RcloneBackendCatalog.backend(initialRemote?.backend.orEmpty()) ?: RcloneBackendCatalog.all.first())
+    }
+    var displayName by remember(initialRemote?.name) { mutableStateOf(initialRemote?.name.orEmpty()) }
+    val fieldValues = remember(initialRemote?.name) {
+        mutableStateMapOf<String, String>().apply { putAll(initialRemote?.params.orEmpty()) }
+    }
     // [T-android-rclone-tls-timeout] Opt-in to trusting a self-signed
     // certificate. Not persisted here — it rides along to connectAndBrowse and
     // is stored with the remote only if the connection actually succeeds.
-    var allowInsecureTLS by remember { mutableStateOf(false) }
+    var allowInsecureTLS by remember(initialRemote?.name) { mutableStateOf(initialRemote?.allowInsecureTLS ?: false) }
+    var clearSecret by remember(initialRemote?.name) { mutableStateOf(false) }
     // Absolute path field — the SFTP-absolute-path lesson: always offer a
     // free-text path so a non-chrooted server can start anywhere, not just home.
-    var startPath by remember { mutableStateOf("") }
+    var startPath by remember(initialRemote?.name) { mutableStateOf(initialRemote?.path.orEmpty()) }
 
     // NO verticalScroll here — SettingsScaffold already wraps its content in a
     // scrolling Column, and nesting a second verticalScroll gives this child an
@@ -252,12 +288,13 @@ internal fun AddServerForm(
         // Backend picker
         ExposedDropdownMenuBox(
             expanded = backendExpanded,
-            onExpandedChange = { backendExpanded = it },
+            onExpandedChange = { if (!busy && initialRemote == null) backendExpanded = it },
         ) {
             OutlinedTextField(
                 value = backend.title,
                 onValueChange = {},
                 readOnly = true,
+                enabled = !busy && initialRemote == null,
                 label = { Text(stringResource(R.string.backup_dest_server_type)) },
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(backendExpanded) },
                 modifier = Modifier.fillMaxWidth().menuAnchor(),
@@ -292,19 +329,36 @@ internal fun AddServerForm(
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = fieldValues[f.key] ?: "",
-                onValueChange = { fieldValues[f.key] = it },
+                onValueChange = { fieldValues[f.key] = it; if (f.isSecret) clearSecret = false },
                 label = {
                     Text(
                         if (f.isOptional) stringResource(R.string.backup_dest_field_optional, f.label)
                         else f.label,
                     )
                 },
-                placeholder = { Text(f.placeholder) },
+                placeholder = {
+                    Text(if (initialRemote != null && f.isSecret) {
+                        stringResource(R.string.build34_backup_keep_secret)
+                    } else f.placeholder)
+                },
                 singleLine = true,
                 enabled = !busy,
                 visualTransformation = if (f.isSecret) PasswordVisualTransformation()
                 else androidx.compose.ui.text.input.VisualTransformation.None,
                 modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        if (initialRemote != null) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.build34_backup_clear_secret),
+                checked = clearSecret,
+                onCheckedChange = {
+                    clearSecret = it
+                    if (it) backend.fields.filter { f -> f.isSecret }.forEach { f -> fieldValues[f.key] = "" }
+                },
+                enabled = !busy,
+                showDivider = false,
             )
         }
 
@@ -324,7 +378,7 @@ internal fun AddServerForm(
         // certificates" switch sitting next to a password field invites turning
         // off a protection that was never in the way; surfacing it at the moment
         // it would actually help keeps the choice informed.
-        if (certificateRejected) {
+        if (certificateRejected || initialRemote?.allowInsecureTLS == true) {
             Spacer(Modifier.height(16.dp))
             SettingsSwitchRow(
                 title = stringResource(R.string.backup_dest_trust_certificate),
@@ -351,9 +405,11 @@ internal fun AddServerForm(
                     // connection IS the confirmation, so persist it here and
                     // return. Nothing is saved when the connection fails —
                     // this runs only on success.
-                    onConnected = if (pickFolder) null else {
+                    onConnected = if (pickFolder && initialRemote == null) null else {
                         { vm.saveConnected(onSaved) }
                     },
+                    originalName = initialRemote?.name,
+                    clearSecret = clearSecret,
                 )
             },
             enabled = !busy && nameOk,
@@ -372,7 +428,8 @@ internal fun AddServerForm(
                     stringResource(
                         // "Connect" alone did not say what happens next, and
                         // what happened next differed by host.
-                        if (pickFolder) R.string.backup_dest_connect
+                        if (initialRemote != null) R.string.build34_backup_save_server
+                        else if (pickFolder) R.string.backup_dest_connect
                         else R.string.backup_dest_connect_and_save,
                     ),
                 )

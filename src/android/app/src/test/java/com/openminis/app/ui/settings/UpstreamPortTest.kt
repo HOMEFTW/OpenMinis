@@ -40,10 +40,12 @@ class UpstreamPortTest {
     }
 
     @Test fun dateWindowIncludesBoundaryAndExcludesFuture() {
-        val now = 30L * 86_400_000
-        assertTrue(usageInDateRange(now - 7L * 86_400_000, now, 7))
-        assertFalse(usageInDateRange(now - 7L * 86_400_000 - 1, now, 7))
-        assertFalse(usageInDateRange(now + 1, now, 7))
+        val now = java.time.Instant.parse("2026-10-19T12:00:00Z").toEpochMilli()
+        val zone = java.time.ZoneId.of("UTC")
+        val start = java.time.Instant.parse("2026-10-13T00:00:00Z").toEpochMilli()
+        assertTrue(usageInDateRange(start, now, 7, zone))
+        assertFalse(usageInDateRange(start - 1, now, 7, zone))
+        assertFalse(usageInDateRange(now + 1, now, 7, zone))
         assertTrue(usageInDateRange(0, now, 0))
     }
     @Test fun searchMatchesModelAndProviderCaseInsensitively() {

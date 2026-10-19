@@ -43,6 +43,30 @@ class QueuedRunIsolationTest {
         assertFalse(resumed)
     }
 
+    @Test fun `current only stop targets insertion and preserves its parent and other background work`() = runTest {
+        val ready = CompletableDeferred<Job>()
+        var resumed = false
+        val parent = launch {
+            assertFalse(QueuedRunIsolation.run({ ready.complete(it) }) { awaitCancellation() })
+            resumed = true
+        }
+        val background = launch { awaitCancellation() }
+        val child = ready.await()
+        testScheduler.runCurrent()
+        val cancelledIds = mutableListOf<String>()
+        assertTrue(stopCurrentInsertedRun(child, setOf("scheduled")) { id ->
+            cancelledIds += id
+            child.cancel()
+        })
+        parent.join()
+        assertEquals(listOf("scheduled"), cancelledIds)
+        assertTrue(resumed)
+        assertFalse(parent.isCancelled)
+        assertTrue(background.isActive)
+        assertFalse(stopCurrentInsertedRun(child, setOf("scheduled")) { fail("Inactive insertion must not intercept stop") })
+        background.cancel()
+    }
+
     @Test fun `inserted failure can be handled without cancelling parent and success is awaited`() = runTest {
         var caught = false
         try { QueuedRunIsolation.run({}) { error("tool failed") } }

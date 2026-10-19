@@ -562,7 +562,7 @@ private fun MdText(
                         clipboardManager.setText(AnnotatedString(snippet))
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         val preview = if (snippet.length > 40) snippet.take(37) + "…" else snippet
-                        Toast.makeText(context, "Copied: $preview", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(com.openminis.app.R.string.selection_copied_toast, preview), Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -2420,7 +2420,7 @@ private fun RenderBlock(block: MdBlock) {
                     )
                     Icon(
                         imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                        contentDescription = if (copied) "Copied" else "Copy code",
+                        contentDescription = stringResource(if (copied) com.openminis.app.R.string.build34_copied else com.openminis.app.R.string.build34_copy_code),
                         tint = if (copied) Color(0xFF34C759) else Color.White.copy(alpha = 0.4f),
                         modifier = Modifier
                             .size(16.dp)

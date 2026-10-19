@@ -72,10 +72,8 @@ class BackupImporter(
         var rejectedPaths: Int = 0,
         /**
          * Providers only: credentials actually WRITTEN to this device, and
-         * credentials that were in the package but KEPT because a value already
-         * existed locally. These drive the restore-complete credentials message
-         * (iOS parity, fix 93cad55ae): restored>0 → "restored N"; else kept>0 →
-         * "existing kept"; else → "no keys in package".
+         * credential entries that needed no write. Backup values take priority
+         * over existing values; equal values are not reported as restored.
          */
         var credentialsRestored: Int = 0,
         var credentialsKept: Int = 0,
@@ -222,7 +220,7 @@ class BackupImporter(
                         BackupCategory.SKILLS -> importSkills(work, fileIndex)
                         BackupCategory.MEMORY -> importMemory(work)
                         BackupCategory.MCP_SERVERS -> importMcpServers(work)
-                        BackupCategory.PROVIDERS -> importProviders(work)
+                        BackupCategory.PROVIDERS -> importProviders(work).also { importAppPreferences(work, it) }
                         BackupCategory.ENVIRONMENT_VARIABLES -> importEnvironmentVariables(work)
                         else -> null
                     }
@@ -681,15 +679,13 @@ class BackupImporter(
         get() = context.applicationContext as? com.openminis.app.MinisApp
 
     /**
-     * Restore `data/provider_config.json` via an order-preserving union merge
-     * ([ProviderRepository.mergeBackupProviderConfig]), then custom thinking
+     * Restore `data/provider_config.json` with backup settings taking priority,
+     * then custom thinking
      * rules from `data/thinking_rules.jsonl`, then credentials from
      * `secrets.json`. Mirrors iOS `importProviders`.
      *
-     * Counting (iOS parity, fix 93cad55ae): imported = instances added; skipped
-     * = package instances already present (union-by-id, not overwritten) —
-     * NEVER reported as "updated". credentialsRestored/Kept come from the
-     * secrets restore and drive the UI's credentials message.
+     * Counts reflect actual inserted/changed/unchanged configuration records,
+     * including model parameters and merged groups, not just new providers.
      */
     private fun importProviders(root: File): CategoryReport {
         val report = CategoryReport(BackupCategory.PROVIDERS.key)
@@ -720,11 +716,10 @@ class BackupImporter(
             )
         }
 
-        val (before, after) = repo.mergeBackupProviderConfig(config)
-        report.imported = maxOf(0, after - before)
-        // Everything the package carried that did not newly insert was already
-        // present and left untouched — skipped, not updated.
-        report.skipped = maxOf(0, config.instances.size - report.imported)
+        val merged = repo.applyBackupProviderConfig(config)
+        report.imported = merged.imported
+        report.updated = merged.updated
+        report.skipped = merged.skipped
 
         // Thinking rules AFTER the instance merge, so a rule's instance exists.
         val ruleRecords = readJsonlList(File(root, "data"), "thinking_rules").mapNotNull { env ->
@@ -747,20 +742,32 @@ class BackupImporter(
         // After the instance merge, like iOS, because a definition's
         // modelGroupId may point at a group that merge just restored. Absent
         // in older packages; that is not an error. An Android package carries
-        // them in provider_config.json as well; those merged above, so the
-        // same ids come back here as "not newer" and are skipped, not doubled.
-        val agents = readJsonlList(File(root, "data"), BackupSubAgentMapping.FILE_BASE).mapNotNull { env ->
+        // them in provider_config.json as well; the two sources are combined
+        // below so each logical agent is restored and counted once.
+        val fileAgents = readJsonlList(File(root, "data"), BackupSubAgentMapping.FILE_BASE).mapNotNull { env ->
             env.obj?.let {
                 runCatching {
                     BackupFormat.json.decodeFromJsonElement(BackupSubAgentRecord.serializer(), it)
                 }.getOrNull()?.let { r -> BackupSubAgentMapping.fromRecord(r) }
             }
         }
+        // One logical agent may be carried in BOTH files. Merge/count it once,
+        // and use the canonical group id after a same-name group was combined.
+        val agents = (config.subAgents + fileAgents).distinctBy { it.id }.map {
+            it.copy(modelGroupId = merged.groupIdRemapping[it.modelGroupId] ?: it.modelGroupId)
+        }
         if (agents.isNotEmpty()) {
-            val (written, skipped) = repo.restoreBackupSubAgents(agents)
-            report.imported += written
-            report.skipped += skipped
-            AppLogger.info(TAG, "[Restore] sub agents: $written applied, $skipped skipped (local newer, unchanged or same name)")
+            val before = repo.config.value.subAgents.associateBy { it.id }
+            repo.restoreBackupSubAgents(agents)
+            val after = repo.config.value.subAgents.associateBy { it.id }
+            for (agent in agents) {
+                val restored = after[agent.id]
+                when {
+                    restored != null && agent.id !in before -> report.imported++
+                    restored != null && restored != before[agent.id] -> report.updated++
+                    else -> report.skipped++
+                }
+            }
         }
 
         // Credentials (secrets.json lives at the work root, already decrypted).
@@ -769,12 +776,42 @@ class BackupImporter(
             var restored = 0
             var kept = 0
             for (s in secrets.providers) {
-                if (repo.restoreBackupProviderSecret(s)) restored++ else kept++
+                if (repo.restoreBackupProviderSecret(s, overwriteExisting = true)) restored++ else kept++
             }
             report.credentialsRestored = restored
             report.credentialsKept = kept
         }
         return report
+    }
+
+    /** Older Android/iOS packages may omit this member; missing keys keep device values. */
+    private fun importAppPreferences(root: File, report: CategoryReport) {
+        val file = File(root, "data/${BackupAppPreferences.FILE_NAME}")
+        if (!file.isFile) return
+        val document = runCatching {
+            require(file.length() <= 64 * 1024) { "Android settings member is too large" }
+            BackupFormat.json.parseToJsonElement(file.readText()) as? JsonObject
+                ?: error("Android settings member is not an object")
+        }.getOrElse {
+            report.unreadable++
+            AppLogger.warning(TAG, "[Restore] Android settings unreadable: ${it.message}")
+            return
+        }
+        val current = BackupAppPreferences.UpdateSettings(
+            channel = com.openminis.app.data.UpdatePreferences.channel(context),
+            autoCheck = com.openminis.app.data.UpdatePreferences.autoCheckEnabled(context),
+        )
+        val plan = BackupAppPreferences.plan(current, document)
+        // Use the public setters so any pending update offer is invalidated too.
+        if (plan.settings.channel != current.channel) {
+            com.openminis.app.data.UpdatePreferences.setChannel(context, plan.settings.channel)
+        }
+        if (plan.settings.autoCheck != current.autoCheck) {
+            com.openminis.app.data.UpdatePreferences.setAutoCheckEnabled(context, plan.settings.autoCheck)
+        }
+        report.updated += plan.updated
+        report.skipped += plan.skipped
+        report.unreadable += plan.unreadable
     }
 
     /**

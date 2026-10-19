@@ -158,13 +158,14 @@ class OpenAIProvider private constructor(
      * xAI's own behaviour, so leaving the key out keeps the body byte-identical
      * to before this feature existed.
      */
-    internal fun resolvedServiceTier(): String? =
-        if (com.openminis.app.data.FastModePrefs.isEnabled() &&
-            (supportsPriorityProcessing || (supportsGptFastMode && FastModeSupport.isGptTextModel(model)))) {
-            "priority"
-        } else {
-            null
-        }
+    internal fun resolvedServiceTier(): String? {
+        val tier = com.openminis.app.data.FastModePrefs.speedTier.value
+        if (tier == "standard") return null
+        // xAI retains its existing priority wire value for either enabled tier.
+        if (supportsPriorityProcessing) return "priority"
+        if (!supportsGptFastMode || !FastModeSupport.isGptTextModel(model)) return null
+        return if (tier == "ultrafast" && OpenAISpeedTiers.supportsUltrafast(model)) "ultrafast" else "priority"
+    }
 
     /** API Key constructor (Chat Completions API by default; set useResponsesAPI=true for /v1/responses). */
     constructor(
@@ -1974,6 +1975,9 @@ class OpenAIProvider private constructor(
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): JSONObject {
+        val wireMessages = com.openminis.app.provider.ToolIdCompatibility.messages(
+            messages, com.openminis.app.provider.ToolIdCompatibility.Format.CHAT,
+        )
         // T264: cross-provider image sanitization, mirrors iOS
         // OpenAIAgentProvider.swift:744-768 / 900-918. When the target model
         // doesn't declare "image" in inputModalities (e.g. DeepSeek V4 after
@@ -2088,8 +2092,8 @@ class OpenAIProvider private constructor(
         // there; non-reasoning models gate this off via includeReasoning=false.
         val placeholderAllowed = includeReasoning
 
-        val lastUserIndex = messages.indexOfLast { it.role == LLMMessage.Role.USER }
-        for ((index, msg) in messages.withIndex()) {
+        val lastUserIndex = wireMessages.indexOfLast { it.role == LLMMessage.Role.USER }
+        for ((index, msg) in wireMessages.withIndex()) {
             if (msg.contentParts.isNotEmpty()) {
                 // Structured content parts
                 when {
@@ -3115,8 +3119,11 @@ class OpenAIProvider private constructor(
         val input = JSONArray()
         // [T-android-responses-toplevel-images] Same contract as
         // buildRequestBody: top-level images ride on the LAST user message.
-        val lastUserIdx = messages.indexOfLast { it.role == LLMMessage.Role.USER }
-        for ((msgIndex, msg) in messages.withIndex()) {
+        val wireMessages = com.openminis.app.provider.ToolIdCompatibility.messages(
+            messages, com.openminis.app.provider.ToolIdCompatibility.Format.RESPONSES,
+        )
+        val lastUserIdx = wireMessages.indexOfLast { it.role == LLMMessage.Role.USER }
+        for ((msgIndex, msg) in wireMessages.withIndex()) {
             val attachTopLevelImages =
                 msgIndex == lastUserIdx && msg.role == LLMMessage.Role.USER && imageParts.isNotEmpty()
             if (msg.contentParts.isNotEmpty()) {

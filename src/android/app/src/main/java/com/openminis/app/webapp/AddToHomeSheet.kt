@@ -1,5 +1,7 @@
 package com.openminis.app.webapp
 
+import com.openminis.app.util.launchSafely
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -305,7 +307,7 @@ fun AddToHomeSheet(
                     IconOption(
                         selected = selectedIcon is IconChoice.Gallery,
                         onClick = {
-                            galleryLauncher.launch(
+                            galleryLauncher.launchSafely(context,
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                             )
                         },

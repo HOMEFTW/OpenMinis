@@ -170,6 +170,7 @@ object OpenAIModelsApi {
                     idLower.contains("codex")
 
                 val defaults = LLMModel(id, displayName, "OpenAI")
+                val limits = OpenAIModelLimits.read(obj)
                 parsed.add(
                     LLMModel(
                         id = id,
@@ -178,11 +179,14 @@ object OpenAIModelsApi {
                         inputModalities = inputModalities ?: defaults.inputModalities,
                         outputModalities = outputModalities ?: defaults.outputModalities,
                         supportsReasoning = if (knownReasoning) true else defaults.supportsReasoning,
+                        contextWindow = limits.context ?: defaults.contextWindow,
+                        maxOutputTokens = limits.output ?: defaults.maxOutputTokens,
+                        supportedServiceTiers = OpenAISpeedTiers.read(obj),
                     )
                 )
             }
             if (parsed.isEmpty()) return@withContext fallback
-            ModelsDevApi.enrichModels(parsed)
+            ModelsDevApi.enrichModels(parsed, preserveProviderLimits = isCustomBase)
         } catch (_: Exception) {
             return@withContext fallback
         }
@@ -201,10 +205,9 @@ object OpenAIModelsApi {
     }
 
     /** Check if a base URL points to official OpenAI endpoints. */
-    private fun isOfficialOpenAI(baseURL: String): Boolean {
-        val lower = baseURL.lowercase()
-        return lower.contains("api.openai.com") || lower.contains("chatgpt.com")
-    }
+    internal fun isOfficialOpenAI(baseURL: String): Boolean = runCatching {
+        java.net.URI(baseURL).host?.lowercase() in setOf("api.openai.com", "chatgpt.com")
+    }.getOrDefault(false)
 
     private fun buildURL(baseURL: String?): String {
         if (baseURL == null) return "https://api.openai.com/v1/models"

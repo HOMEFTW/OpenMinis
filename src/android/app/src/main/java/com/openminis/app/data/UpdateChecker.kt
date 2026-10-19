@@ -36,6 +36,7 @@ object UpdateChecker {
     private const val TAG = "UpdateChecker"
     private const val OWNER = "HOMEFTW"
     private const val REPO = "OpenMinis"
+    internal const val RELEASES_API_URL = "https://api.github.com/repos/$OWNER/$REPO/releases?per_page=30"
     private const val DOWNLOAD_FILENAME = "minis-update.apk"
     /**
      * Sub-directory of `filesDir` where we stage downloaded update APKs. We
@@ -97,8 +98,8 @@ object UpdateChecker {
      * All network work happens on [Dispatchers.IO]; safe to call from any
      * coroutine scope.
      */
-    suspend fun check(): CheckResult = withContext(Dispatchers.IO) {
-        val url = "https://api.github.com/repos/$OWNER/$REPO/releases?per_page=30"
+    suspend fun check(includePrereleases: Boolean = false): CheckResult = withContext(Dispatchers.IO) {
+        val url = RELEASES_API_URL
         AppLogger.info(TAG, "GET $url (local=${BuildConfig.VERSION_NAME})")
         try {
             val req = Request.Builder()
@@ -147,6 +148,7 @@ object UpdateChecker {
                 for (i in 0 until arr.length()) {
                     val r = arr.optJSONObject(i) ?: continue
                     if (r.optBoolean("draft", false)) continue
+                    if (!includePrereleases && r.optBoolean("prerelease", false)) continue
                     val tag = r.optString("tag_name")
                     if (tag.isEmpty()) continue
                     val (apkUrl, apkSize) = findApkAsset(r.optJSONArray("assets"))
@@ -251,23 +253,26 @@ object UpdateChecker {
     }
 
     /** Public so UI can deep-link users to manual download when GitHub is blocked. */
-    const val RELEASES_URL: String = "https://github.com/HOMEFTW/OpenMinis/releases"
+    const val RELEASES_URL: String = "https://github.com/$OWNER/$REPO/releases"
 
     internal fun <T> highestVersion(items: List<T>, version: (T) -> String): T? =
         items.maxWithOrNull(Comparator { a, b -> compareVersions(version(a), version(b)) })
 
-    /** Returns (downloadUrl, sizeBytes) for the first .apk asset, or (null, 0). */
-    private fun findApkAsset(assets: JSONArray?): Pair<String?, Long> {
+    /** Prefer the current install APK over archived or instrumentation attachments. */
+    internal fun findApkAsset(assets: JSONArray?): Pair<String?, Long> {
         if (assets == null) return null to 0L
+        val candidates = mutableListOf<JSONObject>()
         for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
-            val name = a.optString("name").lowercase()
-            if (name.endsWith(".apk")) {
-                val u = a.optString("browser_download_url").ifEmpty { null }
-                if (u != null) return u to a.optLong("size", 0)
-            }
+            val name = a.optString("name").lowercase(java.util.Locale.ROOT)
+            if (!name.endsWith(".apk") || name.startsWith("app-debug-before-") || name.contains("androidtest")) continue
+            if (a.optString("browser_download_url").isNotEmpty()) candidates += a
         }
-        return null to 0L
+        val chosen = candidates.minByOrNull { asset ->
+            val name = asset.optString("name").lowercase(java.util.Locale.ROOT)
+            when { name == "app-debug.apk" -> 0; name.endsWith("arm64-v8a.apk") -> 1; name.contains("universal") -> 2; else -> 3 }
+        } ?: return null to 0L
+        return chosen.optString("browser_download_url") to chosen.optLong("size", 0)
     }
 
     /**

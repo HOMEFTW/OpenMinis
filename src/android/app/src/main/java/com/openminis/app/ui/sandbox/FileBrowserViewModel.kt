@@ -230,6 +230,12 @@ class FileBrowserViewModel(
 
     private val _uiState = MutableStateFlow(FileBrowserUiState())
     val uiState: StateFlow<FileBrowserUiState> = _uiState.asStateFlow()
+    private val browserPrefs = appContext?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+    private val hiddenPreferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+        if (key == PREF_KEY_SHOW_HIDDEN || key == null) {
+            viewModelScope.launch { setShowHidden(prefs.getBoolean(PREF_KEY_SHOW_HIDDEN, false)) }
+        }
+    }
 
     /** Cached unsorted listing so re-sort doesn't need to re-stat the dir. */
     private var rawItems: List<FileItem> = emptyList()
@@ -281,15 +287,18 @@ class FileBrowserViewModel(
         // a3e7f1d0). Persisted lazily via SharedPreferences when the user
         // toggles the menu item; if [appContext] is null (e.g. test
         // harness) we fall back to the default false.
-        val persisted = appContext
-            ?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-            ?.getBoolean(PREF_KEY_SHOW_HIDDEN, false)
-            ?: false
+        browserPrefs?.registerOnSharedPreferenceChangeListener(hiddenPreferenceListener)
+        val persisted = browserPrefs?.getBoolean(PREF_KEY_SHOW_HIDDEN, false) ?: false
         if (persisted) {
             _uiState.value = _uiState.value.copy(showHidden = true)
         }
         updatePathComponents()
         loadItems()
+    }
+
+    override fun onCleared() {
+        browserPrefs?.unregisterOnSharedPreferenceChangeListener(hiddenPreferenceListener)
+        super.onCleared()
     }
 
     /**

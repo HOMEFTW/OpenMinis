@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="build34_loading_session">正在加载会话</string>
+    <string name="build34_stop_current">仅停止当前工具</string>
+    <string name="build34_stop_all">全部停止</string>
+    <string name="build34_stop_immediately">立即停止</string>
+    <string name="build34_stop_confirm">停止前确认</string>
+    <string name="build34_scheduled_badge">在首页时钟图标显示任务数量</string>
+    <string name="build34_picker_unavailable">无法打开系统选择器，请检查文件管理或相册应用是否已安装并启用。</string>
+    <string name="build34_share_delivered">分享内容已添加到「%1$s」</string>
+    <string name="build34_this_chat">当前会话</string>
+    <string name="build34_copy_code">复制代码</string>
+    <string name="build34_copied">已复制</string>
+    <string name="build34_updates_auto">自动检查更新</string>
+    <string name="build34_updates_channel">更新渠道</string>
+    <string name="build34_updates_stable">稳定版</string>
+    <string name="build34_updates_beta">测试版</string>
+    <string name="build34_update_available">发现新版本 %1$s</string>
+    <string name="build34_user_questions">允许 AI 向用户提问</string>
+    <string name="build34_user_questions_background">后台提问通知</string>
+    <string name="build34_model_switched">已切换至 %1$s</string>
+</resources>

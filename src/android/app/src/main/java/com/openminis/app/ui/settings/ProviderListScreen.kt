@@ -1,5 +1,7 @@
 package com.openminis.app.ui.settings
 
+import com.openminis.app.util.launchSafely
+
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -345,7 +347,7 @@ fun ProviderListScreen(
                         .fillMaxWidth()
                         .clickable {
                             showMenu = false
-                            importLauncher.launch(
+                            importLauncher.launchSafely(context,
                                 arrayOf(
                                     "application/json",
                                     "application/zip",

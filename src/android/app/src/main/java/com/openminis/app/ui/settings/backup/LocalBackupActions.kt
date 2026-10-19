@@ -12,6 +12,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisOutlinedButton
+import com.openminis.app.util.launchSafely
 import java.io.File
 
 @Composable
@@ -31,7 +32,7 @@ internal fun LocalBackupActions(file: File, vm: BackupViewModel = androidx.lifec
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MinisOutlinedButton(enabled = !savingLocal && pendingSavePath == null, onClick = {
                 pendingSavePath = file.absolutePath
-                saveLauncher.launch(file.name)
+                if (!saveLauncher.launchSafely(context, file.name)) pendingSavePath = null
             }) { Text(stringResource(R.string.pr_backup_save)) }
             MinisOutlinedButton(enabled = !savingLocal, onClick = {
                 try {

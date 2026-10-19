@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.resume
 
 /**
@@ -29,6 +32,7 @@ object OffloadPermissionManager {
         val toolTitle: String,
         val description: String,
         val sessionId: String,
+        val requestId: String = java.util.UUID.randomUUID().toString(),
     )
 
     enum class PermissionCategory(val displayName: String) {
@@ -119,7 +123,10 @@ object OffloadPermissionManager {
     private val _pendingRequest = MutableStateFlow<PermissionRequest?>(null)
     val pendingRequest: StateFlow<PermissionRequest?> = _pendingRequest.asStateFlow()
 
-    private var pendingContinuation: kotlin.coroutines.Continuation<Response>? = null
+    const val TOOL_DIALOG_TIMEOUT_MS = 5 * 60 * 1000L
+    private val permissionDialogMutex = Mutex()
+    private val pendingPermissionLock = Any()
+    private var pendingContinuation: CancellableContinuation<Response>? = null
 
     // ── Android system runtime permission request (for location etc.) ──────────
 
@@ -358,52 +365,67 @@ object OffloadPermissionManager {
         return when (level) {
             PermissionLevel.BYPASS -> true
             PermissionLevel.NOT_ALLOWED -> false
-            PermissionLevel.ASK_ONCE -> {
-                // T338: a prior "Deny in this session" short-circuits
-                // before any grants check or dialog so the agent can't
-                // spam the user.
-                val denials = sessionDenials.getOrPut(sessionId) { mutableSetOf() }
-                if (toolName in denials) return false
+            PermissionLevel.ASK_ONCE -> withTimeoutOrNull(TOOL_DIALOG_TIMEOUT_MS) {
+                permissionDialogMutex.withLock {
+                    // Queueing and dialog time share one deadline.
+                    when (getLevel(toolName)) {
+                        PermissionLevel.BYPASS -> return@withLock true
+                        PermissionLevel.NOT_ALLOWED -> return@withLock false
+                        PermissionLevel.ASK_ONCE -> Unit
+                    }
+                    val denials = sessionDenials.getOrPut(sessionId) { mutableSetOf() }
+                    if (toolName in denials) return@withLock false
 
-                val grants = sessionGrants.getOrPut(sessionId) { mutableSetOf() }
-                if (toolName in grants) return true
+                    val grants = sessionGrants.getOrPut(sessionId) { mutableSetOf() }
+                    if (toolName in grants) return@withLock true
 
-                // Show dialog and wait for response.
-                val info = toolRegistry.find { it.toolName == toolName }
-                val response = suspendCancellableCoroutine<Response> { cont ->
-                    pendingContinuation = cont
-                    _pendingRequest.value = PermissionRequest(
-                        toolName = toolName,
-                        toolTitle = toolTitle,
-                        description = "Allow ${info?.displayName ?: toolName} access?",
-                        sessionId = sessionId,
-                    )
-                    cont.invokeOnCancellation {
-                        _pendingRequest.value = null
-                        pendingContinuation = null
+                    val info = toolRegistry.find { it.toolName == toolName }
+                    val response = suspendCancellableCoroutine<Response> { cont ->
+                        synchronized(pendingPermissionLock) {
+                            pendingContinuation = cont
+                            _pendingRequest.value = PermissionRequest(
+                                toolName = toolName,
+                                toolTitle = toolTitle,
+                                description = "Allow ${info?.displayName ?: toolName} access?",
+                                sessionId = sessionId,
+                            )
+                        }
+                        cont.invokeOnCancellation {
+                            synchronized(pendingPermissionLock) {
+                                if (pendingContinuation === cont) {
+                                    _pendingRequest.value = null
+                                    pendingContinuation = null
+                                }
+                            }
+                        }
+                    }
+
+                    when (response) {
+                        Response.ALLOW_SESSION -> {
+                            grants.add(toolName)
+                            true
+                        }
+                        Response.ALLOW_ONCE -> true
+                        Response.DENY_SESSION -> {
+                            denials.add(toolName)
+                            false
+                        }
                     }
                 }
-
-                when (response) {
-                    Response.ALLOW_SESSION -> {
-                        grants.add(toolName)
-                        true
-                    }
-                    Response.ALLOW_ONCE -> true  // no caching; next call re-prompts
-                    Response.DENY_SESSION -> {
-                        denials.add(toolName)
-                        false
-                    }
-                }
-            }
+            } ?: false
         }
     }
 
     /** Called from UI when user responds to the permission dialog. */
-    fun respondToRequest(response: Response) {
-        _pendingRequest.value = null
-        pendingContinuation?.resume(response)
-        pendingContinuation = null
+    fun respondToRequest(response: Response, requestId: String? = null) {
+        val continuation = synchronized(pendingPermissionLock) {
+            if (requestId != null && _pendingRequest.value?.requestId != requestId) return
+            val current = pendingContinuation
+            _pendingRequest.value = null
+            pendingContinuation = null
+            current
+        }
+        continuation?.resume(response)
     }
 
     /** Clear session grants AND denials (call when a session ends). */

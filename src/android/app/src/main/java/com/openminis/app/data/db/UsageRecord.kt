@@ -29,4 +29,6 @@ data class UsageRecord(
     val tokenUsage: String,
     val createdAt: Long,
     val sessionId: String,
+    /** Instance snapshot disambiguates two endpoints serving the same model id. */
+    val providerInstanceId: String? = null,
 )

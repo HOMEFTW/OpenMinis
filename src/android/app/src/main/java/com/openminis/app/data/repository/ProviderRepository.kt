@@ -157,6 +157,8 @@ class ProviderRepository(private val context: Context) {
         /** Per-instance `lastFetchAt` pref key. */
         private fun lastFetchKey(instanceId: String) = "modelsLastFetchAt_$instanceId"
 
+        private fun deletedModelsKey(instanceId: String) = "deletedModelIds_$instanceId"
+
         /** [T-newchat-default-model-fallback-android] Global last-used model entry id. */
         private const val KEY_LAST_USED_ENTRY = "lastUsedModelEntryId"
 
@@ -196,6 +198,9 @@ class ProviderRepository(private val context: Context) {
     fun invalidateModelCache(instanceId: String) {
         prefs.edit().remove(lastFetchKey(instanceId)).apply()
     }
+
+    private fun deletedModelIds(instanceId: String): Set<String> =
+        prefs.getStringSet(deletedModelsKey(instanceId), emptySet()).orEmpty().toSet()
 
     private val encryptedPrefs: SharedPreferences by lazy {
         // T-android-keystore-aead-fail: route through the self-healing
@@ -787,7 +792,7 @@ class ProviderRepository(private val context: Context) {
             }
 
             // Add template models missing from this instance.
-            val toAdd = templateById.keys - existingIds
+            val toAdd = templateById.keys - existingIds - deletedModelIds(instance.id)
             if (toAdd.isNotEmpty()) {
                 val newEntries = tpl.mockModels
                     .filter { it.id in toAdd }
@@ -870,6 +875,10 @@ class ProviderRepository(private val context: Context) {
             .toSet()
         config.instances.removeAll { it.id == instanceId }
         config.modelEntries.removeAll { it.providerInstanceId == instanceId }
+        prefs.edit().remove(deletedModelsKey(instanceId)).apply()
+        if (prefs.getString(KEY_LAST_USED_ENTRY, null) in removedEntryIds) {
+            prefs.edit().remove(KEY_LAST_USED_ENTRY).apply()
+        }
 
         if (removedEntryIds.isNotEmpty()) {
             for (group in config.modelGroups) {
@@ -1138,13 +1147,17 @@ class ProviderRepository(private val context: Context) {
         return instance.isEnabled
     }
 
-    fun replaceEntries(instanceId: String, models: List<LLMModel>) = synchronized(configLock) {
+    fun replaceEntries(instanceId: String, models: List<LLMModel>, manualRefresh: Boolean = false) = synchronized(configLock) {
         ensureConfigLoaded()
         // Hot path for concurrent autoRefreshModels coroutines (one per
         // enabled instance) — without this lock, two replaceEntries() calls
         // race on the shared config.modelEntries ArrayList. The working copy
         // additionally keeps this refresh off the list Compose is iterating.
         val config = workingCopy()
+        // An in-flight fetch must not resurrect a deleted provider, or an explicitly deleted
+        // model. Only a successful manual refresh opts back into the server's full catalog.
+        if (config.instances.none { it.id == instanceId }) return@synchronized
+        val fetchedModels = modelsAfterDeletionPolicy(models, deletedModelIds(instanceId), manualRefresh)
         val existing = config.modelEntries.filter { it.providerInstanceId == instanceId }
         val existingEntryIds = existing.map { it.id }.toSet()
 
@@ -1159,7 +1172,7 @@ class ProviderRepository(private val context: Context) {
         }
 
         // Build new entries, carrying forward uuid / overrides / isHidden from prior entries
-        val refreshedModelIds = models.map { it.id }.toSet()
+        val refreshedModelIds = fetchedModels.map { it.id }.toSet()
         // [T-android-provider-voice] Template-sourced voice models carry an
         // authoritative modality that API-inferred modality (typically no audio
         // bits) must never overwrite. Mirrors iOS replaceEntries
@@ -1170,7 +1183,7 @@ class ProviderRepository(private val context: Context) {
             ?.filter { it.hasVoiceModality }
             ?.associateBy { it.id }
             ?: emptyMap()
-        val newEntries = models.map { model ->
+        val newEntries = fetchedModels.map { model ->
             val prior = existingByModelId[model.id]
             // Dedicated ASR/TTS id/name patterns fill the exact voice shape when
             // the API returned no modality info; the template's shape wins last.
@@ -1242,6 +1255,9 @@ class ProviderRepository(private val context: Context) {
                 // never silently nukes the user's curated agent-loop set.
                 val agentBefore = config.agentLoopModelEntryIds.size
                 config.agentLoopModelEntryIds.removeAll { it in prunedEntryIds }
+                if (prefs.getString(KEY_LAST_USED_ENTRY, null) in prunedEntryIds) {
+                    prefs.edit().remove(KEY_LAST_USED_ENTRY).apply()
+                }
                 val agentRemoved = agentBefore - config.agentLoopModelEntryIds.size
                 if (agentRemoved > 0) {
                     android.util.Log.i("ProviderRepo", "[ModelList] replaceEntries pruned $agentRemoved stale agent-loop entry pins")
@@ -1250,6 +1266,7 @@ class ProviderRepository(private val context: Context) {
         }
 
         saveConfig(config)
+        if (manualRefresh) prefs.edit().remove(deletedModelsKey(instanceId)).apply()
         // Stamp so staleness checks know this instance just refreshed.
         markInstanceFetched(instanceId)
     }
@@ -1283,6 +1300,8 @@ class ProviderRepository(private val context: Context) {
         }
         config.modelEntries.add(entry)
         saveConfig(config)
+        prefs.edit().putStringSet(deletedModelsKey(entry.providerInstanceId),
+            deletedModelIds(entry.providerInstanceId) - entry.baseModel.id).apply()
     }
 
     fun updateEntry(entry: ModelEntry): Unit = synchronized(configLock) {
@@ -1298,16 +1317,16 @@ class ProviderRepository(private val context: Context) {
     fun removeEntry(entryId: String): Unit = synchronized(configLock) {
         ensureConfigLoaded()
         val config = workingCopy()
-        config.modelEntries.removeAll { it.id == entryId }
-        config.modelGroups.forEach { group ->
-            group.memberEntryIds.removeAll { it == entryId }
-        }
-        // T171: cascade-clean the agent-loop direct-entry pin so the
-        // AgentLoopModelsScreen never surfaces a checkmark on a model that
-        // no longer exists. Mirrors iOS ProviderConfigStore.removeEntry
-        // (Providers/ProviderConfigStore.swift L268).
-        config.agentLoopModelEntryIds.removeAll { it == entryId }
+        val entry = config.modelEntries.find { it.id == entryId } ?: return@synchronized
+        removeModelEntryReferences(config, setOf(entryId))
         saveConfig(config)
+        if (config.modelEntries.none { it.providerInstanceId == entry.providerInstanceId && it.baseModel.id == entry.baseModel.id }) {
+            prefs.edit().putStringSet(deletedModelsKey(entry.providerInstanceId),
+                deletedModelIds(entry.providerInstanceId) + entry.baseModel.id).apply()
+        }
+        if (prefs.getString(KEY_LAST_USED_ENTRY, null) == entryId) {
+            prefs.edit().remove(KEY_LAST_USED_ENTRY).apply()
+        }
     }
 
     // --- Model Group management ---
@@ -2283,7 +2302,7 @@ class ProviderRepository(private val context: Context) {
         // Official API-key discovery is a static advisory catalog, independent of credentials.
         // Persist through replaceEntries so cache timestamps, entry IDs and user overrides survive.
         if (instance.providerType == ProviderType.deepSeek) {
-            replaceEntries(instance.id, instance.providerType.builtInModels)
+            replaceEntries(instance.id, instance.providerType.builtInModels, manualRefresh = forceRefresh)
             return
         }
         if (instance.providerType == ProviderType.githubCopilot) {
@@ -2301,7 +2320,7 @@ class ProviderRepository(private val context: Context) {
                         inputModalities = if (model.supportsVision) listOf("text", "image") else listOf("text"),
                     )
                 }
-            if (models.isNotEmpty()) replaceEntries(instance.id, models)
+            if (models.isNotEmpty()) replaceEntries(instance.id, models, manualRefresh = forceRefresh)
             return // Copilot's entitlement must never fall back to another account's catalog.
         }
         // [T-android-refresh-models-empty-key] usableApiKey, NOT loadApiKey.
@@ -2356,7 +2375,7 @@ class ProviderRepository(private val context: Context) {
         ) {
             val discovered = discoverCodexModels(instance, apiKey, forceRefresh)
             if (discovered != null) {
-                replaceEntries(instance.id, discovered)
+                replaceEntries(instance.id, discovered, manualRefresh = forceRefresh)
                 return
             }
             val models = OpenAIModelsApi.fetchModelsOAuth()
@@ -2364,7 +2383,7 @@ class ProviderRepository(private val context: Context) {
                 // Refresh capability metadata as well as model ids. Some
                 // OpenAI-compatible catalogs omit modalities, while
                 // models.dev has the authoritative image-input flag.
-                replaceEntries(instance.id, ModelsDevApi.enrichModels(models))
+                replaceEntries(instance.id, ModelsDevApi.enrichModels(models), manualRefresh = forceRefresh)
                 return
             }
         }
@@ -2460,7 +2479,10 @@ class ProviderRepository(private val context: Context) {
                 // Enrich live catalog entries so existing models pick up
                 // newly published capabilities (notably DeepSeek Flash
                 // image input) while replaceEntries preserves user overrides.
-                replaceEntries(instance.id, ModelsDevApi.enrichModels(models))
+                val preserveLimits = instance.providerType in setOf(ProviderType.openAI, ProviderType.openAIResponses) &&
+                    customBase != null && !OpenAIModelsApi.isOfficialOpenAI(customBase)
+                replaceEntries(instance.id, ModelsDevApi.enrichModels(models, preserveProviderLimits = preserveLimits),
+                    manualRefresh = forceRefresh)
                 return
             }
         }
@@ -2474,7 +2496,7 @@ class ProviderRepository(private val context: Context) {
         val fallbackModels = ModelsDevApi.fetchModels(fallbackBaseURL)
         if (fallbackModels.isNotEmpty()) {
             android.util.Log.i("ProviderRepo", "models.dev fallback returned ${fallbackModels.size} models for ${instance.label}")
-            replaceEntries(instance.id, fallbackModels)
+            replaceEntries(instance.id, fallbackModels, manualRefresh = forceRefresh)
         } else if (isThirdParty) {
             android.util.Log.i("ProviderRepo", "Third-party endpoint, no models.dev match — preserving existing models for ${instance.label}")
         }
@@ -2721,6 +2743,7 @@ class ProviderRepository(private val context: Context) {
                     entry.baseModel.maxOutputTokens?.let { put("maxOutputTokens", it) }
                     entry.baseModel.supportsReasoning?.let { put("supportsReasoning", it) }
                     entry.baseModel.interleavedReasoningField?.let { put("interleavedReasoningField", it) }
+                    entry.baseModel.supportedServiceTiers?.let { put("serviceTiers", JSONArray(it)) }
                     // [T-provider-export-model-overrides] Serialize the FULL
                     // ModelOverrides layer, not just displayName/maxOutputTokens.
                     // contextWindow / supportsReasoning / modality (input+output)
@@ -2894,52 +2917,54 @@ class ProviderRepository(private val context: Context) {
      * `providersRestored` vs `providersSkippedExisting` (the counts that drive
      * the restore-complete credentials message, iOS parity).
      *
-     * Keep-existing policy mirrors iOS: an API key already on this device is
-     * NOT overwritten, so restoring a backup onto its origin device reports
-     * "kept" rather than "restored".
+     * The caller explicitly opts into backup precedence. Valid local OAuth
+     * credentials remain usable; rejected sign-ins may be replaced by the backup.
      */
-    fun restoreBackupProviderSecret(secret: BackupSecrets.ProviderSecret): Boolean {
-        fun deb64(s: String?): String? = s?.let {
-            runCatching { String(Base64.decode(it, Base64.NO_WRAP)) }.getOrNull()
-        }
+    fun restoreBackupProviderSecret(secret: BackupSecrets.ProviderSecret, overwriteExisting: Boolean = false): Boolean {
+        ensureConfigLoaded()
         val instance = instance(secret.instanceId) ?: return false
-        var wrote = false
-
-        deb64(secret.apiKey)?.let { key ->
-            if (loadApiKey(instance.id) == null) {
-                saveApiKey(instance.id, key)
-                wrote = true
-            }
-        }
-        deb64(secret.manualOAuthToken)?.let { tok ->
-            val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-            if (mgr != null && mgr.loadManualBearerToken().isNullOrEmpty()) {
-                mgr.saveManualBearerToken(tok)
-                wrote = true
-            }
-        }
         val mgr = oauthManagerFor(instance)
+        val policy = com.openminis.app.backup.BackupProviderCredentials
+        val current = com.openminis.app.backup.BackupProviderCredentials.Current(
+            apiKey = loadApiKey(instance.id),
+            manualOAuthToken = mgr?.loadManualBearerToken(),
+            oauthToken = mgr?.exportStoredTokensJson(),
+            oauthEmail = mgr?.exportOAuthString("email"),
+            oauthGcpProject = mgr?.exportOAuthString("gcp_project"),
+            oauthNeedsReauth = mgr?.needsReauth() == true,
+        )
+        val plan = policy.plan(current, secret, overwriteExisting)
+        var wrote = false
+        plan.apiKey?.let { saveApiKey(instance.id, it); wrote = true }
         if (mgr != null) {
-            deb64(secret.oauthToken)?.let { json ->
-                if (mgr.exportStoredTokensJson().isNullOrEmpty()) {
-                    mgr.importStoredTokensJson(json)
-                    wrote = true
-                }
+            plan.manualOAuthToken?.let {
+                mgr.saveManualBearerToken(it)
+                wrote = true
             }
+            plan.oauthToken?.let { mgr.importStoredTokensJson(it); wrote = true }
             if (instance.providerType == ProviderType.gemini) {
-                deb64(secret.oauthEmail)?.let {
-                    if (mgr.exportOAuthString("email").isNullOrEmpty()) {
-                        mgr.importOAuthString("email", it); wrote = true
-                    }
-                }
-                deb64(secret.oauthGcpProject)?.let {
-                    if (mgr.exportOAuthString("gcp_project").isNullOrEmpty()) {
-                        mgr.importOAuthString("gcp_project", it); wrote = true
-                    }
-                }
+                plan.oauthEmail?.let { mgr.importOAuthString("email", it); wrote = true }
+                plan.oauthGcpProject?.let { mgr.importOAuthString("gcp_project", it); wrote = true }
             }
         }
         return wrote
+    }
+
+    /** Backup precedence, with exact import/update/skip counts supplied by the shared policy. */
+    fun applyBackupProviderConfig(remote: ProviderConfig): com.openminis.app.backup.BackupProviderMerge.Result {
+        ensureConfigLoaded()
+        return synchronized(configLock) {
+            val result = com.openminis.app.backup.BackupProviderMerge.merge(workingCopy(), remote)
+            if (result.hasChanges) {
+                saveConfig(result.config)
+                // Restoring a model is an explicit user action, just like adding it manually.
+                for ((instanceId, entries) in remote.modelEntries.groupBy { it.providerInstanceId }) {
+                    prefs.edit().putStringSet(deletedModelsKey(instanceId),
+                        deletedModelIds(instanceId) - entries.map { it.baseModel.id }.toSet()).apply()
+                }
+            }
+            result
+        }
     }
 
     /**
@@ -3218,6 +3243,7 @@ class ProviderRepository(private val context: Context) {
                     interleavedReasoningField = interleavedReasoningField,
                     inputModalities = baseIn,
                     outputModalities = baseOut,
+                    supportedServiceTiers = com.openminis.app.provider.openai.OpenAISpeedTiers.readSaved(m),
                 )
                 val overridesObj = m.optJSONObject("overrides")
                 val overrides = if (overridesObj != null) {

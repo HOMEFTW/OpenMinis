@@ -1,5 +1,7 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.util.launchSafely
+
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -25,6 +27,8 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.verticalDrag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.LinearEasing
@@ -581,6 +585,16 @@ fun ChatScreen(
     // Callers needing the full history (compact / fork / regenerate / send)
     // continue to read viewModel.messages directly inside the VM.
     val messages by viewModel.uiMessages.collectAsState()
+    val sessionContentLoaded by viewModel.sessionContentLoaded.collectAsState()
+    var firstContentPublished by remember(sessionId) { mutableStateOf(false) }
+    LaunchedEffect(sessionId, sessionContentLoaded) {
+        if (!sessionContentLoaded) firstContentPublished = false
+    }
+    val contentReady = sessionContentLoaded && firstContentPublished
+    val messageListOpacity by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (contentReady) 1f else 0f,
+        animationSpec = androidx.compose.animation.core.tween(180), label = "sessionContent",
+    )
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     var showTaskBudget by remember { mutableStateOf(false) }
@@ -693,8 +707,12 @@ fun ChatScreen(
     // version increments while the user is mid-session). Runs on every
     // bufferVersion bump.
     val shareBufferVersion by com.openminis.app.share.ShareCoordinator.bufferVersion.collectAsState()
-    androidx.compose.runtime.LaunchedEffect(sessionId, shareBufferVersion) {
+    val shareLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    val shareLifecycleState by shareLifecycle.currentStateFlow.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(sessionId, shareBufferVersion, shareLifecycleState) {
         if (shareBufferVersion == 0) return@LaunchedEffect
+        if (shareLifecycleState != androidx.lifecycle.Lifecycle.State.RESUMED ||
+            ChatViewModelStore.activeSessionId != viewModel.activeSessionId) return@LaunchedEffect
         // [XSessionDiag] sessionId is passed for LOGGING ONLY — consumeBuffer
         // ignores it for every decision (see its KDoc). It records which chat
         // actually drained the global share buffer.
@@ -710,6 +728,8 @@ fun ChatScreen(
         try {
             viewModel.acceptPendingShare(pending)
             com.openminis.app.share.ShareCoordinator.acknowledgeConsumed(context, pending)
+            android.widget.Toast.makeText(context, context.getString(R.string.build34_share_delivered,
+                sessionTitle.ifBlank { context.getString(R.string.build34_this_chat) }), android.widget.Toast.LENGTH_SHORT).show()
             com.openminis.app.logging.AppLogger.info("ChatScreen", "[Share] composer persisted session=$sessionId")
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 com.openminis.app.share.SharedShareStore.cleanSharedFiles(context)
@@ -949,11 +969,17 @@ fun ChatScreen(
     // an explicit confirm; idle sessions skip the dialog entirely.
     var showNewChatStopDialog by remember { mutableStateOf(false) }
     var pendingStop by remember(sessionId) { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingStopSessionScope by remember(sessionId) { mutableStateOf(false) }
+    var showStopBehaviorMenu by remember(sessionId) { mutableStateOf(false) }
     var steerJobId by remember(sessionId) { mutableStateOf<String?>(null) }
     var callbackDetailBlock by remember(sessionId) { mutableStateOf<AssistantBlock?>(null) }
     if (pendingStop != null) {
         StopChatConfirmation(
             onDismiss = { pendingStop = null },
+            onStopCurrent = if (pendingStopSessionScope && viewModel.hasBackgroundWorkToStop()) ({
+                pendingStop = null
+                viewModel.stopCurrentToolOnly()
+            }) else null,
             onConfirm = {
                 val action = pendingStop
                 pendingStop = null
@@ -1759,7 +1785,7 @@ fun ChatScreen(
         coroutineScope.launch {
             tracedScrollToItem("SEND-PATH/initial", 0, 0)
             kotlinx.coroutines.delay(100)
-            tracedScrollToItem("SEND-PATH/settle", 0, 0)
+            if (!userScrolledAway && !listState.isScrollInProgress) tracedScrollToItem("SEND-PATH/settle", 0, 0)
         }
     }
     val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
@@ -1873,8 +1899,8 @@ fun ChatScreen(
     // streamed token finally bumps the auto-follow tuple.
     LaunchedEffect(listState, viewModel) {
         viewModel.forceScrollToBottom.collect {
-            // Match the user-send path: clear any prior "scrolled away" flag
-            // so the streaming auto-follow stays active for the new turn.
+            if (userScrolledAway) return@collect
+            // A new turn must not move a reader who stayed on an older reply.
             userScrolledAway = false
             tracedScrollToItem("FORCE-SCROLL-TO-BOTTOM(resume/retry/rerun)", 0, 0)
         }
@@ -1883,11 +1909,9 @@ fun ChatScreen(
     // gesture, fires regardless of current scroll position.
     LaunchedEffect(messages.size) {
         val lastMsg = messages.lastOrNull() ?: return@LaunchedEffect
-        if (lastMsg.role != "user") return@LaunchedEffect
-        // T255: catch-all reset so any user-message append path
-        // (send button / Enter / enqueue-while-streaming / future
-        // entry points) restores auto-follow even if a call-site reset
-        // was missed.
+        if (lastMsg.role != "user" || userScrolledAway) return@LaunchedEffect
+        // Explicit composer sends reset the flag in their own handler; a queued
+        // or background delivery must preserve a reader's current position.
         lastUserAppendMs = System.currentTimeMillis()
         userScrolledAway = false
         tracedScrollToItem("LE(messages.size)USER-SEND-SNAP", 0, 0)
@@ -2377,6 +2401,17 @@ fun ChatScreen(
     var messageFontLevel by remember { mutableStateOf(appearancePrefs.getInt(com.openminis.app.ui.settings.KEY_FONT_MESSAGE, 0)) }
     var chatInputLevel by remember { mutableStateOf(appearancePrefs.getInt(com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT, 0)) }
     var toolPreviewEnabled by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_TOOL_PREVIEW, true)) }
+    val agentSettings = remember(context) { context.getSharedPreferences(com.openminis.app.tools.AgentToolSwitch.PREFS, android.content.Context.MODE_PRIVATE) }
+    var foldCompletedTools by remember(agentSettings) { mutableStateOf(agentSettings.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_COMPLETED_TOOLS, true)) }
+    DisposableEffect(agentSettings) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+            if (key == com.openminis.app.ui.settings.KEY_FOLD_COMPLETED_TOOLS || key == null) {
+                foldCompletedTools = prefs.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_COMPLETED_TOOLS, true)
+            }
+        }
+        agentSettings.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { agentSettings.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
@@ -3071,6 +3106,11 @@ fun ChatScreen(
                     transparency = wallpaperTransparency,
                     modifier = Modifier.matchParentSize(),
                 )
+                if (!contentReady) {
+                    val loadingLabel = stringResource(R.string.build34_loading_session)
+                    Text("…", modifier = Modifier.align(Alignment.Center).semantics { contentDescription = loadingLabel },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f), fontSize = 36.sp)
+                }
                 var toolBarHeightPx by remember { mutableStateOf(0) }
                 val density = LocalDensity.current
                 val toolBarHeightDp = with(density) { toolBarHeightPx.toDp() }
@@ -3134,12 +3174,10 @@ fun ChatScreen(
                     val merged = if (streamingById.isEmpty()) messages
                                  else mergeStreamingOverlay(messages, streamingById)
                     merged.any { msg ->
-                        msg.role == "assistant" && msg.toolBlocks.any { tb ->
-                            tb.toolStatus != null && tb.kind != "thinking" && tb.kind != "info"
-                        }
+                        msg.role == "assistant" && msg.toolBlocks.any(::isFloatingToolVisible)
                     }
                 }
-                val visualOverlayHeight = 65.dp  // thumbnailHeight in FloatingToolStatusBar
+                val visualOverlayHeight = if (toolPreviewEnabled) 65.dp else 38.dp
                 // Halve the breathing room above the input bar in both
                 // states — felt too sparse before. The thumbnail's 65dp
                 // physical height is preserved (it has to clear the
@@ -3224,8 +3262,8 @@ fun ChatScreen(
                 var expandedToolGroups by rememberSaveable(sessionId) {
                     mutableStateOf(setOf<String>())
                 }
-                val flatItems = remember(rawFlatItems, expandedToolGroups) {
-                    groupCompletedTools(rawFlatItems, expandedToolGroups)
+                val flatItems = remember(rawFlatItems, expandedToolGroups, foldCompletedTools) {
+                    if (foldCompletedTools) groupCompletedTools(rawFlatItems, expandedToolGroups) else rawFlatItems
                 }
                 SideEffect { voiceScreenItems.items = flatItems }
                 // [T-android-coldload-offmain-parse] Composition-snapshot
@@ -3248,7 +3286,7 @@ fun ChatScreen(
                 // scope. The flatten still runs per token (cheap-ish; ran
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
-                LaunchedEffect(messages, sessionId) {
+                LaunchedEffect(messages, sessionId, sessionContentLoaded) {
                     // [T-android-stream-pipeline-incremental] Frozen/live split.
                     //
                     // `messages` is CONSTANT within this effect (the effect is
@@ -3416,6 +3454,7 @@ fun ChatScreen(
                                 }
                             }
                             rawFlatItems = if (liveRows.isEmpty()) frozenRows else frozenRows + liveRows
+                            if (sessionContentLoaded) firstContentPublished = true
                             com.openminis.app.diagnostics.StreamPerfMonitor.tick(
                                 flattenNanos = System.nanoTime() - tickStartNs,
                                 frozenReused = frozenReused,
@@ -3692,6 +3731,7 @@ fun ChatScreen(
                         bottom = if (bottomReserve == 0.dp) 12.dp else bottomReserve,
                     ),
                     modifier = Modifier
+                        .alpha(messageListOpacity)
                         .fillMaxWidth()
                         // [T-android-chat-max-content-width] Cap the reading
                         // measure on a wide window, mirroring iOS
@@ -4115,6 +4155,7 @@ fun ChatScreen(
                                         if (job?.isActive == true) steerJobId = job.id
                                     },
                                     onStop = {
+                                        pendingStopSessionScope = false
                                         pendingStop = {
                                             val childId = HelperRunner.childSessionIdFrom(item.block.content)
                                             val job = childId?.let { AgentJobRegistry.jobForSession(it) }
@@ -4160,7 +4201,7 @@ fun ChatScreen(
                                 // when the block is RUNNING/STREAMING — see
                                 // ToolCallPill `isRunning && onStop != null`
                                 // — so passing it unconditionally is safe.
-                                onStop = { pendingStop = { viewModel.cancelStream() } },
+                                onStop = { pendingStopSessionScope = true; pendingStop = { viewModel.cancelStream() } },
                                 onOpenTerminalWithCommand = onOpenTerminalWithCommand,
                                 // T261: route detail open through ViewModel so
                                 // the sheet is hoisted out of LazyColumn item
@@ -4374,7 +4415,7 @@ fun ChatScreen(
                         val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
                         merged.filter { it.role == "assistant" }
                             .flatMap { it.toolBlocks }
-                            .filter { it.toolStatus != null && it.kind != "thinking" && it.kind != "info" }
+                            .filter(::isFloatingToolVisible)
                     }.collect { lastToolBlocks = it }
                 }
                 val allToolBlocks = lastToolBlocks
@@ -4414,7 +4455,7 @@ fun ChatScreen(
                             },
                             // T14: per-card stop on the floating bar — same
                             // global cancel as the message-list pill button.
-                            onStop = { pendingStop = { viewModel.cancelStream() } },
+                            onStop = { pendingStopSessionScope = true; pendingStop = { viewModel.cancelStream() } },
                             onOpenTerminalWithCommand = onOpenTerminalWithCommand,
                             // T261: route detail open through the same VM
                             // state as in-list pills so both surfaces share
@@ -4448,7 +4489,7 @@ fun ChatScreen(
                 val upFabVisible = messages.isNotEmpty() && !isNearBottom.value
                 val downFabVisible =
                     userScrolledAway && contentOverflows.value && messages.isNotEmpty()
-                val fabBaseDp = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                val fabBaseDp = if (hasFloatingTools) visualOverlayHeight + 15.dp else 8.dp
                 val fabStackTopDp = when {
                     upFabVisible -> fabBaseDp + 46.dp + 36.dp
                     downFabVisible -> fabBaseDp + 36.dp
@@ -4545,7 +4586,7 @@ fun ChatScreen(
                 // spacing). Tapping walks BACK one user turn at a time rather
                 // than jumping to the oldest message.
                 if (messages.isNotEmpty() && !isNearBottom.value) {
-                    val upBaseBottom = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                    val upBaseBottom = if (hasFloatingTools) visualOverlayHeight + 15.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             // [T-android-updown-fab-asymmetry] Arm the same flag a
@@ -4587,7 +4628,7 @@ fun ChatScreen(
                 }
 
                 if (userScrolledAway && contentOverflows.value && messages.isNotEmpty()) {
-                    val fabBottomPadding = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                    val fabBottomPadding = if (hasFloatingTools) visualOverlayHeight + 15.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             // [T-android-scroll-fab-down-stuck] Clear the
@@ -6125,7 +6166,7 @@ fun ChatScreen(
                                     leadingIcon = { Icon(Icons.Default.PhotoLibrary, contentDescription = null) },
                                     onClick = {
                                         showAttachMenu = false
-                                        mediaPickerLauncher.launch(
+                                        mediaPickerLauncher.launchSafely(context,
                                             androidx.activity.result.PickVisualMediaRequest(
                                                 ActivityResultContracts.PickVisualMedia.ImageAndVideo,
                                             ),
@@ -6139,7 +6180,7 @@ fun ChatScreen(
                                         showAttachMenu = false
                                         // OpenMultipleDocuments takes a mime-
                                         // type array; "*/*" stays the wildcard.
-                                        filePickerLauncher.launch(arrayOf("*/*"))
+                                        filePickerLauncher.launchSafely(context, arrayOf("*/*"))
                                     },
                                 )
                             }
@@ -6627,15 +6668,28 @@ fun ChatScreen(
                                     .size(38.dp)
                                     .background(Color(0xFFFF3B30), CircleShape)
                                     .clip(CircleShape)
-                                    .clickable { pendingStop = { viewModel.cancelStream() } },
+                                    .combinedClickable(
+                                        onClick = { pendingStopSessionScope = true; pendingStop = { viewModel.cancelStream() } },
+                                        onLongClick = { showStopBehaviorMenu = true },
+                                    ),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Icon(
                                     Icons.Default.Stop,
-                                    contentDescription = "Stop",
+                                    contentDescription = stringResource(R.string.build34_stop_all),
                                     tint = Color.White,
                                     modifier = Modifier.size(20.dp),
                                 )
+                                MinisMenu(expanded = showStopBehaviorMenu, onDismissRequest = { showStopBehaviorMenu = false }) {
+                                    DropdownMenuItem(text = { Text(stringResource(R.string.build34_stop_immediately)) }, onClick = {
+                                        appearancePrefs.edit().putBoolean(com.openminis.app.ui.settings.KEY_CONFIRM_BEFORE_STOPPING, false).apply()
+                                        showStopBehaviorMenu = false
+                                    })
+                                    DropdownMenuItem(text = { Text(stringResource(R.string.build34_stop_confirm)) }, onClick = {
+                                        appearancePrefs.edit().putBoolean(com.openminis.app.ui.settings.KEY_CONFIRM_BEFORE_STOPPING, true).apply()
+                                        showStopBehaviorMenu = false
+                                    })
+                                }
                             }
                         } else {
                             // Streaming with content → Send-into-queue; Idle with content → Send.

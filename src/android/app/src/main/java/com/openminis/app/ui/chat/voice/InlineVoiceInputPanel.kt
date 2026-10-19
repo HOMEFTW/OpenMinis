@@ -75,9 +75,13 @@ import com.openminis.app.R
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.speech.RecognitionState
 import com.openminis.app.speech.SpeechRecognitionManager
+import com.openminis.app.speech.correction.CorrectionDiagnostics
+import com.openminis.app.speech.correction.correctionFailure
 import com.openminis.app.ui.theme.ChatColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -243,7 +247,7 @@ internal fun InlineVoiceInputPanel(
     val panelContext = androidx.compose.ui.platform.LocalContext.current
     VoiceModePrefs.init(panelContext)
 
-    var expanded by remember { mutableStateOf(VoiceModePrefs.expanded) }
+    val expanded = VoiceModePrefs.expanded
     var transcript by remember { mutableStateOf(inputText) }
     var isEditing by remember { mutableStateOf(false) }
 
@@ -273,6 +277,19 @@ internal fun InlineVoiceInputPanel(
     // [T-android-voice-correction] Manual AI correction of the transcript.
     var isCorrecting by remember { mutableStateOf(false) }
     var showCorrectionConsent by remember { mutableStateOf(false) }
+    var correctionErrorMessage by remember { mutableStateOf<String?>(null) }
+    correctionErrorMessage?.let { message ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { correctionErrorMessage = null },
+            title = { Text(stringResource(R.string.b34_correction_failed_title)) },
+            text = { Text(message) },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { correctionErrorMessage = null }) {
+                    Text(stringResource(R.string.b34_dismiss))
+                }
+            },
+        )
+    }
 
     // Every exit path funnels through here so no route can silently skip
     // capture. Capture is fire-and-forget — leaving edit mode never waits on
@@ -314,7 +331,6 @@ internal fun InlineVoiceInputPanel(
     }
 
     fun persistExpanded(v: Boolean) {
-        expanded = v
         VoiceModePrefs.expanded = v
     }
 
@@ -337,16 +353,16 @@ internal fun InlineVoiceInputPanel(
         ) return
         val engine = com.openminis.app.speech.correction.VoiceCorrection.engine(panelContext)
         if (engine == null) {
-            android.widget.Toast.makeText(
-                panelContext,
-                panelContext.getString(R.string.voice_correction_failed),
-                android.widget.Toast.LENGTH_SHORT,
-            ).show()
+            correctionErrorMessage = correctionFailureMessage(panelContext, emptyList(), "engine_unavailable")
             return
         }
+        correctionErrorMessage = null
         isCorrecting = true
         VoiceSendGate.isCorrecting = true
         val correctionGeneration = VoiceSendGate.generation
+        val diagnostics = CorrectionDiagnostics {
+            correctionGeneration == VoiceSendGate.generation && transcript.trim() == text
+        }
         // [T-android-voice-viewport-context] Snapshot the screen NOW, on the
         // main thread, before anything scrolls.
         val screenSnapshot = runCatching { captureScreen() }.getOrNull()
@@ -360,9 +376,11 @@ internal fun InlineVoiceInputPanel(
                     runCatching { conversationContextProvider(screenSnapshot) }
                         .getOrDefault(com.openminis.app.speech.correction.ConversationContext.EMPTY)
                 }
-                val suggestion = engine.correct(text, context = convoContext)
+                val suggestion = withContext(diagnostics) { engine.correct(text, context = convoContext) }
+                currentCoroutineContext().ensureActive()
                 // A user edit/clear or session switch wins over a late correction.
                 if (correctionGeneration != VoiceSendGate.generation || transcript.trim() != text) return@launch
+                if (diagnostics.cancelled) return@launch
                 when {
                     suggestion.hasChange -> {
                         setTranscript(suggestion.corrected)
@@ -387,23 +405,16 @@ internal fun InlineVoiceInputPanel(
                     }
                     else -> {
                         VoiceSendGate.recordFailure()
-                        android.widget.Toast.makeText(
-                            panelContext,
-                            panelContext.getString(R.string.voice_correction_failed),
-                            android.widget.Toast.LENGTH_SHORT,
-                        ).show()
+                        correctionErrorMessage = correctionFailureMessage(panelContext, diagnostics.failures, suggestion.rejectedReason)
                     }
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 if (correctionGeneration != VoiceSendGate.generation) return@launch
                 VoiceSendGate.recordFailure()
-                android.widget.Toast.makeText(
-                    panelContext,
-                    panelContext.getString(R.string.voice_correction_failed),
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
+                correctionErrorMessage = correctionFailureMessage(panelContext,
+                    diagnostics.failures.ifEmpty { listOf(correctionFailure("", error)) }, null)
             } finally {
                 isCorrecting = false
                 if (correctionGeneration == VoiceSendGate.generation) {

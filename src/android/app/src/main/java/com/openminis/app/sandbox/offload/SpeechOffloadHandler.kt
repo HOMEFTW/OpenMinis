@@ -66,6 +66,7 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val provider = ProviderSpeechRecognitionEngine(context).isAvailable
         val microphone = context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)
         return output(args, JSONObject()
+            .put("default_engine", "system")
             .put("available", system || provider)
             .put("system_available", system)
             .put("provider_available", provider)
@@ -89,14 +90,22 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
                 require(locale.language.isNotEmpty()) { "Invalid recognition language" }
             }
         } ?: SpeechRecognitionManager.locale.value
-        val requestedEngine = args.get("engine") ?: "auto"
+        val requestedEngine = args.get("engine") ?: "system"
         require(!args.hasFlag("engine", "source", "language")) { "--engine, --source and --language require values" }
         require(requestedEngine in setOf("auto", "system", "provider")) { "--engine must be auto, system or provider" }
         val onDevice = args.hasFlag("on-device") || args.getBool("on-device") == true
         require(!onDevice || requestedEngine != "provider") { "--on-device requires the system engine" }
-        val provider = ProviderSpeechRecognitionEngine(context).apply { useVad = false }
-        val systemPreference = provider.selectedSystemPreferOffline
-        val system = SystemSpeechRecognitionEngine(context).apply { preferOffline = onDevice || systemPreference == true }
+        val caller = CallerProcessGuard(request.pid)
+        if (!caller.isAlive()) return error(args, "cancelled", "The speech caller exited or is no longer accessible.", 130)
+        val provider = ProviderSpeechRecognitionEngine(context).apply {
+            useVad = false
+            continuationAllowed = caller::isAlive
+        }
+        val systemPreference = if (requestedEngine == "auto") provider.selectedSystemPreferOffline else null
+        val system = SystemSpeechRecognitionEngine(context).apply {
+            preferOffline = onDevice || systemPreference == true
+            allowModeFallback = true
+        }
         val engine = when {
             onDevice || requestedEngine == "system" -> system
             requestedEngine == "provider" -> provider
@@ -126,7 +135,7 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
             } catch (e: Exception) {
                 return error(args, "invalid_audio", e.message ?: "Audio could not be decoded", 2)
             }
-            return recognize(args, engine, language, wav, duration, timeout, source)
+            return recognize(args, engine, language, wav, duration, timeout, source, caller)
         }
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)) {
             return error(args, "audio_error", "This device has no microphone")
@@ -137,12 +146,14 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
             if (SpeechRecognitionManager.state.value != RecognitionState.IDLE) {
                 return error(args, "recognizer_busy", "Voice input is already using the microphone")
             }
+            if (!caller.isAlive()) return error(args, "cancelled", "The speech caller exited.", 130)
             ensureMicPermission(args)?.let { return it }
+            if (!caller.isAlive()) return error(args, "cancelled", "The speech caller exited.", 130)
             if (SpeechRecognitionManager.state.value != RecognitionState.IDLE) {
                 return error(args, "recognizer_busy", "Voice input is already using the microphone")
             }
             sessionStarted = true
-            return recognize(args, engine, language, null, duration, timeout, "mic")
+            return recognize(args, engine, language, null, duration, timeout, "mic", caller)
         } finally {
             if (!sessionStarted) micBusy.set(false)
         }
@@ -163,6 +174,7 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         duration: Int,
         timeout: Int,
         source: String,
+        caller: CallerProcessGuard,
     ): NativeOffloadResult {
         check(Looper.myLooper() != Looper.getMainLooper()) { "Speech tool must run off the main thread" }
         val main = Handler(Looper.getMainLooper())
@@ -173,7 +185,10 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         fun complete(body: JSONObject, exit: Int = 0) {
             synchronized(finished) {
                 if (finished.get()) return
-                result.set(output(args, body.put("engine", engine.id).put("source", source), exit))
+                val callerAlive = caller.isAlive()
+                val response = if (callerAlive) body else JSONObject().put("error", "cancelled")
+                    .put("message", "The speech caller exited or is no longer accessible.")
+                result.set(output(args, response.put("engine", engine.id).put("source", source), if (callerAlive) exit else 130))
                 finished.set(true)
                 latch.countDown()
             }
@@ -182,6 +197,10 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val start = Runnable {
             // A request that timed out while the main thread was busy must never open the mic later.
             if (finished.get()) return@Runnable
+            if (!caller.isAlive()) {
+                complete(JSONObject(), 130)
+                return@Runnable
+            }
             try {
                 val listener = object : SpeechRecognitionEngine.Listener {
                     override fun onPartial(text: String) {}
@@ -214,8 +233,16 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         try {
             // Capture has its own duration; timeout bounds warmup and transcription as well.
             val waitSeconds = timeout.toLong() + if (wav == null) duration else 0
-            if (!latch.await(waitSeconds, TimeUnit.SECONDS)) {
-                complete(JSONObject().put("error", "timed_out").put("message", "Speech transcription timed out"), 1)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(waitSeconds)
+            while (!latch.await(200, TimeUnit.MILLISECONDS)) {
+                if (!caller.isAlive()) {
+                    complete(JSONObject(), 130)
+                    break
+                }
+                if (System.nanoTime() >= deadline) {
+                    complete(JSONObject().put("error", "timed_out").put("message", "Speech transcription timed out"), 1)
+                    break
+                }
             }
             return result.get()
         } finally {
@@ -303,7 +330,7 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
 Usage: android-speech <transcribe|listen|languages|status> [options]
 
   --source <mic|path>       Microphone (default) or sandbox audio file
-  --engine <auto|provider|system>  Use configured Voice Input ASR; keep system recognition available
+  --engine <system|provider|auto>  Default: system. provider/auto can use the configured Voice Input model
   --duration <1..60>       Maximum mic capture seconds (default: 30)
   --timeout <1..300>       Warmup/transcription deadline seconds, plus mic duration (default: 120)
   --language <locale>      Language hint (e.g. en-US, zh-CN)

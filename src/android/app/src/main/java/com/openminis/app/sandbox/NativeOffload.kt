@@ -9,6 +9,9 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
@@ -78,6 +81,12 @@ object NativeOffloadServer {
     private val counter = AtomicLong(0)
     private var serverSocket: LocalServerSocket? = null
     private var acceptThread: Thread? = null
+    // Bound both workers and waiting sockets. Saturation applies backpressure to accept().
+    private val workers = ThreadPoolExecutor(
+        8, 8, 30L, TimeUnit.SECONDS, ArrayBlockingQueue<Runnable>(32),
+        { task -> Thread(task, "native-offload-worker").apply { isDaemon = true } },
+        ThreadPoolExecutor.CallerRunsPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }
 
     @Volatile
     private var rootfsTmpDir: File? = null
@@ -204,7 +213,7 @@ object NativeOffloadServer {
                 return
             }
             Log.d(TAG, "accepted client from proot extension")
-            thread(name = "native-offload-worker", isDaemon = true) {
+            workers.execute {
                 try {
                     handleClient(client)
                 } catch (e: Exception) {

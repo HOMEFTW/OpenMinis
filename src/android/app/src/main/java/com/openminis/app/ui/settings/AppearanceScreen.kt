@@ -102,7 +102,8 @@ const val KEY_SHOW_CHAT_TITLE = "appearance.show_chat_title"  // Boolean, defaul
 // `@AppStorage("chat.autoExpandThinking")` so future config sync reads the same
 // value. Read at block-mount time in ThinkingBlock.
 const val KEY_AUTO_EXPAND_THINKING = "chat.autoExpandThinking"  // Boolean, default true
-const val KEY_CONFIRM_BEFORE_STOPPING = "chat.confirmBeforeStopping"  // Boolean, default true
+const val KEY_CONFIRM_BEFORE_STOPPING = "chat.confirmBeforeStopping"  // Boolean, default false
+const val KEY_FOLD_COMPLETED_TOOLS = "fold_consecutive_tools"
 // [T-android-auto-grouping] When a chat's title is first generated, also file
 // it into a matching EXISTING group. Rides the title-generation call — no
 // second round-trip. Key name matches iOS `autoGroupingEnabled` so a future
@@ -148,7 +149,7 @@ fun autoExpandThinkingEnabled(context: Context): Boolean =
     getAppearancePrefs(context).getBoolean(KEY_AUTO_EXPAND_THINKING, true)
 
 fun confirmBeforeStoppingEnabled(context: Context): Boolean =
-    getAppearancePrefs(context).getBoolean(KEY_CONFIRM_BEFORE_STOPPING, true)
+    getAppearancePrefs(context).getBoolean(KEY_CONFIRM_BEFORE_STOPPING, false)
 
 /** Font scale levels matching iOS: XS(-2) Small(-1) Default(0) Medium(1) Large(2) XL(3) */
 /**
@@ -198,6 +199,11 @@ private val languageOptions = listOf(
     LanguageOption("ja", "\uD83C\uDDEF\uD83C\uDDF5", "日本語"),
     LanguageOption("ko", "\uD83C\uDDF0\uD83C\uDDF7", "한국어"),
     LanguageOption("fr", "\uD83C\uDDEB\uD83C\uDDF7", "Français"),
+    LanguageOption("it", "\uD83C\uDDEE\uD83C\uDDF9", "Italiano"),
+    LanguageOption("nl", "\uD83C\uDDF3\uD83C\uDDF1", "Nederlands"),
+    LanguageOption("hu", "\uD83C\uDDED\uD83C\uDDFA", "Magyar"),
+    LanguageOption("cs", "\uD83C\uDDE8\uD83C\uDDFF", "Čeština"),
+    LanguageOption("fa", "\uD83C\uDDEE\uD83C\uDDF7", "فارسی"),
     LanguageOption("de", "\uD83C\uDDE9\uD83C\uDDEA", "Deutsch"),
     // ru: flag \uD83C\uDDF7\uD83C\uDDFA (RU), self-name \u0420\u0443\u0441\u0441\u043A\u0438\u0439 (Russkiy)
     LanguageOption("ru", "\uD83C\uDDF7\uD83C\uDDFA", "\u0420\u0443\u0441\u0441\u043A\u0438\u0439"),
@@ -266,7 +272,7 @@ fun AppearanceScreen(
     var returnKeyBehavior by remember { mutableIntStateOf(prefs.getInt(KEY_RETURN_KEY_BEHAVIOR, 0)) }
     var keepScreenAwake by remember { mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_AWAKE, false)) }
     var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
-    var confirmBeforeStopping by remember { mutableStateOf(prefs.getBoolean(KEY_CONFIRM_BEFORE_STOPPING, true)) }
+    var confirmBeforeStopping by remember { mutableStateOf(prefs.getBoolean(KEY_CONFIRM_BEFORE_STOPPING, false)) }
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }

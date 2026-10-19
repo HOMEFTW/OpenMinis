@@ -522,6 +522,10 @@ private fun BorderedMarkdownTable(
 
 @Composable
 internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = null) {
+    if (isModelFallbackNotice(block)) {
+        ModelFallbackCard(block)
+        return
+    }
     val divider = ChatColors.separator
     val fg = ChatColors.secondaryText
     val icon = when (block.toolName) {
@@ -640,6 +644,28 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
     }
 }
 
+@Composable
+private fun ModelFallbackCard(block: AssistantBlock) {
+    val orange = Color(0xFFEF8C22)
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(orange.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+            .border(1.dp, orange.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(Icons.Default.Info, contentDescription = null, tint = orange, modifier = Modifier.size(16.dp))
+            Text(androidx.compose.ui.res.stringResource(R.string.b34_fallback_title),
+                color = ChatColors.primaryText, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        // Keep every supplied failure and transition visible, including repeated attempts.
+        for (line in modelFallbackNoticeLines(block)) {
+            Text(line, color = ChatColors.primaryText, fontSize = 12.sp)
+        }
+    }
+}
+
 /**
  * Bottom sheet showing the full compact summary. Mirrors iOS
  * `CompactSummarySheet`: scrollable, copy-to-clipboard, dismiss button.
@@ -670,7 +696,7 @@ private fun CompactSummarySheet(
             }) {
                 Icon(
                     imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                    contentDescription = "Copy",
+                    contentDescription = androidx.compose.ui.res.stringResource(R.string.b34_copy),
                     tint = if (copied) Color(0xFF34C759) else ChatColors.secondaryText,
                 )
             }

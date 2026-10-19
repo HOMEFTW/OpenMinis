@@ -171,7 +171,7 @@ class RestoreSourceEntriesTest {
         ).readText()
         assertTrue(
             "cancel should return to the list",
-            list.contains("onCancel = { adding = false }"),
+            Regex("""onCancel\s*=\s*\{[^}]*adding\s*=\s*false[^}]*}""").containsMatchIn(list),
         )
     }
 

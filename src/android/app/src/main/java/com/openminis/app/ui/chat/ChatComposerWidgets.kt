@@ -285,7 +285,7 @@ import com.openminis.app.ui.components.DecorativeSpinner
 
 /**
  * [T-android-tile-tail-memo] The last [n] lines of [text], scanning backward
- * from the end so the cost is O(length of those lines), not O(whole string).
+ * from the end, with a character budget even for one enormous line.
  *
  * `lines()` / `lineSequence().toList()` both materialize every line of a
  * growing shell log on each call; the live tile only ever shows the tail, so
@@ -293,21 +293,7 @@ import com.openminis.app.ui.components.DecorativeSpinner
  * that is needed.
  */
 private fun lastLinesOf(text: String, n: Int): String {
-    if (text.isEmpty() || n <= 0) return ""
-    var idx = text.length
-    var newlines = 0
-    // Ignore a single trailing newline so it does not count as a blank line.
-    var end = text.length
-    if (text[end - 1] == '\n') end--
-    idx = end
-    while (idx > 0) {
-        val nl = text.lastIndexOf('\n', idx - 1)
-        if (nl < 0) { idx = 0; break }
-        newlines++
-        if (newlines >= n) { idx = nl + 1; break }
-        idx = nl
-    }
-    return text.substring(idx, end)
+    return ToolPreviewText.tail(text, n)
 }
 
 @Composable
@@ -560,7 +546,11 @@ private fun ToolPreviewThumbnail(
     onTogglePreview: () -> Unit = {},
 ) {
     val args = remember(block.toolArgs) {
-        try { org.json.JSONObject(block.toolArgs) } catch (_: Exception) { org.json.JSONObject() }
+        org.json.JSONObject().apply {
+            listOf("command", "path", "content", "old_string", "new_string", "keywords").forEach { key ->
+                ToolPreviewText.argument(block.toolArgs, key)?.let { put(key, it) }
+            }
+        }
     }
 
     // T141: shell_execute live HUD — CPU% + MEM ribbon at the thumbnail
@@ -572,6 +562,17 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.STREAMING ||
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
+    val matchingQuestion = pendingQuestion?.takeIf { it.id == block.id }
+    val structuredPreview = block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME ||
+        block.toolName in setOf("request_user_input", "ask_user", "ask_question")
+    val oversizedStructuredPreview = structuredPreview && (
+        block.content.length > ToolPreviewText.MAX_SCAN_CHARS || block.toolArgs.length > ToolPreviewText.MAX_SCAN_CHARS ||
+            block.toolTitle.length > ToolPreviewText.MAX_LINE_CHARS ||
+            matchingQuestion?.questions?.any { q ->
+                q.question.length > ToolPreviewText.MAX_LINE_CHARS || q.options.any { it.label.length > ToolPreviewText.MAX_LINE_CHARS }
+            } == true || (matchingQuestion?.title?.length ?: 0) > ToolPreviewText.MAX_LINE_CHARS ||
+            matchingQuestion?.selections?.values?.any { it.value.length > ToolPreviewText.MAX_LINE_CHARS } == true
+        )
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while
@@ -589,7 +590,7 @@ private fun ToolPreviewThumbnail(
     // work one level down", which is the same question the ring is asking.
     val subAgentLive = punchThroughDepth > 0 ||
         (
-            block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME &&
+            !oversizedStructuredPreview && block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME &&
                 (remember(block.content, block.toolStatus, block.toolTitle) { parseHelperBlock(block) }.phase as? HelperPhase.Running)?.tool != null
             )
     val subAgentGlow = helperAccent()
@@ -684,7 +685,19 @@ private fun ToolPreviewThumbnail(
             }
             .combinedClickable(onClick = onClick, onLongClick = onTogglePreview),
     ) {
-        when (block.toolName) {
+        if (oversizedStructuredPreview) {
+            val summary = remember(block.content, matchingQuestion) {
+                matchingQuestion?.currentQuestion?.question?.let(ToolPreviewText::heading)
+                    ?: ToolPreviewText.argument(block.content, "summary")
+                    ?: ToolPreviewText.argument(block.content, "result")
+                    ?: ToolPreviewText.argument(block.content, "detail")
+                    ?: ""
+            }
+            Column(Modifier.padding(horizontal = 6.dp, vertical = 5.dp)) {
+                Text(ToolPreviewText.heading(block.toolTitle.ifEmpty { block.toolName }), fontSize = 7.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = toolAccent)
+                Text(ToolPreviewText.tail(summary, 5), fontSize = 5.5.sp, lineHeight = 6.5.sp, maxLines = 5, color = toolAccent.copy(alpha = 0.85f))
+            }
+        } else when (block.toolName) {
             "request_user_input", "ask_user", "ask_question" -> {
                 val preview = pendingQuestion?.takeIf { it.id == block.id } ?: remember(block.toolArgs, block.content) {
                     runCatching {
@@ -700,10 +713,13 @@ private fun ToolPreviewThumbnail(
             }
             "shell_execute" -> {
                 // iOS: command title + last 12 lines of output in green mono
-                val command = extractShellCommand(args, block)
+                val command = args.optString("command", "").ifEmpty {
+                    if (block.content.startsWith("$ ")) block.content.take(ToolPreviewText.MAX_LINE_CHARS + 2).drop(2)
+                    else "Shell command"
+                }
                 Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)) {
                     Text(
-                        text = "$ $command",
+                        text = ToolPreviewText.heading("$ $command"),
                         fontSize = 7.sp,
                         lineHeight = 8.sp,
                         fontWeight = FontWeight.Bold,
@@ -734,12 +750,10 @@ private fun ToolPreviewThumbnail(
             "file_edit" -> {
                 // iOS: diff preview — old lines in red, new lines in green
                 val oldStr = args.optString("old_string", "")
-                    .ifEmpty { extractPartialJsonString("old_string", block.toolArgs) ?: "" }
                 val newStr = args.optString("new_string", "")
-                    .ifEmpty { extractPartialJsonString("new_string", block.toolArgs) ?: "" }
                 Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)) {
                     if (oldStr.isNotEmpty()) {
-                        oldStr.lines().takeLast(5).forEach { line ->
+                        ToolPreviewText.tail(oldStr, 5).lineSequence().forEach { line ->
                             Text(
                                 text = "- $line",
                                 fontSize = 5.sp,
@@ -752,7 +766,7 @@ private fun ToolPreviewThumbnail(
                         }
                     }
                     if (newStr.isNotEmpty()) {
-                        newStr.lines().takeLast(5).forEach { line ->
+                        ToolPreviewText.tail(newStr, 5).lineSequence().forEach { line ->
                             Text(
                                 text = "+ $line",
                                 fontSize = 5.sp,
@@ -777,7 +791,6 @@ private fun ToolPreviewThumbnail(
                 // content. For file_write during streaming, prefer partial `content` from
                 // toolArgs JSON (mirrors iOS block.streamingFileContent).
                 val path = args.optString("path", "")
-                    .ifEmpty { extractPartialJsonString("path", block.toolArgs) ?: "" }
                 val rawName = if (path.contains("/")) path.substringAfterLast("/") else path
                 val header = when {
                     rawName.isNotEmpty() -> rawName
@@ -786,14 +799,13 @@ private fun ToolPreviewThumbnail(
                 }
                 val displayText = if (block.toolName == "file_write") {
                     args.optString("content", "")
-                        .ifEmpty { extractPartialJsonString("content", block.toolArgs) ?: "" }
                         .ifEmpty { block.content }
                 } else {
                     block.content
                 }
                 Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
                     Text(
-                        text = header,
+                        text = ToolPreviewText.heading(header),
                         fontSize = 7.sp,
                         lineHeight = 8.sp,
                         fontWeight = FontWeight.Bold,
@@ -803,9 +815,8 @@ private fun ToolPreviewThumbnail(
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (displayText.isNotEmpty()) {
-                        val lines = displayText.lines()
                         Text(
-                            text = lines.takeLast(12).joinToString("\n"),
+                            text = remember(displayText) { ToolPreviewText.tail(displayText, 12) },
                             fontSize = 5.5.sp,
                             fontFamily = FontFamily.Monospace,
                             color = toolAccent.copy(alpha = 0.85f),
@@ -826,16 +837,15 @@ private fun ToolPreviewThumbnail(
                 // icon while the rest of the UI shows real text.
                 val memContent = if (block.toolName == "memory_write") {
                     args.optString("content", "")
-                        .ifEmpty { extractPartialJsonString("content", block.toolArgs) ?: "" }
                         .ifEmpty { block.content }
                 } else {
                     block.content
                 }
                 val keywords = args.optString("keywords", "")
-                    .ifEmpty { extractPartialJsonString("keywords", block.toolArgs) ?: "" }
+                val boundedContent = remember(memContent) { ToolPreviewText.tail(memContent, 12) }
                 val displayText = if (block.toolName == "memory_get" && keywords.isNotEmpty()) {
-                    "Keywords: $keywords\n$memContent"
-                } else memContent
+                    "Keywords: ${ToolPreviewText.heading(keywords)}\n$boundedContent"
+                } else boundedContent
                 Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
                     Text(
                         text = block.toolName,
@@ -849,7 +859,7 @@ private fun ToolPreviewThumbnail(
                     )
                     if (displayText.isNotEmpty()) {
                         Text(
-                            text = displayText.lines().takeLast(12).joinToString("\n"),
+                            text = remember(displayText) { ToolPreviewText.tail(displayText, 12) },
                             fontSize = 5.5.sp,
                             fontFamily = FontFamily.Monospace,
                             color = toolAccent.copy(alpha = 0.85f),
@@ -1046,8 +1056,12 @@ internal fun FloatingToolStatusBar(
     pendingQuestion: PendingUserQuestion? = null,
     onTogglePreview: () -> Unit = {},
 ) {
-    var currentIndex by remember { mutableStateOf(toolBlocks.lastIndex.coerceAtLeast(0)) }
-    val lastIndex = toolBlocks.lastIndex
+    val visibleBlocks = remember(toolBlocks) { toolBlocks.filter(::isFloatingToolVisible) }
+    if (visibleBlocks.isEmpty()) return
+    var currentIndex by remember { mutableStateOf(visibleBlocks.lastIndex) }
+    val lastIndex = visibleBlocks.lastIndex
+    // A shorter list must still render immediately, before the follow effect runs.
+    val displayedIndex = currentIndex.coerceIn(0, lastIndex)
     // [T-android-tool-bar-stuck-on-finished] The follow rule below is keyed on
     // the DISPLAYED block's status, not on lastIndex alone.
     //
@@ -1063,16 +1077,16 @@ internal fun FloatingToolStatusBar(
     // Including the status makes the flip itself the trigger. Manual paging is
     // preserved: parking on a still-running block keeps its status stable, so
     // the effect does not re-fire and does not yank the view away.
-    val currentStatus = toolBlocks.getOrNull(currentIndex)?.toolStatus
+    val currentStatus = visibleBlocks[displayedIndex].toolStatus
     LaunchedEffect(lastIndex, currentStatus) {
         val isCurrentActive = currentStatus == ToolBlockStatus.RUNNING ||
             currentStatus == ToolBlockStatus.STREAMING ||
             currentStatus == ToolBlockStatus.PENDING
-        if (!isCurrentActive) {
+        if (!isCurrentActive || currentIndex != displayedIndex) {
             // Prefer the newest STILL-ACTIVE tool; only fall back to the last
             // block when nothing is running, which is the idle case where the
             // most recent result is the right thing to show.
-            val newestActive = toolBlocks.indexOfLast {
+            val newestActive = visibleBlocks.indexOfLast {
                 it.toolStatus == ToolBlockStatus.RUNNING ||
                     it.toolStatus == ToolBlockStatus.STREAMING ||
                     it.toolStatus == ToolBlockStatus.PENDING
@@ -1080,7 +1094,7 @@ internal fun FloatingToolStatusBar(
             currentIndex = if (newestActive >= 0) newestActive else lastIndex.coerceAtLeast(0)
         }
     }
-    val block = toolBlocks.getOrNull(currentIndex) ?: return
+    val block = visibleBlocks[displayedIndex]
     // T261: sheet is hoisted to ChatScreen top-level; this bar only emits
     // open events. The current-displayed block id is what we want shown
     // when the user opens the sheet from this surface (not necessarily
@@ -1156,7 +1170,7 @@ internal fun FloatingToolStatusBar(
 
             // Tool title
             Text(
-                text = block.toolTitle.ifEmpty { block.toolName },
+                text = ToolPreviewText.heading(block.toolTitle.ifEmpty { block.toolName }),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 color = ChatColors.primaryText,
@@ -1173,7 +1187,7 @@ internal fun FloatingToolStatusBar(
             )
 
             // Pagination
-            if (toolBlocks.size > 1) {
+            if (visibleBlocks.size > 1) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(0.dp),
@@ -1181,7 +1195,7 @@ internal fun FloatingToolStatusBar(
                     Icon(
                         Icons.Default.ChevronLeft,
                         contentDescription = "Previous",
-                        tint = if (currentIndex > 0) MaterialTheme.colorScheme.onSurface
+                        tint = if (displayedIndex > 0) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                         modifier = Modifier
                             .size(18.dp)
@@ -1192,20 +1206,20 @@ internal fun FloatingToolStatusBar(
                             // enabled guard already blocks both gestures at
                             // index 0, so neither can move out of range.
                             .combinedClickable(
-                                enabled = currentIndex > 0,
+                                enabled = displayedIndex > 0,
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
                                 onLongClick = { currentIndex = 0 },
-                                onClick = { if (currentIndex > 0) currentIndex-- },
+                                onClick = { if (displayedIndex > 0) currentIndex = displayedIndex - 1 },
                             ),
                     )
                     val positionLabel = stringResource(
                         R.string.tool_pager_position,
-                        currentIndex + 1,
-                        toolBlocks.size,
+                        displayedIndex + 1,
+                        visibleBlocks.size,
                     )
                     Text(
-                        "${currentIndex + 1}/${toolBlocks.size}",
+                        "${displayedIndex + 1}/${visibleBlocks.size}",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
                         fontFamily = FontFamily.Monospace,
@@ -1224,7 +1238,7 @@ internal fun FloatingToolStatusBar(
                     Icon(
                         Icons.Default.ChevronRight,
                         contentDescription = "Next",
-                        tint = if (currentIndex < toolBlocks.lastIndex) MaterialTheme.colorScheme.onSurface
+                        tint = if (displayedIndex < lastIndex) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                         modifier = Modifier
                             .size(18.dp)
@@ -1233,11 +1247,11 @@ internal fun FloatingToolStatusBar(
                             // still running, which is the position this bar
                             // resets to on its own.
                             .combinedClickable(
-                                enabled = currentIndex < toolBlocks.lastIndex,
+                                enabled = displayedIndex < lastIndex,
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
-                                onLongClick = { currentIndex = toolBlocks.lastIndex },
-                                onClick = { if (currentIndex < toolBlocks.lastIndex) currentIndex++ },
+                                onLongClick = { currentIndex = lastIndex },
+                                onClick = { if (displayedIndex < lastIndex) currentIndex = displayedIndex + 1 },
                             ),
                     )
                 }
@@ -1258,13 +1272,13 @@ internal fun FloatingToolStatusBar(
                 // browser_use screenshot fallback here (toolBlocks is in
                 // scope); ToolPreviewThumbnail uses it for browser_use blocks
                 // whose action did not produce a screenshot.
-                val fallbackImagePath = remember(block.id, toolBlocks) {
+                val fallbackImagePath = remember(block.id, visibleBlocks) {
                     if (block.toolName != "browser_use" || block.imageFilePath != null) null
                     else {
-                        val blockIdx = toolBlocks.indexOfFirst { it.id == block.id }
+                        val blockIdx = visibleBlocks.indexOfFirst { it.id == block.id }
                         if (blockIdx <= 0) null
                         else (blockIdx - 1 downTo 0).firstNotNullOfOrNull { i ->
-                            val prev = toolBlocks[i]
+                            val prev = visibleBlocks[i]
                             if (prev.toolName == "browser_use") prev.imageFilePath else null
                         }
                     }

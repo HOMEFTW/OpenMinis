@@ -66,7 +66,7 @@ internal object AnthropicReplay {
                 "tool_use" -> {
                     val tool = tools.getOrNull(toolIndex++) ?: return null
                     if (meta.getString("name") != tool.name || meta.getString("hash") != inputHash(tool.input)) return null
-                    block.put("id", sanitizeToolId(tool.id)).put("name", tool.name).put("input", tool.input)
+                    block.put("id", tool.id).put("name", tool.name).put("input", tool.input)
                 }
                 else -> return null
             }

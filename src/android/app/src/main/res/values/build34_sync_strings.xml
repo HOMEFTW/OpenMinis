@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="build34_loading_session">Loading conversation</string>
+    <string name="build34_stop_current">Stop Current Tool Only</string>
+    <string name="build34_stop_all">Stop All</string>
+    <string name="build34_stop_immediately">Stop Immediately</string>
+    <string name="build34_stop_confirm">Confirm Before Stopping</string>
+    <string name="build34_scheduled_badge">Show task count on the home clock icon</string>
+    <string name="build34_picker_unavailable">Unable to open the system picker. Check that a file manager or photo picker is installed and enabled.</string>
+    <string name="build34_share_delivered">Shared content added to %1$s</string>
+    <string name="build34_this_chat">this conversation</string>
+    <string name="build34_copy_code">Copy code</string>
+    <string name="build34_copied">Copied</string>
+    <string name="build34_updates_auto">Check for updates automatically</string>
+    <string name="build34_updates_channel">Update channel</string>
+    <string name="build34_updates_stable">Stable</string>
+    <string name="build34_updates_beta">Beta</string>
+    <string name="build34_update_available">Version %1$s is available</string>
+    <string name="build34_user_questions">Let the agent ask questions</string>
+    <string name="build34_user_questions_background">Notify about questions in the background</string>
+    <string name="build34_model_switched">Switched to %1$s</string>
+</resources>

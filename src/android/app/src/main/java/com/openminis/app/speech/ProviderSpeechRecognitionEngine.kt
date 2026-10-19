@@ -111,6 +111,8 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     private var holdFlushJob: Job? = null
     private val recording = AtomicBoolean(false)
     private val cancelled = AtomicBoolean(false)
+    /** CLI calls must not upload a retained recording after their process has exited. */
+    internal var continuationAllowed: () -> Boolean = { true }
     private val recorderLock = Any()
     private var activeRecorder: AudioRecord? = null
     private var degraded = false
@@ -550,6 +552,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         listener: SpeechRecognitionEngine.Listener,
         logEvents: Boolean,
     ) {
+        if (!continuationAllowed()) return
         if (systemAsrPinned) {
             Log.i(TAG, "ASR: System recognition pinned for this take after a skip")
             transcribeWithSystem(wav, locale, listener)
@@ -568,7 +571,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         var userSkipped = false
         for ((i, pair) in ordered.withIndex()) {
             val (instance, entry) = pair
-            if (cancelled.get()) return
+            if (cancelled.get() || !continuationAllowed()) return
             val provider = VoiceProviderFactory.make(instance, repo.loadApiKey(instance.id))
             if (provider == null || (!provider.supportsVoiceInput && !provider.usesChatBasedASR(entry.model))) {
                 Log.w(TAG, "candidate ${instance.label} cannot serve voice input — skipping")
@@ -584,6 +587,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             if (logEvents) VoicePipelineLog.event("engine.transcribe.try", "model" to entry.baseModel.id)
             try {
                 val response = asrAttempts.run(entry.model.displayName, nextEntryId, canSkip = nextEntryId != null) {
+                    if (!continuationAllowed()) throw kotlinx.coroutines.CancellationException("Speech caller exited")
                     provider.transcribe(
                         VoiceInputRequest(
                             audioData = wav,

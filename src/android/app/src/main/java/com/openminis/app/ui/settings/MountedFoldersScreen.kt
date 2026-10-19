@@ -1,5 +1,7 @@
 package com.openminis.app.ui.settings
 
+import com.openminis.app.util.launchSafely
+
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -349,7 +351,7 @@ fun MountedFoldersScreen(
             confirmButton = {
                 MinisTextButton(onClick = {
                     showPickerIntro = false
-                    pickerLauncher.launch(initialPickerUri())
+                    pickerLauncher.launchSafely(context, initialPickerUri())
                 }) {
                     Text(stringResource(R.string.mount_picker_intro_continue))
                 }

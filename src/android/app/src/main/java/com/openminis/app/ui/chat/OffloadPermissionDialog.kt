@@ -46,7 +46,7 @@ fun OffloadPermissionDialog() {
 
     AlertDialog(
         onDismissRequest = {
-            OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.DENY_SESSION)
+            OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.DENY_SESSION, req.requestId)
         },
         title = {
             Text(
@@ -89,21 +89,21 @@ fun OffloadPermissionDialog() {
             ) {
                 // Allow in this session — happy path goes first.
                 MinisButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_SESSION) },
+                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_SESSION, req.requestId) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.offload_perm_allow_session))
                 }
                 // Allow once — no caching; next call re-prompts.
                 MinisOutlinedButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_ONCE) },
+                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_ONCE, req.requestId) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.offload_perm_allow_once))
                 }
                 // Deny in this session — refuse + remember.
                 MinisTextButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.DENY_SESSION) },
+                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.DENY_SESSION, req.requestId) },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,

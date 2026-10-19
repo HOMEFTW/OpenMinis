@@ -16,7 +16,7 @@ class VoiceOutputVolumeTest {
             assertEquals(muted, VoiceOutputState.isMuted.value)
             assertEquals(enabled, VoiceOutputState.isEnabled.value)
             VoiceOutputState.setVolume(5f)
-            assertEquals(1f, VoiceOutputState.volume.value, 0f)
+            assertEquals(2f, VoiceOutputState.volume.value, 0f)
             VoiceOutputState.setVolume(-1f)
             assertEquals(0f, VoiceOutputState.volume.value, 0f)
             VoiceOutputState.setVolume(Float.NaN)

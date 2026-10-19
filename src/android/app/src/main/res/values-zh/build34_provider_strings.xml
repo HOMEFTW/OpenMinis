@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="b34_provider_hidden_models">隐藏模型 (%1$d)</string>
+    <string name="b34_expand">展开</string>
+    <string name="b34_collapse">折叠</string>
+    <string name="b34_model_hidden">已隐藏</string>
+    <string name="b34_provider_delete_model_confirm">删除“%1$s”并移除其分组成员关系和固定引用？自动刷新不会恢复此模型，手动刷新模型列表可重新获取。</string>
+    <string name="b34_provider_export_title">导出服务商</string>
+    <string name="b34_usage_today">今天</string>
+    <string name="b34_usage_7_days">7 天</string>
+    <string name="b34_usage_30_days">30 天</string>
+    <string name="b34_usage_all">全部</string>
+    <string name="b34_usage_load_failed">无法加载用量。</string>
+    <string name="b34_usage_retry">重试</string>
+    <string name="b34_usage_all_providers">所有服务商</string>
+    <string name="b34_usage_provider_details">查看服务商用量</string>
+    <string name="b34_usage_trend">趋势</string>
+    <string name="b34_usage_timezone">时区：%1$s</string>
+    <string name="b34_usage_no_data">当前时段或筛选条件下暂无用量。</string>
+    <string name="b34_usage_total_tokens">Token 总量</string>
+    <string name="b34_usage_estimated">按会话模型估算</string>
+    <string name="b34_usage_peak">峰值 %1$s</string>
+    <string name="b34_usage_chart_description">用量图表。共 %1$s token，峰值 %2$s，位于 %3$s</string>
+    <string name="b34_copy">复制</string>
+    <string name="b34_dismiss">确定</string>
+    <string name="b34_fallback_title">模型回退</string>
+    <string name="b34_correction_failed_title">AI 纠错失败</string>
+    <string name="b34_correction_failed_message">已保留原始转录文本。\n%1$s</string>
+    <string name="b34_correction_model_failure">%1$s：%2$s</string>
+    <string name="b34_correction_no_model">未配置可用的文本纠错模型，请检查子/主分组、模型状态和凭据。</string>
+    <string name="b34_correction_unavailable">本地纠错服务暂不可用。</string>
+    <string name="b34_correction_auth">认证失败或无访问权限</string>
+    <string name="b34_correction_rate_limit">服务商请求达到速率限制</string>
+    <string name="b34_correction_http">服务商返回 HTTP %1$d</string>
+    <string name="b34_correction_timeout">纠错请求超时</string>
+    <string name="b34_correction_dns">无法解析服务商域名</string>
+    <string name="b34_correction_certificate">TLS 证书验证失败</string>
+    <string name="b34_correction_network">网络连接失败</string>
+    <string name="b34_correction_empty">模型未返回可用的纠错文本</string>
+    <string name="b34_correction_decoding">无法解析服务商返回的数据</string>
+    <string name="b34_correction_provider">服务商拒绝了纠错请求</string>
+    <string name="b34_correction_rewrite">模型改写范围过大，未采用纠错结果</string>
+    <string name="b34_correction_unknown">纠错失败，未识别到具体错误类别</string>
+</resources>

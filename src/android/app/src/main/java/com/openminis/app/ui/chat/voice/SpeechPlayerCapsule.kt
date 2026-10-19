@@ -464,6 +464,21 @@ private fun ExpandedCapsule(
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f), RoundedCornerShape(20.dp))
             .border(0.5.dp, Color.Gray.copy(alpha = 0.25f), RoundedCornerShape(20.dp)),
     ) {
+    val volumeLabel = stringResource(R.string.tts_capsule_volume)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(volumeLabel, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        Spacer(Modifier.width(8.dp))
+        Slider(
+            value = volume, onValueChange = onVolumeChange, onValueChangeFinished = onVolumeFinished,
+            valueRange = 0f..2f,
+            modifier = Modifier.weight(1f).height(36.dp).semantics { contentDescription = volumeLabel },
+        )
+        Spacer(Modifier.width(8.dp))
+        Text("${(volume * 100).toInt()}%", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -551,21 +566,6 @@ private fun ExpandedCapsule(
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp).clickable(onClick = onClose),
         )
-    }
-    val volumeLabel = stringResource(R.string.tts_capsule_volume)
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(volumeLabel, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-        Spacer(Modifier.width(8.dp))
-        Slider(
-            value = volume, onValueChange = onVolumeChange, onValueChangeFinished = onVolumeFinished,
-            valueRange = 0f..1f,
-            modifier = Modifier.weight(1f).height(36.dp).semantics { contentDescription = volumeLabel },
-        )
-        Spacer(Modifier.width(8.dp))
-        Text("${(volume * 100).toInt()}%", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     }
 }

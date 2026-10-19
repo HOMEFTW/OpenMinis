@@ -243,7 +243,7 @@ private fun CodeBlockView(block: MarkdownParser.Block.CodeBlock) {
             ) {
                 Icon(
                     Icons.Default.ContentCopy,
-                    contentDescription = "Copy code",
+                    contentDescription = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.build34_copy_code),
                     modifier = Modifier.height(16.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

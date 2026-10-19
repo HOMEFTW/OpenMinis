@@ -27,7 +27,10 @@ internal data class ComposerDraft(val text: String, val attachments: List<DraftA
     }
 }
 
-internal class ComposerDraftStore(private val prefs: android.content.SharedPreferences) {
+internal class ComposerDraftStore(
+    private val prefs: android.content.SharedPreferences,
+    private val now: () -> Long = System::currentTimeMillis,
+) {
     constructor(context: Context) : this(context.getSharedPreferences("composer_drafts", Context.MODE_PRIVATE))
     private fun reservationIds(ids: Set<String>, draft: ComposerDraft): Set<String> =
         (ids + SessionStorageReferences.idsInText(draft.text) +
@@ -36,12 +39,29 @@ internal class ComposerDraftStore(private val prefs: android.content.SharedPrefe
         }
     fun list(): Map<String, ComposerDraft> = prefs.all.mapNotNull { (id, raw) -> ComposerDraft.decode(raw as? String)?.let { id to it } }.toMap()
     fun load(id: String): ComposerDraft? = ComposerDraft.decode(prefs.getString(id, null))
+    private fun saved(draft: ComposerDraft): String = JSONObject(draft.encode()).put("savedAt", now()).toString()
+
+    /** Only abandoned, unsent new-chat drafts are carried into a fresh New Chat. */
+    fun takeRecentNewDraft(targetId: String): ComposerDraft? {
+        if (!targetId.startsWith("__new__") || has(targetId)) return null
+        val currentTime = now()
+        val candidate = prefs.all.mapNotNull { (id, raw) ->
+            if (id == targetId || !id.startsWith("__new__")) return@mapNotNull null
+            val draft = ComposerDraft.decode(raw as? String) ?: return@mapNotNull null
+            if (draft.text.isEmpty() || draft.editingMessageId != null) return@mapNotNull null
+            val savedAt = runCatching { JSONObject(raw as String).optLong("savedAt", 0L) }.getOrDefault(0L)
+            if (savedAt <= 0L || currentTime < savedAt || currentTime - savedAt > 15 * 60 * 1000L) return@mapNotNull null
+            Triple(id, draft, savedAt)
+        }.maxByOrNull { it.third } ?: return null
+        move(candidate.first, targetId, candidate.second)
+        return candidate.second
+    }
     fun save(id: String, draft: ComposerDraft) = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
         reservationIds(setOf(id), draft),
     ) {
         val editor = prefs.edit()
         if (draft.text.isEmpty() && draft.attachments.isEmpty()) editor.remove(id)
-        else editor.putString(id, draft.encode())
+        else editor.putString(id, saved(draft))
         editor.apply()
     }
     fun saveConfirmed(id: String, draft: ComposerDraft) = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
@@ -49,7 +69,7 @@ internal class ComposerDraftStore(private val prefs: android.content.SharedPrefe
     ) {
         val editor = prefs.edit()
         if (draft.text.isEmpty() && draft.attachments.isEmpty()) editor.remove(id)
-        else editor.putString(id, draft.encode())
+        else editor.putString(id, saved(draft))
         check(editor.commit()) { "Cannot persist the shared composer draft" }
     }
     fun move(from: String, to: String, latest: ComposerDraft) = SessionStorageMaintenanceGate.shared.withSynchronousActivity(
@@ -57,7 +77,7 @@ internal class ComposerDraftStore(private val prefs: android.content.SharedPrefe
     ) {
         val editor = prefs.edit().remove(from)
         if (latest.text.isEmpty() && latest.attachments.isEmpty()) editor.remove(to)
-        else editor.putString(to, latest.encode())
+        else editor.putString(to, saved(latest))
         editor.apply()
     }
     fun has(id: String): Boolean = load(id)?.let { it.text.isNotEmpty() || it.attachments.isNotEmpty() } == true

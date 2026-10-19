@@ -455,6 +455,14 @@ class BackupExporter(
         if (exportSubAgents(dataDir, config.subAgents) > 0) {
             bytes += File(dataDir, "${BackupSubAgentMapping.FILE_BASE}.jsonl").length()
         }
+        // Android-only user settings travel with Providers/settings. The optional
+        // member is covered by the same encryption/integrity pass as all data/ files.
+        val preferences = File(dataDir, BackupAppPreferences.FILE_NAME)
+        preferences.writeText(BackupAppPreferences.snapshot(BackupAppPreferences.UpdateSettings(
+            channel = com.openminis.app.data.UpdatePreferences.channel(context),
+            autoCheck = com.openminis.app.data.UpdatePreferences.autoCheckEnabled(context),
+        )).toString())
+        bytes += preferences.length()
         // `entries` is PROVIDERS only. Custom thinking rules ride in this
         // category (they have no category of their own, and giving them one
         // would change the cross-platform category set), but adding them to

@@ -1,5 +1,7 @@
 package com.openminis.app.ui.sandbox
 
+import com.openminis.app.util.launchSafely
+
 import com.openminis.app.ui.webview.disposeSafely
 import com.openminis.app.ui.webview.isDisposed
 import com.openminis.app.ui.webview.rendererGoneNotice
@@ -23,6 +25,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -62,6 +65,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +92,9 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.components.rememberIosBounceOverscrollEffect
 import com.openminis.app.ui.markdown.MarkdownText
 import com.openminis.app.ui.chat.StreamingMarkdownText
+import com.openminis.app.ui.chat.LocalMarkdownUrlClickHandler
+import com.openminis.app.ui.components.UrlPreviewSheet
+import com.openminis.app.ui.browser.BrowserExternalSchemeHandler
 import com.openminis.app.ui.media.InlineAudioPlayer
 import com.openminis.app.ui.media.InlineVideoPlayer
 import kotlinx.coroutines.Dispatchers
@@ -103,6 +112,53 @@ fun FilePreviewScreen(
     item: FileItem,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val documents = remember(item.file.absolutePath) { mutableStateListOf(item) }
+    var webUrl by remember(item.file.absolutePath) { mutableStateOf<String?>(null) }
+    val current = documents.last()
+    val goBack = {
+        if (documents.size > 1) documents.removeAt(documents.lastIndex) else onBack()
+        Unit
+    }
+    BackHandler(enabled = documents.size > 1 && webUrl == null, onBack = goBack)
+    key(current.file.absolutePath) {
+        FilePreviewContent(current, goBack) { link ->
+            scope.launch {
+                when (val target = withContext(Dispatchers.IO) { resolvePreviewLink(current.file, link) }) {
+                    is PreviewLinkTarget.Web -> webUrl = target.url
+                    is PreviewLinkTarget.LocalFile -> {
+                        val linked = withContext(Dispatchers.IO) {
+                            runCatching {
+                                target.file.takeIf { it.isFile && it.canRead() }?.let { file ->
+                                    FileItem(file, file.name, false, java.nio.file.Files.isSymbolicLink(file.toPath()), file.length(), file.lastModified())
+                                }
+                            }.getOrNull()
+                        }
+                        if (linked != null) {
+                            if (documents.lastOrNull()?.file == current.file && linked.file != current.file) documents.add(linked)
+                        } else Toast.makeText(context, R.string.build34_preview_file_unavailable, Toast.LENGTH_SHORT).show()
+                    }
+                    is PreviewLinkTarget.External -> {
+                        val handled = BrowserExternalSchemeHandler.handle(context, target.url, BrowserExternalSchemeHandler.Origin.USER_INITIATED)
+                        if (!handled) runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }.onFailure {
+                            Toast.makeText(context, R.string.build34_preview_link_unavailable, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    is PreviewLinkTarget.Anchor -> Unit // Remain in the current document.
+                    PreviewLinkTarget.Unsupported -> Toast.makeText(context, R.string.build34_preview_link_unavailable, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+    webUrl?.let { url -> UrlPreviewSheet(url = url, onDismiss = { webUrl = null }) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FilePreviewContent(item: FileItem, onBack: () -> Unit, onMarkdownLink: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -218,7 +274,7 @@ fun FilePreviewScreen(
                         }
                     } else {
                         // T144 non-image → SAF Save-As (user picks location).
-                        IconButton(onClick = { saveAsLauncher.launch(item.name) }) {
+                        IconButton(onClick = { saveAsLauncher.launchSafely(context, item.name) }) {
                             Icon(Icons.Default.Download, contentDescription = stringResource(R.string.filepreview_save_as))
                         }
                     }
@@ -234,7 +290,7 @@ fun FilePreviewScreen(
             // Order matters: markdown / html before generic text — both are
             // technically text but warrant richer renderers.
             when {
-                item.isMarkdownFile -> MarkdownPreview(item)
+                item.isMarkdownFile -> MarkdownPreview(item, onMarkdownLink)
                 item.isHtmlFile -> HtmlPreview(item)
                 item.isImageFile -> ImagePreview(item)
                 item.isAudioFile -> AudioPreview(item)
@@ -421,7 +477,7 @@ private fun TextPreview(item: FileItem) {
 // ==================== Markdown Preview ====================
 
 @Composable
-private fun MarkdownPreview(item: FileItem) {
+private fun MarkdownPreview(item: FileItem, onLink: (String) -> Unit) {
     var content by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -442,20 +498,16 @@ private fun MarkdownPreview(item: FileItem) {
         error != null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(error!!, color = MaterialTheme.colorScheme.error)
         }
-        content != null -> com.openminis.app.ui.chat.MarkdownDocument(
-            // T285-md: was StreamingMarkdownText inside verticalScroll{}, which
-            // composed the full document up-front and stalled the chat-tap →
-            // preview transition with main-thread parseInline scans across
-            // all blocks (~150-300ms for a multi-KB markdown). MarkdownDocument
-            // uses LazyColumn so only viewport-visible blocks compose on the
-            // first frame — transition completes before the off-screen blocks
-            // are touched.
-            content = content!!,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                horizontal = 16.dp, vertical = 12.dp,
-            ),
-        )
+        content != null -> CompositionLocalProvider(LocalMarkdownUrlClickHandler provides onLink) {
+            com.openminis.app.ui.chat.MarkdownDocument(
+                // Keep the existing lazy document renderer and off-main parse.
+                content = content!!,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 16.dp, vertical = 12.dp,
+                ),
+            )
+        }
         else -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Loading...", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

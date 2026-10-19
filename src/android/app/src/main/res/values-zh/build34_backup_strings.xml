@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="build34_backup_edit_server">编辑 %1$s</string>
+    <string name="build34_backup_save_server">保存更改</string>
+    <string name="build34_backup_keep_secret">留空以保留已保存的凭据</string>
+    <string name="build34_backup_clear_secret">清除已保存的凭据</string>
+    <string name="build34_backup_credentials_unchanged">%1$d 个凭据项未发生变化。</string>
+    <string name="build34_backup_credentials_restored">已恢复 %1$d 个服务商的凭据。备份中的 API 密钥覆盖设备上的密钥；设备上未过期的登录账户会保留。</string>
+    <string name="build34_backup_restore_merge_footer">恢复会将备份合并到当前设备。同 ID 的服务商、模型设置和分组采用备份值，包括 API 密钥；同名分组合并。设备独有项及未过期的登录账户会保留。</string>
+</resources>

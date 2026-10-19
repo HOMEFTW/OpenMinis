@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="build34_preview_file_unavailable">链接的文件不存在或无法读取。</string>
+    <string name="build34_preview_link_unavailable">无法打开此链接。</string>
+</resources>

@@ -292,6 +292,7 @@ object CodexModelsApi {
             // all — it is appended by OpenAIModelsApi with its own modalities.
             outputModalities = null,
             reasoningEffortValues = parseEffortTiers(obj),
+            supportedServiceTiers = OpenAISpeedTiers.read(obj),
         )
     }
 

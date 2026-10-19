@@ -3,7 +3,6 @@ package com.openminis.app.provider.anthropic
 import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
-import com.openminis.app.data.model.sanitizeToolId
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -573,7 +572,11 @@ class AnthropicProvider(
     ): JSONArray {
         // Sanitize orphan tool_results before serialization. Operates on a
         // copy — caller's stored history is untouched.
-        val messages = stripOrphanToolResults(rawMessages)
+        val preservedIds = rawMessages.filter { AnthropicReplay.read(it, model.id) != null }
+            .flatMap { it.contentParts.filterIsInstance<AgentContentPart.ToolUse>() }.map { it.id }.toSet()
+        val messages = stripOrphanToolResults(com.openminis.app.provider.ToolIdCompatibility.messages(
+            rawMessages, com.openminis.app.provider.ToolIdCompatibility.Format.ANTHROPIC, preservedIds,
+        ))
         // [T-android-anthropic-thinking-echo] (issue #70) Compute once — the
         // gate depends only on the model + endpoint, not the message.
         val echoThinking = shouldEchoInterleavedThinking()
@@ -616,12 +619,11 @@ class AnthropicProvider(
                             })
                         }
                         is AgentContentPart.ToolUse -> {
-                            // Anthropic requires tool ids to match ^[a-zA-Z0-9_-]+$.
-                            // OpenAI Responses can emit ids like `call_abc|fc_def`
-                            // (pipe), so echo every id through sanitizeToolId.
+                            // Foreign ids were translated on the outbound copy above;
+                            // native signed replay retains its originating ids.
                             contentArray.put(JSONObject().apply {
                                 put("type", "tool_use")
-                                put("id", sanitizeToolId(part.id))
+                                put("id", part.id)
                                 put("name", part.name)
                                 put("input", part.input)
                             })
@@ -651,7 +653,7 @@ class AnthropicProvider(
                             }
                             contentArray.put(JSONObject().apply {
                                 put("type", "tool_result")
-                                put("tool_use_id", sanitizeToolId(part.id))
+                                put("tool_use_id", part.id)
                                 put("content", resultContent)
                                 if (part.isError) put("is_error", true)
                             })

@@ -1,6 +1,7 @@
 package com.openminis.app.ui.settings.backup
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import com.openminis.app.util.launchSafely
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -691,7 +692,7 @@ private fun BackupTab(
                     saving = saveState is com.openminis.app.backup.BackupRunController.SaveState.Saving,
                     onSave = {
                         pendingSavePath = pkg.absolutePath
-                        saveLauncher.launch(pkg.name)
+                        if (!saveLauncher.launchSafely(context, pkg.name)) pendingSavePath = null
                     },
                     onShare = { shareBackupPackage(context, pkg) },
                 )
@@ -1043,6 +1044,7 @@ private fun RestoreTab(
     passphrase: String,
     onPassphraseChange: (String) -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val running by vm.isRunning.collectAsState()
     val status by vm.statusText.collectAsState()
     val pending by vm.pending.collectAsState()
@@ -1123,7 +1125,7 @@ private fun RestoreTab(
                 label = if (running) status ?: stringResource(R.string.backup_reading)
                 else stringResource(R.string.backup_choose_file),
                 enabled = !running,
-                onClick = { pickLauncher.launch(arrayOf("*/*")) },
+                onClick = { pickLauncher.launchSafely(context, arrayOf("*/*")) },
                 showDivider = true,
             )
             RestoreSourceRow(
@@ -1198,7 +1200,7 @@ private fun RestoreTab(
     // Category selection with per-category counts from the manifest.
     SettingsSection(
         header = stringResource(R.string.backup_section_restore),
-        footer = stringResource(R.string.backup_restore_footer),
+        footer = stringResource(R.string.build34_backup_restore_merge_footer),
     ) {
         // Declaration order (BackupCategory.entries), NOT key-alphabetical, so
         // the Restore list matches the Backup tab and iOS's
@@ -1374,9 +1376,9 @@ private fun RestoreReport(
     if (prov != null) {
         val msg = when {
             prov.credentialsRestored > 0 ->
-                stringResource(R.string.backup_creds_restored, prov.credentialsRestored)
+                stringResource(R.string.build34_backup_credentials_restored, prov.credentialsRestored)
             prov.credentialsKept > 0 ->
-                stringResource(R.string.backup_creds_kept)
+                stringResource(R.string.build34_backup_credentials_unchanged, prov.credentialsKept)
             else ->
                 stringResource(R.string.backup_creds_none)
         }

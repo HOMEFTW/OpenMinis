@@ -59,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.ui.settings.SettingsSwitch
+import com.openminis.app.ui.settings.SettingsSwitchRow
 import com.openminis.app.R
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTask
@@ -90,6 +91,8 @@ fun ScheduledTasksScreen(
         factory = ScheduledTasksViewModel.factory(context),
     )
     val tasks by vm.tasks.collectAsState()
+    val showHomeBadge by remember(context) { ScheduledTaskBadgePreference.observe(context) }
+        .collectAsState(initial = ScheduledTaskBadgePreference.isEnabled(context))
     val runNowState by vm.runNowState.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val now by produceState(System.currentTimeMillis()) {
@@ -112,6 +115,7 @@ fun ScheduledTasksScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
+            Column {
             TopAppBar(
                 title = {
                     Text(
@@ -129,6 +133,12 @@ fun ScheduledTasksScreen(
                     }
                 },
             )
+                SettingsSwitchRow(
+                    title = stringResource(R.string.build34_scheduled_badge),
+                    checked = showHomeBadge,
+                    onCheckedChange = { ScheduledTaskBadgePreference.setEnabled(context, it) },
+                )
+            }
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { onEditTask(null) }, shape = CircleShape) {

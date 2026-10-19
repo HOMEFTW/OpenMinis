@@ -107,7 +107,7 @@ object ModelsDevApi {
         return applyDevData(model, devModel)
     }
 
-    fun enrichModels(models: List<LLMModel>): List<LLMModel> {
+    fun enrichModels(models: List<LLMModel>, preserveProviderLimits: Boolean = false): List<LLMModel> {
         val registry = loadRegistry() ?: return models
         return models.map { model ->
             // [T-android-modelsdev-suffix-alias] The fallback scan matters here:
@@ -115,8 +115,12 @@ object ModelsDevApi {
             // appears under 19) and a custom relay's provider name matches none
             // of them, so the scan is what third-party gateways actually hit.
             // resolveDevEntry keeps that behaviour and adds the alias walk.
-            resolveDevEntry(registry, model.provider, model.id)
+            val enriched = resolveDevEntry(registry, model.provider, model.id)
                 ?.let { applyDevData(model, it) } ?: model
+            if (preserveProviderLimits) enriched.copy(
+                contextWindow = model.contextWindow ?: enriched.contextWindow,
+                maxOutputTokens = model.maxOutputTokens ?: enriched.maxOutputTokens,
+            ) else enriched
         }
     }
 

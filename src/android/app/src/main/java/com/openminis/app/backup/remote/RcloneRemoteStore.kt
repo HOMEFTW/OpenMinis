@@ -196,6 +196,47 @@ class RcloneRemoteStore(private val context: Context) {
         AppLogger.info(TAG, "[Rclone] remote added: $trimmed ($backend)")
     }
 
+    /** null preserves the credential; an explicit empty string clears it. */
+    fun update(
+        originalName: String,
+        name: String,
+        params: Map<String, String>,
+        secret: String?,
+        path: String,
+        allowInsecureTLS: Boolean,
+    ) {
+        val all = remotes
+        val edited = editedRemote(all, originalName, name, params, path, allowInsecureTLS)
+        val credential = secret ?: loadSecret(originalName)
+        val previousCredential = loadSecret(edited.name)
+        val previousMetadata = prefs.getString(KEY_REMOTES, null)
+        val updated = all.map { if (it.name == originalName) edited else it }
+        persistEditWithRollback(
+            saveCredential = {
+                secrets.edit().apply {
+                    if (credential.isNullOrEmpty()) remove(edited.name) else putString(edited.name, credential)
+                }.commit()
+            },
+            saveMetadata = { prefs.edit().putString(KEY_REMOTES, JSON.encodeToString(REMOTE_LIST, updated)).commit() },
+            restoreCredential = {
+                secrets.edit().apply {
+                    if (previousCredential == null) remove(edited.name) else putString(edited.name, previousCredential)
+                }.commit()
+            },
+            restoreMetadata = {
+                prefs.edit().apply {
+                    if (previousMetadata == null) remove(KEY_REMOTES) else putString(KEY_REMOTES, previousMetadata)
+                }.commit()
+            },
+        )
+        // Remove the previous credential only AFTER its new name is saved.
+        if (originalName != edited.name) secrets.edit().remove(originalName).apply()
+        AppLogger.info(TAG, "[Rclone] remote updated: ${edited.name} (${edited.backend})")
+    }
+
+    /** Used only in memory to test an edited connection; never exposed in the form. */
+    internal fun secretForConnection(name: String): String? = loadSecret(name)
+
     /** Remove a remote and its credential. */
     fun remove(name: String) {
         remotes = remotes.filterNot { it.name == name }
@@ -299,6 +340,45 @@ class RcloneRemoteStore(private val context: Context) {
         private const val PREFS_NAME = "backup_rclone_remotes"
         private const val SECRETS_PREFS_NAME = "backup_rclone_secrets"
         private const val KEY_REMOTES = "remotes"
+
+        /** commit() can publish in-memory values even when its disk write fails. */
+        internal fun persistEditWithRollback(
+            saveCredential: () -> Boolean,
+            saveMetadata: () -> Boolean,
+            restoreCredential: () -> Boolean,
+            restoreMetadata: () -> Boolean,
+        ) {
+            try {
+                if (!saveCredential()) throw StoreException("Could not save the server credential.")
+                if (!saveMetadata()) throw StoreException("Could not save the destination.")
+            } catch (failure: Exception) {
+                for (restore in listOf(restoreMetadata, restoreCredential)) {
+                    runCatching {
+                        if (!restore()) throw StoreException("Could not persist the original destination after a failed edit.")
+                    }.exceptionOrNull()?.let(failure::addSuppressed)
+                }
+                throw failure
+            }
+        }
+
+        internal fun editedRemote(
+            remotes: List<Remote>, originalName: String, name: String,
+            params: Map<String, String>, path: String, allowInsecureTLS: Boolean,
+        ): Remote {
+            val original = remotes.firstOrNull { it.name == originalName }
+                ?: throw StoreException("The destination no longer exists.")
+            val trimmed = name.trim()
+            if (trimmed.isEmpty() || !trimmed.all { it.isLetterOrDigit() || it == '-' || it == '_' }) {
+                throw StoreException("Choose a name using letters, numbers, - or _.")
+            }
+            if (remotes.any { it.name == trimmed && it.name != originalName }) {
+                throw StoreException("A destination named \"$trimmed\" already exists.")
+            }
+            return original.copy(
+                name = trimmed, params = params, path = path,
+                allowInsecureTLS = allowInsecureTLS,
+            )
+        }
 
         /**
          * Which parameter carries the secret, per backend. rclone names these

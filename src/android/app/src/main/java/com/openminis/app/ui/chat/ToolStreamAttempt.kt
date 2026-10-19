@@ -45,7 +45,7 @@ internal fun rollbackToolStreamAttempt(blocks: MutableList<AssistantBlock>, turn
 
 /** Inserting the banner changes the boundary of the next attempt. */
 internal fun replaceFallbackBanner(blocks: MutableList<AssistantBlock>, banner: AssistantBlock): Int {
-    blocks.removeAll { it.kind == "info" }
+    blocks.removeAll(::isModelFallbackNotice)
     blocks.add(0, banner)
     return blocks.size
 }

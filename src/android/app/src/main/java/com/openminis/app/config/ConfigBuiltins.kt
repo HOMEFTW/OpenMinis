@@ -52,6 +52,7 @@ internal object ConfigBuiltins {
         registerSoul(r, context)
         registerMemory(r, context)
         registerNetwork(r, context)
+        Build34ConfigFields.register(r, context, providerRepo)
     }
 
     // -- Network — the sandbox's DNS (Container Network) --
@@ -135,9 +136,9 @@ internal object ConfigBuiltins {
             ClosureField(
                 path = "session.thinkingLevel",
                 displayName = "Thinking level (current session)",
-                description = "off / low / medium / high / xhigh. Applied to the active chat.",
+                description = "off / low / medium / high / xhigh / max / ultra. Applied to the active chat.",
                 valueSchema = ConfigSchema.StrEnum(
-                    listOf("off", "low", "medium", "high", "xhigh")
+                    listOf("off", "low", "medium", "high", "xhigh", "max", "ultra")
                 ),
                 risk = ConfigRisk.NORMAL,
                 revertable = true,
@@ -282,6 +283,12 @@ internal object ConfigBuiltins {
     // -- Appearance & display --
 
     private fun registerAppearance(r: ConfigRegistry, context: Context) {
+        r.register(fontScaleField(
+            path = "appearance.appFontSize", displayName = "App font size",
+            description = "Base font size for the app UI. Chat input and messages keep their own settings.",
+            prefs = context.getSharedPreferences("appearance_prefs", Context.MODE_PRIVATE),
+            key = com.openminis.app.ui.settings.KEY_FONT_APP_BASE,
+        ))
         // Source-of-truth lives in `appearance_prefs` (see
         // ui/settings/AppearanceScreen.kt PREF_APPEARANCE).
         val prefs = context.getSharedPreferences("appearance_prefs", Context.MODE_PRIVATE)
@@ -392,7 +399,7 @@ internal object ConfigBuiltins {
                 description = "Ask before stopping a running task or subagent.",
                 prefs = appearancePrefs,
                 key = com.openminis.app.ui.settings.KEY_CONFIRM_BEFORE_STOPPING,
-                defaultValue = true,
+                defaultValue = false,
             )
         )
         // [T-keyboard-auto-pop default flip] On by default — iOS gates

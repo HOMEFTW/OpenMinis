@@ -767,7 +767,11 @@ fun SessionListScreen(
         com.openminis.app.scheduled.ScheduledTaskStore(context).observe()
             .map { list -> list.count { it.enabled } }
     }.collectAsState(initial = 0)
+    val showScheduledHomeBadge by remember(context) {
+        com.openminis.app.ui.scheduled.ScheduledTaskBadgePreference.observe(context)
+    }.collectAsState(initial = com.openminis.app.ui.scheduled.ScheduledTaskBadgePreference.isEnabled(context))
 
+    val availableUpdate by com.openminis.app.data.UpdatePreferences.availableUpdate.collectAsState()
     Scaffold(
         topBar = {
             TopAppBar(
@@ -796,7 +800,11 @@ fun SessionListScreen(
                         }
                     } else {
                         IconButton(onClick = onSettingsClick) {
-                            Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.sessionlist_settings))
+                            BadgedBox(badge = { if (availableUpdate != null) Badge() }) {
+                                Icon(Icons.Default.Settings, contentDescription = availableUpdate?.let {
+                                    stringResource(R.string.build34_update_available, it.versionName)
+                                } ?: stringResource(R.string.sessionlist_settings))
+                            }
                         }
                     }
                 },
@@ -817,7 +825,7 @@ fun SessionListScreen(
                         // scheduled tasks so the user can see at a glance how many
                         // are configured without opening the list.
                         IconButton(onClick = onScheduledTasksClick) {
-                            if (scheduledTaskCount > 0) {
+                            if (showScheduledHomeBadge && scheduledTaskCount > 0) {
                                 BadgedBox(badge = { Badge { Text("$scheduledTaskCount") } }) {
                                     Icon(
                                         Icons.Outlined.Schedule,

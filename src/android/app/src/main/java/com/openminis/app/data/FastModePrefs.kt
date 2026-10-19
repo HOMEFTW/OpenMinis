@@ -22,20 +22,31 @@ import kotlinx.coroutines.flow.asStateFlow
 object FastModePrefs {
     private const val PREFS = "minis_fast_mode_prefs"
     private const val KEY_ENABLED = "codexFastModeEnabled"
+    private const val KEY_SPEED_TIER = "speedTier"
 
     @Volatile
     private var appContext: Context? = null
 
     private val _enabled = MutableStateFlow(false)
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
+    private val _speedTier = MutableStateFlow("standard")
+    val speedTier: StateFlow<String> = _speedTier.asStateFlow()
+    private val stateLock = Any()
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /** Capture the app context and warm the cache. Called from MinisApp.onCreate. */
-    fun prime(context: Context) {
+    fun prime(context: Context) = synchronized(stateLock) {
         appContext = context.applicationContext
-        _enabled.value = prefs(context).getBoolean(KEY_ENABLED, false)
+        val stored = prefs(context)
+        val legacy = stored.getBoolean(KEY_ENABLED, false)
+        val tier = runCatching { stored.getString(KEY_SPEED_TIER, null) }.getOrNull()
+            ?.takeIf { it in setOf("standard", "fast", "ultrafast") }
+        val chosen = if (tier == null || (stored.contains(KEY_ENABLED) && legacy != (tier != "standard"))) {
+            if (legacy) "fast" else "standard"
+        } else tier
+        updateCachedTier(chosen)
     }
 
     /**
@@ -48,8 +59,24 @@ object FastModePrefs {
     }
 
     fun setEnabled(context: Context, enabled: Boolean) {
-        _enabled.value = enabled
-        prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
+        setSpeedTier(context, if (enabled) "fast" else "standard")
+    }
+
+    /** Config's explicit tier and the legacy checkbox always update the same shared state. */
+    fun setSpeedTier(context: Context, value: String) = synchronized(stateLock) {
+        val tier = checkedTier(value)
+        updateCachedTier(tier)
+        prefs(context).edit().putString(KEY_SPEED_TIER, tier)
+            .putBoolean(KEY_ENABLED, tier != "standard").apply()
+    }
+
+    private fun checkedTier(value: String): String = value.trim().lowercase(java.util.Locale.ROOT).also {
+        require(it in setOf("standard", "fast", "ultrafast")) { "Unknown speed tier" }
+    }
+
+    private fun updateCachedTier(tier: String) {
+        _speedTier.value = tier
+        _enabled.value = tier != "standard"
     }
 
     /**
@@ -62,6 +89,11 @@ object FastModePrefs {
      */
     @androidx.annotation.VisibleForTesting
     internal fun setCachedEnabledForTest(enabled: Boolean) {
-        _enabled.value = enabled
+        synchronized(stateLock) { updateCachedTier(if (enabled) "fast" else "standard") }
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setCachedSpeedTierForTest(value: String) {
+        synchronized(stateLock) { updateCachedTier(checkedTier(value)) }
     }
 }

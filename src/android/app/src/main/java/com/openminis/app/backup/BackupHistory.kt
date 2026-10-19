@@ -112,6 +112,8 @@ class BackupHistory private constructor(private val context: Context) {
         get() = File(context.filesDir, "backup-history").apply { mkdirs() }
             .let { File(it, "records.json") }
 
+    private val storage by lazy { BackupHistoryStorage(storeFile) }
+
     @Volatile
     private var cache: List<Record>? = null
 
@@ -120,12 +122,14 @@ class BackupHistory private constructor(private val context: Context) {
     fun records(): List<Record> {
         cache?.let { return it }
         val loaded = runCatching {
-            storeFile.takeIf { it.exists() }?.readText()
+            storage.read()
                 ?.let { JSON.decodeFromString(RECORD_LIST, it) }
         }.getOrNull() ?: emptyList()
         val cutoff = System.currentTimeMillis() - RETENTION_MS
-        val kept = loaded.filter { it.startedAt >= cutoff }.sortedByDescending { it.startedAt }
-        if (kept.size != loaded.size) persist(kept)
+        val kept = loaded.filter { it.startedAt >= cutoff }
+            .map { it.copy(log = cleanLog(it.log)) }
+            .sortedByDescending { it.startedAt }
+        if (kept != loaded) persist(kept)
         cache = kept
         return kept
     }
@@ -133,7 +137,10 @@ class BackupHistory private constructor(private val context: Context) {
     @Synchronized
     private fun persist(list: List<Record>) {
         cache = list
-        runCatching { storeFile.writeText(JSON.encodeToString(RECORD_LIST, list)) }
+        runCatching {
+            val bytes = JSON.encodeToString(RECORD_LIST, list).toByteArray(Charsets.UTF_8)
+            storage.write { it.write(bytes) }
+        }
             .onFailure { AppLogger.error(TAG, "[Backup] history write failed: ${it.message}") }
     }
 
@@ -144,7 +151,8 @@ class BackupHistory private constructor(private val context: Context) {
     fun upsert(record: Record) {
         val cur = records().toMutableList()
         val i = cur.indexOfFirst { it.id == record.id }
-        if (i >= 0) cur[i] = record else cur.add(0, record)
+        val cleaned = record.copy(log = cleanLog(record.log))
+        if (i >= 0) cur[i] = cleaned else cur.add(0, cleaned)
         persist(cur.sortedByDescending { it.startedAt })
     }
 
@@ -194,6 +202,23 @@ class BackupHistory private constructor(private val context: Context) {
          * a translated string at render time.
          */
         const val INTERRUPTED_MARKER = "interrupted"
+
+        // These were emitted by BackupExporter / BackupRunController as
+        // transient status. Keep problems and durable delivery/save outcomes,
+        // including on histories created before progress stopped being logged.
+        internal fun cleanLog(log: List<LogEntry>): List<LogEntry> = log.filterNot {
+            !it.isProblem && (
+                it.message in EXPORT_PROGRESS || DELIVERY_PROGRESS.matches(it.message)
+            )
+        }
+
+        private val EXPORT_PROGRESS = setOf(
+            "Starting…", "Exporting chats…", "Exporting shared files…", "Exporting skills…",
+            "Exporting memory…", "Exporting MCP servers…", "Exporting providers…",
+            "Exporting environment variables…", "Collecting credentials…", "Encrypting…",
+            "Writing manifest…", "Packaging…",
+        )
+        private val DELIVERY_PROGRESS = Regex("(?:Sending|Saving) to .+…(?: \\d+%)?")
 
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
         private val RECORD_LIST = ListSerializer(Record.serializer())

@@ -1176,6 +1176,8 @@ class ChatViewModel(
      *  this, opening a session that previously fell back mid-run flashes the
      *  default model name for one frame before the persisted binding settles. */
     private val sessionLoaded = MutableStateFlow(false)
+    private val _sessionContentLoaded = MutableStateFlow(false)
+    val sessionContentLoaded: StateFlow<Boolean> = _sessionContentLoaded.asStateFlow()
 
     private val _sessionTitle = MutableStateFlow("New Chat")
     val sessionTitle: StateFlow<String> = _sessionTitle.asStateFlow()
@@ -1705,7 +1707,8 @@ class ChatViewModel(
             browserEnabled = com.openminis.app.tools.AgentToolSwitch.BROWSER.isEnabled(context),
             rosterNames = providerRepository.subAgents.map { it.name },
         ) + com.openminis.app.tools.SessionMessageTool.definition() +
-            if (isHelper) emptyList() else listOf(com.openminis.app.agent.jobs.UserQuestionTool.definition())
+            if (isHelper || !com.openminis.app.tools.AgentToolSwitch.USER_ASK.isEnabled(context)) emptyList()
+            else listOf(com.openminis.app.agent.jobs.UserQuestionTool.definition())
 
     /**
      * Per-session loop detector. Reset alongside [agentHistory] whenever the
@@ -4679,6 +4682,7 @@ class ChatViewModel(
             }
         }
         val restoredDraft = composerDraftStore.load(sessionId)
+            ?: if (isDraft) composerDraftStore.takeRecentNewDraft(sessionId) else null
         if (restoredDraft != null) {
             _inputText.value = restoredDraft.text
             _editingMessageId.value = restoredDraft.editingMessageId
@@ -5079,8 +5083,10 @@ class ChatViewModel(
                 "loadSession.skipped",
                 "reason=safeMode",
             )
+            _sessionContentLoaded.value = true
             return
         }
+        _sessionContentLoaded.value = false
         viewModelScope.launch {
             // [T-HANG-DIAG] timing markers to localise where session entry
             // stalls. Sentinel-tagged so a single grep -v can strip them
@@ -5500,6 +5506,7 @@ class ChatViewModel(
                 // missing-session path) and on exception, so the init-time
                 // config.collect can never deadlock waiting for us.
                 sessionLoaded.value = true
+                _sessionContentLoaded.value = true
                 // [T-HANG-DIAG] total time spent in loadSession from ENTER to
                 // either successful completion or early return. tHangDiagStart
                 // was captured just inside `try` so this covers the whole
@@ -10112,7 +10119,29 @@ class ChatViewModel(
                         throw e
                     }
                     val actual = unwrapFlowException(e)
-                    if (com.openminis.app.data.model.LLMError.isCertificateFailure(actual)) throw actual
+                    val reason = com.openminis.app.logging.LogRedactor.redact(when {
+                        actual is com.openminis.app.data.model.LLMError.RateLimited -> "Rate limited"
+                        actual is com.openminis.app.data.model.LLMError.ProviderError -> actual.detail
+                        else -> actual.message ?: "Error"
+                    })
+                    suspend fun publishFailedFallback(includeInitialFailure: Boolean = false): String? {
+                        if (!includeInitialFailure && fallbackReasons.isEmpty()) return null
+                        fallbackReasons.add("⚠️ ${currentProvider.model.displayName}: $reason")
+                        val trail = (fallbackReasons + unavailableGroupMembers()).joinToString("\n")
+                        replaceFallbackBanner(allToolBlocks, AssistantBlock(
+                            id = "fallback_info_$turn", kind = "info", toolName = "model_fallback",
+                            content = trail, toolTitle = context.getString(R.string.b34_fallback_title),
+                            toolStatus = ToolBlockStatus.FAILED,
+                        ))
+                        withContext(Dispatchers.Main) {
+                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                        }
+                        return trail
+                    }
+                    if (com.openminis.app.data.model.LLMError.isCertificateFailure(actual)) {
+                        publishFailedFallback()
+                        throw actual
+                    }
                     val errorDetail = (actual as? com.openminis.app.data.model.LLMError.ProviderError)?.detail
                     val errorStatus = errorDetail?.let { Regex("^(?:\\[|HTTP )(400|413)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
                     val isContextOverflow = com.openminis.app.data.ContextOverflowGuard.isContextOverflow(errorStatus, errorDetail)
@@ -10140,7 +10169,10 @@ class ChatViewModel(
                     // Keep the final reasoning tail visible if recovery is not possible.
                     publishThinking(force = true)
                     val recoveryElapsed = android.os.SystemClock.elapsedRealtime() - recoveryStartedAt
-                    if (!StreamRetryPolicy.canStartRecovery(recoveryElapsed)) throw actual
+                    if (!StreamRetryPolicy.canStartRecovery(recoveryElapsed)) {
+                        publishFailedFallback()
+                        throw actual
+                    }
                     val isRateLimit = actual is com.openminis.app.data.model.LLMError.RateLimited
                     val is5xx = (actual as? com.openminis.app.data.model.LLMError)?.isHttpServerError == true
                     // Auto-retry on transient network/5xx/transient errors on the SAME provider
@@ -10202,11 +10234,6 @@ class ChatViewModel(
                     val nextCandidate = if (shouldFallback) remainingFallbacks.removeFirstOrNull() else null
                     val next = nextCandidate?.provider
                     if (next != null && nextCandidate != null) {
-                        val reason = when {
-                            isRateLimit -> "Rate limited"
-                            actual is com.openminis.app.data.model.LLMError.ProviderError -> actual.detail
-                            else -> actual.message ?: "Error"
-                        }
                         // [T-android-model-indicator-flash-on-endpoint-retry]
                         // Same-model recovery is a TRANSPARENT retry, not a real
                         // model switch. A model group can hold several entries
@@ -10264,12 +10291,14 @@ class ChatViewModel(
                         } else if (newEntry != null) {
                             persistBinding("""{"type":"entry","entryId":"${newEntry.id}"}""")
                         }
-                        val infoText = fallbackReasons.joinToString("\n") + "\n🔄 Switched to ${currentProvider.model.displayName}"
+                        fallbackReasons.add("🔄 " + context.getString(R.string.build34_model_switched, currentProvider.model.displayName))
+                        val infoText = fallbackReasons.joinToString("\n")
                         val failedText = turnTextSb.toString()
                         resetFailedAttempt()
                         turnStartBlockIndex = replaceFallbackBanner(allToolBlocks, AssistantBlock(
                             id = "fallback_info_$turn",
                             kind = "info",
+                            toolName = "model_fallback",
                             content = infoText,
                             toolTitle = "Switched model",
                             toolStatus = ToolBlockStatus.SUCCESS,
@@ -10284,13 +10313,9 @@ class ChatViewModel(
                         // skipped (disabled / not logged in / hidden) so the
                         // user can see why fallback never reached them —
                         // mirrors iOS streamWithGroupFallback exhausted path.
-                        if (shouldFallback) {
-                            val skipped = unavailableGroupMembers()
-                            if (fallbackReasons.isNotEmpty() || skipped.isNotEmpty()) {
-                                val trail = (fallbackReasons + skipped).joinToString("\n")
-                                val finalDesc = actual.message ?: actual.toString()
-                                throw com.openminis.app.data.model.LLMError.ProviderError("$trail\n$finalDesc")
-                            }
+                        if (shouldFallback || fallbackReasons.isNotEmpty()) {
+                            val trail = publishFailedFallback(includeInitialFailure = shouldFallback)
+                            if (trail != null) throw com.openminis.app.data.model.LLMError.ProviderError(trail)
                         }
                         throw actual  // re-throw unwrapped, all fallbacks exhausted
                     }
@@ -11069,7 +11094,9 @@ class ChatViewModel(
             com.openminis.app.agent.jobs.UserQuestionTool.NAME,
             com.openminis.app.agent.jobs.UserQuestionTool.ALIAS,
             com.openminis.app.agent.jobs.UserQuestionTool.LEGACY_ALIAS -> {
-                if (isHelper || runStates.value.values.any { !it.status.isTerminal && it.runId in programmaticRunIds }) {
+                if (!com.openminis.app.tools.AgentToolSwitch.USER_ASK.isEnabled(context)) {
+                    ToolExecutionResult("Error: User interaction is disabled in tool settings.", false)
+                } else if (isHelper || runStates.value.values.any { !it.status.isTerminal && it.runId in programmaticRunIds }) {
                     ToolExecutionResult("Error: User input is unavailable in an unattended or sub-agent run. Return the missing information to the caller.", false)
                 } else {
                     val request = try { com.openminis.app.agent.jobs.UserQuestionTool.parse(toolId, argsJson) }
@@ -11087,7 +11114,9 @@ class ChatViewModel(
             com.openminis.app.tools.SessionMessageTool.NAME ->
                 com.openminis.app.tools.SessionMessageTool.execute(argsJson, activeSessionId, context)
             FileReadTool.NAME -> {
-                val result = FileReadTool.execute(argsJson, fsSessionId, context)
+                val result = withContext(com.openminis.app.tools.FileToolDispatcher.io) {
+                    FileReadTool.execute(argsJson, fsSessionId, context)
+                }
                 // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.
                 if (result.success) {
                     runCatching {
@@ -11101,10 +11130,14 @@ class ChatViewModel(
                 }
                 result
             }
-            FileWriteTool.NAME -> FileWriteTool.execute(argsJson, fsSessionId, context).also {
+            FileWriteTool.NAME -> withContext(com.openminis.app.tools.FileToolDispatcher.io) {
+                FileWriteTool.execute(argsJson, fsSessionId, context)
+            }.also {
                 if (it.success) maybeReloadSkillsForPath(argsJson)
             }
-            FileEditTool.NAME -> FileEditTool.execute(argsJson, fsSessionId, context).also {
+            FileEditTool.NAME -> withContext(com.openminis.app.tools.FileToolDispatcher.io) {
+                FileEditTool.execute(argsJson, fsSessionId, context)
+            }.also {
                 if (it.success) maybeReloadSkillsForPath(argsJson)
             }
             // T178: pass sessionId + context so read_image routes through
@@ -14169,19 +14202,32 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         }
     }
 
-    fun cancelStream() {
+    fun hasBackgroundWorkToStop(): Boolean = scheduledInsertionJob?.isActive == true ||
+        com.openminis.app.agent.jobs.AgentJobRegistry.hasAgentWork(activeSessionId)
+
+    fun cancelStream() = cancelStreamInternal(stopBackgroundWork = true)
+
+    fun stopCurrentToolOnly() {
+        if (stopCurrentInsertedRun(scheduledInsertionJob, scheduledInsertionRunIds, ::cancelRun)) return
+        cancelStreamInternal(stopBackgroundWork = false)
+    }
+
+    private fun cancelStreamInternal(stopBackgroundWork: Boolean) {
         lastTurnWasCancelled = true
         userQuestions.cancel()
         sendSetupJobs.values.forEach { it.cancel() }
         AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
         val registry = com.openminis.app.agent.jobs.AgentJobRegistry
-        registry.muteDelegationResults(activeSessionId)
-        registry.dropQueuedDelegations(activeSessionId, "user-stopped")
-        registry.cancelAll(activeSessionId, "user-stopped")
+        if (stopBackgroundWork) {
+            registry.muteDelegationResults(activeSessionId)
+            registry.dropQueuedDelegations(activeSessionId, "user-stopped")
+            registry.cancelAll(activeSessionId, "user-stopped")
+            scheduledInsertionJob?.cancel()
+        }
         val staleCallbacks = _promptQueue.value.filter {
             !isUserQueuedPrompt(it) && com.openminis.app.agent.jobs.AgentCallback.isCallbackText(it.text)
         }
-        staleCallbacks.forEach { removeQueuedPrompt(it.id) }
+        if (stopBackgroundWork) staleCallbacks.forEach { removeQueuedPrompt(it.id) }
         helperConfig?.let {
             val job = registry.job(it.jobId)
             if (!helperStopIsInternal && job?.isActive == true) registry.cancel(it.jobId, "child-stopped")
@@ -14190,6 +14236,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // post-cancel drain can resume them as independent runs.
         runStates.value.values
             .filter { it.status == ChatRunStatus.Running }
+            .filter { stopBackgroundWork || it.runId !in scheduledInsertionRunIds }
             .forEach { setRunStatus(it.runId, ChatRunStatus.Cancelled, "cancelled by user") }
         streamJob?.cancel()
         _isStreaming.value = false
@@ -14222,7 +14269,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             // Mid-turn rename: sweep any lingering draft shell too.
             ExecutionCoordinator.stopCurrentCommand(sessionId)
         }
-        handleUserCancelledCleanup()
+        handleUserCancelledCleanup(preserveBackgroundWork = !stopBackgroundWork)
 
         // T189: iOS parity (AIChatViewModel.swift L2592-2610). If the user
         // enqueued prompts during the cancelled stream, auto-resume the drain
@@ -14393,7 +14440,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      *
      * Always sets [_canResume] = true when there is something to resume from.
      */
-    private fun handleUserCancelledCleanup() {
+    private fun handleUserCancelledCleanup(preserveBackgroundWork: Boolean = false) {
         val msgs = _messages.value.toMutableList()
         val lastIdx = msgs.indexOfLast { it.role == "assistant" }
         if (lastIdx < 0) return
@@ -14417,7 +14464,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val cancelledIds = mutableListOf<Pair<String, String>>() // (toolUseId, toolName)
         val updatedBlocks = last.toolBlocks.map { b ->
             val s = b.toolStatus
-            if (s == ToolBlockStatus.STREAMING || s == ToolBlockStatus.PENDING || s == ToolBlockStatus.RUNNING) {
+            val keepBackground = preserveBackgroundWork &&
+                b.toolName == com.openminis.app.data.model.SubAgentDefinition.TOOL_NAME
+            if (!keepBackground && (s == ToolBlockStatus.STREAMING || s == ToolBlockStatus.PENDING || s == ToolBlockStatus.RUNNING)) {
                 if (b.kind == "tool_use") cancelledIds.add(b.id to b.toolName)
                 b.copy(toolStatus = ToolBlockStatus.CANCELLED)
             } else b

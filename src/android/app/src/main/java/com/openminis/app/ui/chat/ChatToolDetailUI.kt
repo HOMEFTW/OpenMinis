@@ -451,7 +451,7 @@ internal fun ToolDetailSheet(
                             isAgentTool -> "Open agent conversation"
                             isShellTool -> "Open in terminal"
                             isBrowserTool -> "Open in session browser"
-                            else -> "Copy"
+                            else -> stringResource(com.openminis.app.R.string.common_copy)
                         },
                         tint = ChatColors.primaryText,
                         modifier = Modifier.size(16.dp),

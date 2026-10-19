@@ -11,9 +11,8 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /**
- * The archive has to stay readable by iOS's hand-rolled parser, which is
- * stricter than any ZIP library: STORED only, classic 32-bit central directory,
- * no ZIP64. These tests pin the properties that parser depends on.
+ * Keep the cross-platform payload shape and bounded compression while allowing
+ * standard ZIP64 counts, offsets and sizes when the classic fields overflow.
  */
 class BackupZipTest {
 
@@ -92,28 +91,43 @@ class BackupZipTest {
         assertTrue(File(dest, "blobs/ab/abcdef").readBytes().contentEquals(ByteArray(4096) { it.toByte() }))
     }
 
-    /**
-     * The ZIP64 guard. Without it, ZipOutputStream promotes the archive on its
-     * own and iOS reads the saturated 0xFFFF entry count as 65 535 — extracting
-     * a subset and calling the restore a success. Refusing up front is the only
-     * safe behaviour, because the damage is invisible on the writing side.
-     */
-    @Test
-    fun `refuses an archive with more entries than the classic EOCD can count`() {
-        val dir = File(tmp, "many").apply { mkdirs() }
-        // Build the file list cheaply — 65 536 empty files, one over the limit.
-        for (i in 0..65_535) File(dir, "f$i").writeBytes(ByteArray(0))
-
-        var message: String? = null
-        try {
-            BackupZip.archive(dir, File(tmp, "too-many.minisbak"))
-        } catch (e: BackupZip.ZipException) {
-            message = e.message
+    @Test fun `small archives preserve standard CRC size timestamp and UTF8 metadata`() {
+        val staging = File(tmp, "metadata").apply { mkdirs() }
+        val name = "文件/备份 📦.bin"
+        val payload = ByteArray(4096) { it.toByte() }
+        val file = File(staging, name).apply { parentFile!!.mkdirs(); writeBytes(payload) }
+        val time = 1_700_000_000_000L
+        assertTrue(file.setLastModified(time))
+        val archive = File(tmp, "metadata.minisbak")
+        BackupZip.archive(staging, archive)
+        java.util.zip.ZipFile(archive).use { zip ->
+            val entry = zip.getEntry(name)
+            assertEquals(payload.size.toLong(), entry.size)
+            assertEquals(CRC32().apply { update(payload) }.value, entry.crc)
+            assertEquals(time, entry.time)
+            assertTrue(zip.getInputStream(entry).readBytes().contentEquals(payload))
         }
-        assertTrue(
-            "an over-large entry count must be refused before writing, got: $message",
-            message?.contains("65535") == true,
-        )
+    }
+
+    @Test
+    fun `ZIP64 preserves every member beyond the classic EOCD entry count`() {
+        val dir = File(tmp, "many").apply { mkdirs() }
+        for (i in 0..65_535) File(dir, "f%05d".format(i)).createNewFile()
+        val sentinel = "末尾/备份 📦.json"
+        File(dir, sentinel).apply { parentFile!!.mkdirs(); writeText("last member") }
+        val archive = File(tmp, "zip64.minisbak")
+        BackupZip.archive(dir, archive)
+
+        java.util.zip.ZipFile(archive).use { zip ->
+            assertEquals(65_537, zip.size())
+            assertEquals("last member", zip.getInputStream(zip.getEntry(sentinel)).reader().readText())
+        }
+        assertEquals(65_537, BackupZip.listEntries(archive).size)
+        val restored = File(tmp, "zip64-restored")
+        var extracted = 0
+        BackupZip.extract(archive, restored) { extracted++ }
+        assertEquals(65_537, extracted)
+        assertEquals("last member", File(restored, sentinel).readText())
     }
 
     /** §5.5: a malicious package must not write outside the destination. */

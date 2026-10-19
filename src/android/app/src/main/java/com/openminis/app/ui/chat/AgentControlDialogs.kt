@@ -1,6 +1,11 @@
 package com.openminis.app.ui.chat
 
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -19,7 +24,24 @@ import com.openminis.app.R
 import com.openminis.app.ui.components.MinisAlertDialog
 
 @Composable
-internal fun StopChatConfirmation(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun StopChatConfirmation(onDismiss: () -> Unit, onConfirm: () -> Unit, onStopCurrent: (() -> Unit)? = null) {
+    if (onStopCurrent != null) {
+        ModalBottomSheet(onDismissRequest = onDismiss) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                TextButton(onClick = onStopCurrent, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.build34_stop_current))
+                }
+                TextButton(onClick = onConfirm, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.build34_stop_all), color = androidx.compose.material3.MaterialTheme.colorScheme.error)
+                }
+                TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.cancel))
+                }
+            }
+        }
+        return
+    }
     if (!confirmBeforeStoppingEnabled(LocalContext.current)) {
         LaunchedEffect(Unit) { onConfirm() }
         return

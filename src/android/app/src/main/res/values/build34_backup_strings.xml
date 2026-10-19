@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="build34_backup_edit_server">Edit %1$s</string>
+    <string name="build34_backup_save_server">Save changes</string>
+    <string name="build34_backup_keep_secret">Leave blank to keep the saved credential</string>
+    <string name="build34_backup_clear_secret">Clear saved credential</string>
+    <string name="build34_backup_credentials_unchanged">%1$d credential entries were left unchanged.</string>
+    <string name="build34_backup_credentials_restored">Credentials were restored for %1$d provider(s). API keys from the backup replace the keys on this device. Accounts signed in here are kept unless their sign-in has expired.</string>
+    <string name="build34_backup_restore_merge_footer">Restore merges the backup into this device. Matching providers, model settings and groups use the backup values, including API keys. Groups with the same name are combined. Device-only items and accounts whose sign-in has not expired are kept.</string>
+</resources>

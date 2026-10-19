@@ -145,6 +145,7 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     }
 
     override fun start(locale: Locale, listener: SpeechRecognitionEngine.Listener) {
+        modeFallback.reset()
         this.listener = listener
         bufferedPartial = null
         heardSpeech = false
@@ -563,8 +564,9 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
      * (SODA) recognizer answers ERROR_LANGUAGE_UNAVAILABLE we restart once with
      * it false, which forces the regular (typically cloud) recognizer.
      */
-    private fun startInternal(locale: Locale, allowOnDeviceRetry: Boolean) {
+    private fun startInternal(locale: Locale, allowOnDeviceRetry: Boolean, forceOnDevice: Boolean? = null) {
         mainHandler.post {
+            if (listener == null || sessionCommitted) return@post
             try {
                 // Only reach for the on-device recognizer when the user actually
                 // asked for offline. It used to be created unconditionally on
@@ -573,16 +575,20 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
                 // the locale (e.g. a zh-CN Pixel 4a) SODA fails every session
                 // with "Failed to get language pack" / ERROR_LANGUAGE_
                 // UNAVAILABLE(12), so the mic opened and closed instantly.
-                val wantOnDevice = preferOffline &&
+                val wantOnDevice = (forceOnDevice ?: preferOffline) &&
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                    allowOnDeviceRetry
+                    (forceOnDevice != null || allowOnDeviceRetry)
+                usingOnDevice = wantOnDevice
                 val r = if (wantOnDevice) {
                     try { SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext) }
-                    catch (_: Throwable) { SpeechRecognizer.createSpeechRecognizer(appContext) }
+                    catch (_: Throwable) {
+                        usingOnDevice = false
+                        modeFallback.disable()
+                        SpeechRecognizer.createSpeechRecognizer(appContext)
+                    }
                 } else {
                     SpeechRecognizer.createSpeechRecognizer(appContext)
                 }
-                usingOnDevice = wantOnDevice
                 pendingLocale = locale
                 recognizer = r
                 r.setRecognitionListener(callbacks)
@@ -748,6 +754,7 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
             return
         }
         mainHandler.post {
+            modeFallback.reset()
             this.listener = listener
             bufferedPartial = null
             // The take was already judged to contain speech: an empty result
@@ -762,7 +769,8 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
         }
     }
 
-    private fun startReplay(pcm: ByteArray, sampleRate: Int, locale: Locale, allowOnDeviceRetry: Boolean) {
+    private fun startReplay(pcm: ByteArray, sampleRate: Int, locale: Locale, allowOnDeviceRetry: Boolean,
+                            forceOnDevice: Boolean? = null) {
         replayPcm = pcm
         synchronized(sessionPcmLock) {
             sessionPcm.clear()
@@ -802,7 +810,7 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
                 runCatching { out.close() }
             }
         }, "asr-replay").start()
-        startInternal(locale, allowOnDeviceRetry)
+        startInternal(locale, allowOnDeviceRetry, forceOnDevice)
         armWatchdog(VoiceAsrWatchdog.pcmSeconds(pcm.size, sampleRate))
     }
 
@@ -866,6 +874,8 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
      * still fall back when no offline pack is installed for the locale.
      */
     @Volatile var preferOffline: Boolean = false
+    @Volatile var allowModeFallback: Boolean = false
+    private val modeFallback = SystemRecognitionFallback()
 
     /**
      * [T-android-asr-script-subtag] Strip the SCRIPT subtag from a language tag
@@ -1136,6 +1146,7 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
         }
 
         override fun onError(errorCode: Int) {
+            if (sessionCommitted || listener == null) return
             // [T-voice-mic-preempted] ERROR_AUDIO while a call owns the audio
             // path is the mic being taken, not a broken recognizer - and must
             // not mark the engine degraded for the rest of the process below.
@@ -1149,18 +1160,25 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
             // usually handles the same locale fine. Restart once against the
             // regular recognizer instead of surfacing a dead end to the user.
             val retryLocale = pendingLocale
-            if (err == RecognitionError.LANGUAGE_UNSUPPORTED && usingOnDevice && retryLocale != null) {
-                Log.i(TAG, "on-device recognizer lacks a pack for the locale — retrying via the default recognizer")
-                usingOnDevice = false
+            val onDeviceAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext) }.getOrDefault(false)
+            val retryOnDevice = if (retryLocale != null) modeFallback.nextMode(
+                usingOnDevice, err, allowModeFallback, onDeviceAvailable,
+            ) else null
+            if (retryOnDevice != null && retryLocale != null) {
+                Log.i(TAG, "Retrying system recognition once (onDevice=$retryOnDevice)")
                 // [T-voice-asr-failure-retry-prompt] A replay must restart on
                 // its saved audio — a bare restart would open the microphone.
-                val replay = replayPcm
+                val replay = replayPcm ?: retainedPcm().takeIf { it.isNotEmpty() && Build.VERSION.SDK_INT >= 33 }
                 val replaySampleRate = sessionPcmSampleRate
                 tearDown()
                 if (replay != null) {
-                    startReplay(replay, replaySampleRate, retryLocale, allowOnDeviceRetry = false)
+                    startReplay(replay, replaySampleRate, retryLocale, allowOnDeviceRetry = false, forceOnDevice = retryOnDevice)
                 } else {
-                    startInternal(retryLocale, allowOnDeviceRetry = false)
+                    startEndpointingVad()
+                    continuousSession = feedingAudio
+                    continuousLocale = if (feedingAudio) retryLocale else null
+                    startInternal(retryLocale, allowOnDeviceRetry = false, forceOnDevice = retryOnDevice)
                 }
                 return
             }

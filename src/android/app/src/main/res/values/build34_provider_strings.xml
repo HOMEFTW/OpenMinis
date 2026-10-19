@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="b34_provider_hidden_models">Hidden models (%1$d)</string>
+    <string name="b34_expand">Expand</string>
+    <string name="b34_collapse">Collapse</string>
+    <string name="b34_model_hidden">Hidden</string>
+    <string name="b34_provider_delete_model_confirm">Delete “%1$s” and remove its group memberships and pins? Automatic refresh will keep it deleted. A manual model refresh can fetch it again.</string>
+    <string name="b34_provider_export_title">Export provider</string>
+    <string name="b34_usage_today">Today</string>
+    <string name="b34_usage_7_days">7 days</string>
+    <string name="b34_usage_30_days">30 days</string>
+    <string name="b34_usage_all">All</string>
+    <string name="b34_usage_load_failed">Usage could not be loaded.</string>
+    <string name="b34_usage_retry">Retry</string>
+    <string name="b34_usage_all_providers">All providers</string>
+    <string name="b34_usage_provider_details">Provider details</string>
+    <string name="b34_usage_trend">Trend</string>
+    <string name="b34_usage_timezone">Time zone: %1$s</string>
+    <string name="b34_usage_no_data">No usage in this range or selection.</string>
+    <string name="b34_usage_total_tokens">Total tokens</string>
+    <string name="b34_usage_estimated">Estimated from the session model</string>
+    <string name="b34_usage_peak">Peak %1$s</string>
+    <string name="b34_usage_chart_description">Usage chart. Total %1$s tokens, peak %2$s at %3$s</string>
+    <string name="b34_copy">Copy</string>
+    <string name="b34_dismiss">OK</string>
+    <string name="b34_fallback_title">Model fallback</string>
+    <string name="b34_correction_failed_title">AI correction failed</string>
+    <string name="b34_correction_failed_message">Original transcript kept.\n%1$s</string>
+    <string name="b34_correction_model_failure">%1$s: %2$s</string>
+    <string name="b34_correction_no_model">No usable text correction model. Check the sub/primary group, model status and credentials.</string>
+    <string name="b34_correction_unavailable">The local correction service is unavailable.</string>
+    <string name="b34_correction_auth">Authentication or permission denied</string>
+    <string name="b34_correction_rate_limit">Provider rate limit reached</string>
+    <string name="b34_correction_http">Provider returned HTTP %1$d</string>
+    <string name="b34_correction_timeout">Correction request timed out</string>
+    <string name="b34_correction_dns">Provider host could not be resolved</string>
+    <string name="b34_correction_certificate">TLS certificate verification failed</string>
+    <string name="b34_correction_network">Network connection failed</string>
+    <string name="b34_correction_empty">Model returned no usable corrected text</string>
+    <string name="b34_correction_decoding">Provider response could not be decoded</string>
+    <string name="b34_correction_provider">Provider rejected the correction request</string>
+    <string name="b34_correction_rewrite">The proposed edit changed too much of the original text</string>
+    <string name="b34_correction_unknown">Correction failed without a recognized error category</string>
+</resources>

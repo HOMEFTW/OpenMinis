@@ -4,6 +4,7 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -20,6 +21,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
+import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -38,6 +40,8 @@ import com.openminis.app.ui.chat.friendlyToolTitleFor
 import com.openminis.app.ui.chat.toolAccentColorInt
 import com.openminis.app.ui.chat.toolIconResFor
 import com.openminis.app.R
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import kotlin.math.abs
 
 /**
@@ -60,7 +64,7 @@ import kotlin.math.abs
  *   - Minis foreground OR no tool running OR user toggle OFF OR no perm → hidden
  *   - otherwise → shown, content updated on each tool-status change
  *
- * Position persists in [com.openminis.app.data.repository.BackgroundSettingsRepository]
+ * Position persists separately for portrait and landscape in `tool_overlay_positions`
  * across process restarts; first run defaults to the bottom-left corner
  * (10 dp from each edge). Tap dismisses to bring Minis back to the
  * foreground; drag moves the capsule.
@@ -197,6 +201,8 @@ class ToolOverlayController(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val backgroundRepo =
         (context.applicationContext as MinisApp).backgroundSettingsRepository
+    private val positionPrefs = context.getSharedPreferences("tool_overlay_positions", Context.MODE_PRIVATE)
+    private var positionLandscape: Boolean? = null
 
     private var view: View? = null
     private var logoView: ImageView? = null
@@ -357,6 +363,7 @@ class ToolOverlayController(private val context: Context) {
             replyGlyphView = null
             closeView = null
             layoutParams = null
+            positionLandscape = null
             isShown = false
         }
     }
@@ -384,33 +391,34 @@ class ToolOverlayController(private val context: Context) {
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            val savedX = backgroundRepo.getOverlayX()
-            val savedY = backgroundRepo.getOverlayY()
-            if (savedX >= 0 && savedY >= 0) {
-                x = savedX
-                y = savedY
-            } else {
-                // [T-bg-overlay-polish] First-paint default: bottom-left,
-                // 10 dp from the left edge and 10 dp above the nav-bar
-                // region. We don't have an accurate nav-bar height before
-                // attach, so use displayMetrics.heightPixels and trust
-                // FLAG_LAYOUT_NO_LIMITS to keep us on-screen.
-                val metrics = context.resources.displayMetrics
-                val padding = dpToPx(EDGE_PADDING_DP)
-                val approxOverlayHeight = dpToPx(LOGO_SIZE_DP + 16)
-                val approxNavBar = dpToPx(48)
-                x = padding
-                y = metrics.heightPixels - approxOverlayHeight - approxNavBar - padding
+            // Own all insets so x/y have one full-screen coordinate system.
+            // LEFT is deliberate: persisted physical x must not flip in RTL.
+            gravity = Gravity.TOP or Gravity.LEFT
+            if (Build.VERSION.SDK_INT >= 30) setFitInsetsTypes(0)
+            if (Build.VERSION.SDK_INT >= 28) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
+            positionLandscape = isLandscape()
+            val area = safeArea()
+            width = width.coerceAtMost(area.availableWidth)
+            height = height.coerceAtMost(area.availableHeight)
+            val position = rememberedPosition(positionLandscape!!, area, width, height)
+            x = position.x
+            y = position.y
         }
         layoutParams = params
         attachTouchListener(container, params)
         windowManager.addView(container, params)
+        savePosition(params.x, params.y, positionLandscape!!)
         view = container
+        ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
+            mainHandler.post { relayoutForScreen() }
+            insets
+        }
+        ViewCompat.requestApplyInsets(container)
         isShown = true
     }
 
@@ -1346,8 +1354,11 @@ class ToolOverlayController(private val context: Context) {
                     val dy = (ev.rawY - downY).toInt()
                     if (!dragging && (abs(dx) > slopPx || abs(dy) > slopPx)) dragging = true
                     if (dragging) {
-                        params.x = startParamX + dx
-                        params.y = startParamY + dy
+                        val position = safeArea().clamp(
+                            OverlayPlacement.Point(startParamX + dx, startParamY + dy), params.width, params.height,
+                        )
+                        params.x = position.x
+                        params.y = position.y
                         try {
                             windowManager.updateViewLayout(target, params)
                         } catch (e: Throwable) {
@@ -1358,7 +1369,7 @@ class ToolOverlayController(private val context: Context) {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (dragging) {
-                        backgroundRepo.setOverlayPosition(params.x, params.y)
+                        savePosition(params.x, params.y, positionLandscape ?: isLandscape())
                     } else {
                         onTap()
                     }
@@ -1450,27 +1461,92 @@ class ToolOverlayController(private val context: Context) {
      * which forwards its own onConfigurationChanged here.
      */
     fun onConfigurationChanged() {
-        mainHandler.post {
-            val v = view ?: return@post
-            val params = layoutParams ?: return@post
-            val dm = context.resources.displayMetrics
-            val width = fixedCapsuleWidthPx()
-            val height = dpToPx(CAPSULE_HEIGHT_DP)
-            val maxX = (dm.widthPixels - width).coerceAtLeast(0)
-            val maxY = (dm.heightPixels - height).coerceAtLeast(0)
-            val clampedX = params.x.coerceIn(0, maxX)
-            val clampedY = params.y.coerceIn(0, maxY)
-            if (params.width == width && params.x == clampedX && params.y == clampedY) return@post
-            params.width = width
-            params.x = clampedX
-            params.y = clampedY
-            try {
-                windowManager.updateViewLayout(v, params)
-                backgroundRepo.setOverlayPosition(clampedX, clampedY)
-            } catch (e: Throwable) {
-                Log.w(TAG, "onConfigurationChanged relayout failed: ${e.message}")
-            }
+        mainHandler.post { relayoutForScreen() }
+    }
+
+    private fun isLandscape(): Boolean = context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    private fun savePosition(x: Int, y: Int, landscape: Boolean) {
+        val key = if (landscape) "landscape" else "portrait"
+        positionPrefs.edit().putInt("${key}_x", x).putInt("${key}_y", y)
+            .putBoolean("legacy_migrated", true).apply()
+    }
+
+    private fun rememberedPosition(landscape: Boolean, area: OverlayPlacement.SafeArea, width: Int, height: Int): OverlayPlacement.Point {
+        val key = if (landscape) "landscape" else "portrait"
+        val savedX = positionPrefs.getInt("${key}_x", -1)
+        val savedY = positionPrefs.getInt("${key}_y", -1)
+        if (savedX >= 0 && savedY >= 0) return area.clamp(OverlayPlacement.Point(savedX, savedY), width, height)
+        // Migrate the old single slot once, for the orientation actually shown.
+        // It must not seed both orientations with the same physical coordinates.
+        if (!positionPrefs.getBoolean("legacy_migrated", false)) {
+            val legacyX = backgroundRepo.getOverlayX()
+            val legacyY = backgroundRepo.getOverlayY()
+            if (legacyX >= 0 && legacyY >= 0) return area.clamp(OverlayPlacement.Point(legacyX, legacyY), width, height)
         }
+        return area.initial(width, height)
+    }
+
+    private fun relayoutForScreen() {
+        val target = view ?: return
+        val params = layoutParams ?: return
+        val landscape = isLandscape()
+        val previous = positionLandscape
+        if (previous != null && previous != landscape) savePosition(params.x, params.y, previous)
+        val area = safeArea()
+        val width = fixedCapsuleWidthPx().coerceAtMost(area.availableWidth)
+        val height = dpToPx(CAPSULE_HEIGHT_DP).coerceAtMost(area.availableHeight)
+        val position = if (previous != landscape) rememberedPosition(landscape, area, width, height)
+            else area.clamp(OverlayPlacement.Point(params.x, params.y), width, height)
+        positionLandscape = landscape
+        if (params.width == width && params.height == height && params.x == position.x && params.y == position.y) return
+        params.width = width
+        params.height = height
+        params.x = position.x
+        params.y = position.y
+        try {
+            windowManager.updateViewLayout(target, params)
+            savePosition(params.x, params.y, landscape)
+        } catch (e: Throwable) {
+            Log.w(TAG, "onConfigurationChanged relayout failed: ${e.message}")
+        }
+    }
+
+    private fun safeArea(): OverlayPlacement.SafeArea {
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getRealMetrics(metrics)
+        var width = metrics.widthPixels
+        var height = metrics.heightPixels
+        val insets = if (Build.VERSION.SDK_INT >= 30) {
+            val window = windowManager.currentWindowMetrics
+            width = window.bounds.width()
+            height = window.bounds.height()
+            WindowInsetsCompat.toWindowInsetsCompat(window.windowInsets)
+        } else view?.let { ViewCompat.getRootWindowInsets(it) }
+        val bars = insets?.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+        val gestures = insets?.getInsets(WindowInsetsCompat.Type.systemGestures() or WindowInsetsCompat.Type.mandatorySystemGestures())
+        fun systemDimension(name: String): Int {
+            val id = context.resources.getIdentifier(name, "dimen", "android")
+            return if (id == 0) 0 else context.resources.getDimensionPixelSize(id)
+        }
+        // Before API 30 an overlay's root insets are relative to its small
+        // window, so zero does not mean the screen has no status/navigation
+        // bar. Keep global resource bounds as a conservative fallback.
+        val legacy = Build.VERSION.SDK_INT < 30
+        val status = if (legacy) systemDimension("status_bar_height") else 0
+        val navigation = if (legacy) systemDimension("navigation_bar_height") else 0
+        val sideNavigation = if (legacy && isLandscape()) systemDimension("navigation_bar_width") else 0
+        val modeId = if (legacy && Build.VERSION.SDK_INT >= 29) context.resources.getIdentifier("config_navBarInteractionMode", "integer", "android") else 0
+        val gestureEdge = if (modeId != 0 && context.resources.getInteger(modeId) == 2) dpToPx(24) else 0
+        return OverlayPlacement.SafeArea(
+            width, height,
+            maxOf(bars?.left ?: 0, gestures?.left ?: 0, gestureEdge),
+            maxOf(bars?.top ?: 0, gestures?.top ?: 0, status),
+            maxOf(bars?.right ?: 0, gestures?.right ?: 0, maxOf(gestureEdge, sideNavigation)),
+            maxOf(bars?.bottom ?: 0, gestures?.bottom ?: 0, navigation),
+            dpToPx(EDGE_PADDING_DP),
+        )
     }
 
     private fun dpToPx(dp: Int): Int =

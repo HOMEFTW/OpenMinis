@@ -1,5 +1,7 @@
 package com.openminis.app.ui.settings
 
+import com.openminis.app.util.launchSafely
+
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -295,7 +297,7 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
                         onChooseEmoji = { showIconMenu = false; showEmojiSheet = true },
                         onChooseImage = {
                             showIconMenu = false
-                            imagePicker.launch(
+                            imagePicker.launchSafely(context,
                                 PickVisualMediaRequest(
                                     ActivityResultContracts.PickVisualMedia.ImageOnly,
                                 ),

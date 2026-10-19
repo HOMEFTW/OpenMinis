@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MovieCreation
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Visibility
@@ -79,6 +80,7 @@ import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.ui.components.SectionTextField
 import com.openminis.app.ui.components.openExternalUrl
 import com.openminis.app.provider.usage.officialProviderConsole
+import com.openminis.app.util.launchSafely
 
 private const val TAG = "ProviderDetail"
 
@@ -95,12 +97,9 @@ fun ProviderDetailScreen(
     val config by providerRepository.config.collectAsState()
     val instance = config.instances.find { it.id == instanceId }
     var showDeleteDialog by remember { mutableStateOf(false) }
-    // T143: long-press → confirm delete on a single model entry. Built-in
-    // entries (entry.isCustom == false) skip the gesture because the repo
-    // re-creates them from ProviderType.builtInModels on next refresh anyway —
-    // mirrors DebugProviderMutationMethods note "Built-in entries can't be
-    // deleted — set isHidden=true instead".
+    // Every model, including API-discovered and built-in entries, can be deleted.
     var entryToDelete by remember { mutableStateOf<ModelEntry?>(null) }
+    var hiddenExpanded by androidx.compose.runtime.saveable.rememberSaveable(instanceId) { mutableStateOf(false) }
     // [T-android-model-row-hide-action] Id of the entry whose long-press menu is
     // open. Keyed by id rather than holding the ModelEntry so the menu re-reads
     // the CURRENT entry after a hide toggle — holding a stale copy would leave
@@ -142,6 +141,9 @@ fun ProviderDetailScreen(
     var refreshError by remember(instanceId) { mutableStateOf<String?>(null) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
+    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+    ) {}
 
     SettingsScaffold(
         title = instance.label,
@@ -149,7 +151,9 @@ fun ProviderDetailScreen(
         actions = {
             IconButton(onClick = {
                 AppLogger.info(TAG, "Export instance ${instance.id} (${instance.label})")
-                exportProviderInstance(exportContext, providerRepository, instance)
+                exportProviderInstance(exportContext, providerRepository, instance) {
+                    exportLauncher.launchSafely(exportContext, it)
+                }
             }) {
                 Icon(Icons.Default.IosShare, contentDescription = stringResource(R.string.provider_detail_export))
             }
@@ -660,7 +664,23 @@ fun ProviderDetailScreen(
                 showDivider = entries.isNotEmpty() || true,
             )
 
-            entries.forEachIndexed { idx, entry ->
+            val visibleModels = entries.filterNot { it.isHidden }
+            val hiddenModels = entries.filter { it.isHidden }
+            val orderedModels = visibleModels + hiddenModels
+            orderedModels.forEachIndexed { idx, entry ->
+                if (entry.isHidden && idx == visibleModels.size) {
+                    SettingsRow(
+                        title = stringResource(R.string.b34_provider_hidden_models, hiddenModels.size),
+                        onClick = { hiddenExpanded = !hiddenExpanded },
+                        showChevron = false,
+                        showDivider = hiddenExpanded,
+                        trailing = { Icon(
+                            if (hiddenExpanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = stringResource(if (hiddenExpanded) R.string.b34_collapse else R.string.b34_expand),
+                        ) },
+                    )
+                }
+                if (entry.isHidden && !hiddenExpanded) return@forEachIndexed
                 // Drive both tap and long-press from a Box wrapper so we
                 // don't have to expand SettingsRow's signature.
                 Box(
@@ -690,13 +710,6 @@ fun ProviderDetailScreen(
                             // there would reintroduce the ragged column that
                             // sizing exists to prevent.
                             //
-                            // It also fills a dead gesture: long-press used to
-                            // be null for built-in entries, so they had no
-                            // context action at all. They still cannot be
-                            // deleted (the repo re-creates them from
-                            // ProviderType.builtInModels on the next refresh),
-                            // but hiding is exactly the supported way to get one
-                            // out of the picker.
                             onLongClick = { menuEntryId = entry.id },
                         ),
                 ) {
@@ -716,7 +729,7 @@ fun ProviderDetailScreen(
                         title = entry.model.displayName,
                         subtitle = buildString {
                             append(entry.model.id)
-                            if (entry.isHidden) append(" • Hidden")
+                            if (entry.isHidden) append(" • " + exportContext.getString(R.string.b34_model_hidden))
                             if (entry.isUnavailableFromProvider) append(" • " + unavailableLabel)
                         },
                         // onClick = null so SettingsRow doesn't add a second
@@ -724,7 +737,7 @@ fun ProviderDetailScreen(
                         // wrapping Box owns both gestures.
                         onClick = null,
                         showChevron = true,
-                        showDivider = idx != entries.lastIndex,
+                        showDivider = idx != orderedModels.lastIndex,
                         // [T-android-settings-ui-md3] #8 two-line row (name + id)
                         // uses the MD3 double-line height (72dp).
                         minHeight = 72.dp,
@@ -747,8 +760,7 @@ fun ProviderDetailScreen(
 
                     // [T-android-model-row-hide-action] Row context menu. Anchored
                     // inside the row's Box so it opens over the entry the user
-                    // pressed. Delete stays custom-only, matching the previous
-                    // long-press behaviour and the repo's constraint.
+                    // pressed. The repository owns deletion and refresh policy.
                     DropdownMenu(
                         expanded = menuEntryId == entry.id,
                         onDismissRequest = { menuEntryId = null },
@@ -783,27 +795,18 @@ fun ProviderDetailScreen(
                                 )
                             },
                         )
-                        if (entry.isCustom) {
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        stringResource(R.string.common_delete),
-                                        color = MaterialTheme.colorScheme.error,
-                                    )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Filled.Delete,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.error,
-                                    )
-                                },
-                                onClick = {
-                                    menuEntryId = null
-                                    entryToDelete = entry
-                                },
-                            )
-                        }
+                        DropdownMenuItem(
+                            text = {
+                                Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error)
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                            },
+                            onClick = {
+                                menuEntryId = null
+                                entryToDelete = entry
+                            },
+                        )
                     }
                 }
             }
@@ -879,7 +882,10 @@ fun ProviderDetailScreen(
         MinisAlertDialog(
             onDismissRequest = { entryToDelete = null },
             title = stringResource(R.string.provider_detail_delete_model),
-            text = stringResource(R.string.provider_detail_delete_model_confirm, e.model.displayName),
+            text = stringResource(
+                if (e.isCustom) R.string.provider_detail_delete_model_confirm else R.string.b34_provider_delete_model_confirm,
+                e.model.displayName,
+            ),
             confirmText = stringResource(R.string.common_delete),
             isDestructive = true,
             onConfirm = {
@@ -1292,6 +1298,7 @@ private fun exportProviderInstance(
     context: android.content.Context,
     providerRepository: ProviderRepository,
     instance: com.openminis.app.data.model.ProviderInstance,
+    launchChooser: (android.content.Intent) -> Unit,
 ) {
     val json = providerRepository.exportInstanceJSON(instance.id) ?: return
     val safeLabel = instance.label.ifBlank { "provider" }
@@ -1316,10 +1323,7 @@ private fun exportProviderInstance(
         putExtra(android.content.Intent.EXTRA_SUBJECT, "$safeLabel.json")
         addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    val chooser = android.content.Intent.createChooser(sendIntent, "Export provider").apply {
-        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    context.startActivity(chooser)
+    launchChooser(android.content.Intent.createChooser(sendIntent, context.getString(R.string.b34_provider_export_title)))
 }
 
 /**

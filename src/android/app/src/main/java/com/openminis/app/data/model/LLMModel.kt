@@ -58,6 +58,8 @@ data class LLMModel(
     /** Derived from ModelEntry; it is not provider catalog data or backup wire data. */
     @kotlinx.serialization.Transient
     val entryThinkingCeiling: ThinkingLevel? = null,
+    @kotlinx.serialization.SerialName("serviceTiers")
+    val supportedServiceTiers: List<String>? = null,
 ) {
     val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
     val isGPT61Sol: Boolean get() = matchesModelId(id, "gpt-6.1-sol")

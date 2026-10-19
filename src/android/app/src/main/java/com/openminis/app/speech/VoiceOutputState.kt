@@ -266,7 +266,7 @@ object VoiceOutputState {
         if (persist) prefs?.edit()?.putFloat(KEY_VOLUME, gain)?.apply()
     }
 
-    private fun boundedVolume(value: Float): Float = if (value.isFinite()) value.coerceIn(0f, 1f) else 1f
+    private fun boundedVolume(value: Float): Float = boundedSpeechVolume(value)
 
     /** Cycle 1× → 1.25× → 1.5× → 2× → 1×. */
     fun nextSpeed() {

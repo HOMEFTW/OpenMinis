@@ -33,7 +33,7 @@ class RetainedAudioSampleRateTest {
         assertTrue(source.contains("val sampleRate = VoiceAsrWatchdog.wavSampleRate(wav)"))
         assertTrue(source.contains("startReplay(pcm, sampleRate, locale, allowOnDeviceRetry = true)"))
         assertTrue(source.contains("EXTRA_AUDIO_SOURCE_SAMPLING_RATE, sessionPcmSampleRate"))
-        assertTrue(source.contains("startReplay(replay, replaySampleRate, retryLocale, allowOnDeviceRetry = false)"))
+        assertTrue(source.contains("startReplay(replay, replaySampleRate, retryLocale, allowOnDeviceRetry = false"))
         assertTrue(source.contains("wrapPcm16InWav(pcm, sessionPcmSampleRate)"))
     }
 }

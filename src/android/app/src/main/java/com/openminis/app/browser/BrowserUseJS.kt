@@ -1,11 +1,60 @@
 package com.openminis.app.browser
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
 /**
  * Injectable JavaScript for browser_use actions.
  * Each function returns a self-executing IIFE that JSON.stringify()s the result.
  * Ported 1:1 from iOS BrowserUseJavaScript.swift.
  */
 object BrowserUseJS {
+
+    internal const val EXECUTION_STARTED = "minis-script-started"
+
+    /** Built-in actions are expressions; catch page/selector errors before WebView loses them as null. */
+    internal fun guardedEvaluation(expression: String): String = """
+        (function() {
+            try { return (${expression.trim().removeSuffix(";")}); }
+            catch (e) { return JSON.stringify({error: 'JavaScript error: ' + (e && e.message ? String(e.message) : String(e))}); }
+        })()
+    """.trimIndent()
+
+    internal fun evaluationError(message: String): String =
+        JsonObject(mapOf("error" to JsonPrimitive(message))).toString()
+
+    /** WebView's literal null means evaluation failed, not a successful action result. */
+    internal fun decodeEvaluationResult(result: String?): String {
+        if (result.isNullOrBlank() || result == "null" || result == "undefined") {
+            return evaluationError("JavaScript produced no result; the script failed or the page is not ready.")
+        }
+        val decoded = runCatching { Json.parseToJsonElement(result) }.getOrNull()
+        return when {
+            decoded == JsonNull -> evaluationError("JavaScript produced no result; the page is not ready.")
+            decoded is JsonPrimitive && decoded.isString -> decoded.content
+            else -> result
+        }
+    }
+
+    internal fun executeScript(script: String, token: String): String = """
+        (function() {
+            (async function() {
+                try {
+                    var result = await (async function() {
+                        $script
+                    })();
+                    var text = result === undefined || result === null ? String(result) :
+                        (typeof result === 'object' ? JSON.stringify(result) : String(result));
+                    __minis__.resolve(${JsonPrimitive(token)}, text);
+                } catch (e) {
+                    __minis__.reject(${JsonPrimitive(token)}, e && e.message ? String(e.message) : String(e));
+                }
+            })();
+            return ${JsonPrimitive(EXECUTION_STARTED)};
+        })()
+    """.trimIndent()
 
     /** Safely escape a string for embedding in JavaScript source (single-quoted). */
     fun jsQuote(s: String): String = buildString {
@@ -127,6 +176,7 @@ object BrowserUseJS {
         }
         return """
             (function() {
+                if (!document.body) return JSON.stringify({error: 'Page has no document.body; wait for the page to load.'});
                 var innerTextVal = document.body.innerText || '';
                 var text = innerTextVal.substring(0, 10000);
                 return JSON.stringify({text: text, length: text.length, url: location.href, title: document.title});
@@ -138,6 +188,7 @@ object BrowserUseJS {
 
     fun getReadable(): String = """
         (function() {
+            if (!document.body) return JSON.stringify({error: 'Page has no document.body; wait for the page to load.'});
             var candidateSelectors = [
                 'article', '[role="main"]', 'main', '.post-content',
                 '.article-body', '.entry-content', '#content', '.content'
@@ -167,6 +218,7 @@ object BrowserUseJS {
         return """
             (function() {
                 var targetSelector = $selectorJS;
+                if (!targetSelector && !document.body) return JSON.stringify({error: 'Page has no document.body; wait for the page to load.'});
                 var target = null;
                 var scrolledElement = 'window';
                 if (targetSelector) {
@@ -251,6 +303,7 @@ object BrowserUseJS {
 
     fun getPageInfo(): String = """
         (function() {
+            if (!document.body) return JSON.stringify({error: 'Page has no document.body; wait for the page to load.'});
             return JSON.stringify({
                 url: window.location.href,
                 title: document.title,
@@ -270,6 +323,7 @@ object BrowserUseJS {
 
     fun getBackbone(maxDepth: Int): String = """
         (function() {
+            if (!document.body) return JSON.stringify({error: 'Page has no document.body; wait for the page to load.'});
             var MAX_DEPTH = $maxDepth;
             var MERGE_THRESHOLD = 10;
             var MIN_SIZE = 8;

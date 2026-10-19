@@ -18,6 +18,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +45,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.data.UpdateChecker
+import com.openminis.app.data.UpdatePreferences
 import kotlinx.coroutines.launch
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisTextButton
@@ -62,6 +65,9 @@ import com.openminis.app.i18n.uppercaseForDisplay
 fun CheckUpdateSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val preferences by remember(context) { UpdatePreferences.observe(context) }
+        .collectAsState(initial = UpdatePreferences.snapshot(context))
+    val availableUpdate by UpdatePreferences.availableUpdate.collectAsState()
 
     var checking by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -91,7 +97,7 @@ fun CheckUpdateSection() {
     // Either way: if permission is still denied we leave the pending record
     // alone so the next resume can pick it up.
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
             if (!UpdateChecker.canInstall(context)) return@LifecycleEventObserver
@@ -107,12 +113,30 @@ fun CheckUpdateSection() {
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     SettingsSection(
         header = stringResource(R.string.check_update_section_header),
         footer = stringResource(R.string.check_update_current_version, BuildConfig.VERSION_NAME),
     ) {
+        SettingsSwitchRow(
+            title = stringResource(R.string.build34_updates_auto),
+            checked = preferences.autoCheck,
+            onCheckedChange = { enabled ->
+                UpdatePreferences.setAutoCheckEnabled(context, enabled)
+                if (enabled) scope.launch { UpdatePreferences.onForeground(context) }
+            },
+        )
+        SettingsValueRow(
+            title = stringResource(R.string.build34_updates_channel),
+            value = stringResource(if (preferences.channel == "beta") R.string.build34_updates_beta else R.string.build34_updates_stable),
+            onClick = {
+                UpdatePreferences.setChannel(context, if (preferences.channel == "beta") "stable" else "beta")
+                statusMessage = null
+                scope.launch { UpdatePreferences.onForeground(context) }
+            },
+        )
         SettingsRow(
             icon = Icons.Outlined.SystemUpdate,
             iconColor = Color(0xFF007AFF),
@@ -120,15 +144,19 @@ fun CheckUpdateSection() {
                 if (checking) R.string.check_update_checking
                 else R.string.check_update_check_button
             ),
-            subtitle = statusMessage,
+            subtitle = statusMessage ?: availableUpdate?.let { stringResource(R.string.build34_update_available, it.versionName) },
             showDivider = false,
             onClick = if (checking) null else {
                 {
+                    val cached = availableUpdate
+                    if (cached != null) {
+                        update = cached
+                    } else {
                     checking = true
                     statusMessage = null
                     showReleasesLink = false
                     scope.launch {
-                        when (val r = UpdateChecker.check()) {
+                        when (val r = UpdateChecker.check(includePrereleases = com.openminis.app.data.UpdatePreferences.channel(context) == "beta")) {
                             is UpdateChecker.CheckResult.UpdateAvailable -> {
                                 update = r
                                 statusMessage = null
@@ -149,6 +177,7 @@ fun CheckUpdateSection() {
                                 statusMessage = context.getString(R.string.check_update_error, r.message)
                         }
                         checking = false
+                    }
                     }
                 }
             },

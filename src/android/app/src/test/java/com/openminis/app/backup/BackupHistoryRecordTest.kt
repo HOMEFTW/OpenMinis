@@ -170,4 +170,19 @@ class BackupHistoryRecordTest {
         val e = BackupHistory.SkippedEntry("chats/session-1/files/huge video.mp4", 99_000_000)
         assertEquals("huge video.mp4", e.fileName)
     }
+
+    @Test fun `old progress is removed while errors and delivery evidence survive`() {
+        val outcome = BackupHistory.LogEntry(3, "Delivered to nas")
+        val saved = BackupHistory.LogEntry(4, "Saved to device: 本地.minisbak")
+        val error = BackupHistory.LogEntry(5, "Saving to nas… 20%", isProblem = true)
+        val unknown = BackupHistory.LogEntry(6, "A future durable outcome")
+        val logs = listOf(
+            BackupHistory.LogEntry(1, "Exporting chats…"),
+            BackupHistory.LogEntry(2, "Packaging…"),
+        ) + (0..100).map { BackupHistory.LogEntry(2, "Saving to 文件夹… $it%") } +
+            listOf(outcome, saved, error, unknown)
+        val cleaned = BackupHistory.cleanLog(logs)
+        assertEquals(listOf(outcome, saved, error, unknown), cleaned)
+        assertEquals(cleaned, BackupHistory.cleanLog(cleaned))
+    }
 }

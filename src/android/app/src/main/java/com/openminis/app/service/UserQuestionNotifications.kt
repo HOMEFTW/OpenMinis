@@ -29,7 +29,10 @@ internal class UserQuestionNotifications(private val context: Context) {
     }
 
     fun update(requests: Map<String, PendingUserQuestion>, isForeground: Boolean) {
-        val visible = if (isForeground) emptyMap() else requests.filterValues {
+        val notificationsEnabled = context.getSharedPreferences(com.openminis.app.tools.AgentToolSwitch.PREFS, Context.MODE_PRIVATE)
+            .getBoolean("agent.tools.userAsk.notifyInBackground", true)
+        val visible = if (isForeground || !notificationsEnabled ||
+            !com.openminis.app.tools.AgentToolSwitch.USER_ASK.isEnabled(context)) emptyMap() else requests.filterValues {
             it.currentQuestion != null && it.remainingMs(SystemClock.elapsedRealtime()) > 0L
         }
         (postedSessions - visible.keys).forEach { manager?.cancel(tag(it), NOTIFICATION_ID) }

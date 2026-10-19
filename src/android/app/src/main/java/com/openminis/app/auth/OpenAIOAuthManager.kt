@@ -25,7 +25,7 @@ import kotlin.coroutines.resume
  */
 class OAuthNetworkUnreachableException(cause: Throwable) : Exception(cause.message, cause)
 
-class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(context, instanceId) {
+open class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(context, instanceId) {
     companion object {
         private const val TAG = "CodexOAuth"
 
@@ -154,6 +154,39 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val idToken = json.optString("id_token", "")
         if (idToken.isNotEmpty()) {
             parseIdToken(idToken)
+        }
+    }
+
+    override suspend fun refreshToken(): Boolean = withContext(Dispatchers.IO) {
+        val stored = loadStoredTokens() ?: return@withContext false
+        val refresh = stored.optString("refresh_token", "").takeIf { it.isNotBlank() } ?: return@withContext false
+        try {
+            val body = JSONObject().put("grant_type", "refresh_token").put("refresh_token", refresh)
+                .put("client_id", clientId)
+            val request = okhttp3.Request.Builder().url(tokenURL)
+                .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+            systemAwareHttpClient.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    if (isRefreshRejected(response.code, text, DEFAULT_FATAL_REFRESH_CODES)) markNeedsReauth(refresh)
+                    AppLogger.warning(TAG, "Token refresh failed: HTTP ${response.code}")
+                    return@withContext false
+                }
+                val merged = mergeCodexRefreshTokens(stored, JSONObject(text))
+                // Keep the base class' stale-refresh/sign-out guard. Updating account metadata
+                // inside the same lock also prevents an older response overwriting a new login.
+                synchronized(credentialLock) {
+                    if (!saveRefreshedTokens(refresh, merged)) false else {
+                        merged.optString("id_token", "").takeIf { it.isNotBlank() }?.let(::parseIdToken)
+                        true
+                    }
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.warning(TAG, "Token refresh failed: ${e.javaClass.simpleName}")
+            false
         }
     }
 
@@ -319,15 +352,11 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
     private fun parseIdToken(token: String) {
         try {
-            val parts = token.split(".")
-            if (parts.size >= 2) {
-                val payload = String(java.util.Base64.getUrlDecoder().decode(parts[1]))
-                val json = JSONObject(payload)
-                accountId = json.optString("chatgpt_account_id").ifEmpty { null }
-                planType = json.optString("chatgpt_plan_type").ifEmpty { null }
-            }
+            val identity = codexIdentity(token)
+            accountId = identity.accountId
+            planType = identity.planType
         } catch (e: Exception) {
-            AppLogger.warning(TAG, "id_token parse failed: ${e.javaClass.simpleName}: ${e.message}")
+            AppLogger.warning(TAG, "id_token parse failed: ${e.javaClass.simpleName}")
         }
     }
 }

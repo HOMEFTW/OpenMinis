@@ -194,10 +194,9 @@ object BackupRunController {
         }
         fun progress(line: String) {
             _statusText.value = line
-            note(line)
-            // The running history row's subtitle IS the latest log line, so
-            // progress lives with the run rather than inside the button (iOS).
-            writeHistory(history, record.copy(log = log.toList()))
+            // Progress belongs to the live status. Persist only outcomes;
+            // local-folder byte callbacks can otherwise rewrite a growing
+            // history thousands of times during a single backup.
         }
 
         runJob = scope.launch {

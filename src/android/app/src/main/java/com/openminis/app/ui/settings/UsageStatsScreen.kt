@@ -1,418 +1,251 @@
 package com.openminis.app.ui.settings
 
-import com.openminis.app.R
-
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+import com.openminis.app.R
 import com.openminis.app.data.db.ChatDao
-import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderConfig
-import com.openminis.app.data.model.ProviderType
-import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-
-/**
- * [T-token-attribution-snapshot] How trustworthy a row's model attribution is.
- *
- * These must stay visually distinct. Lumping them together is what made the
- * original bug invisible: an estimated row looked exactly like a measured one,
- * so nobody could tell that a session's history had been re-attributed to
- * whichever model it currently pointed at.
- */
-internal enum class Attribution {
-    /** A. Per-message snapshot — the model that actually served the request. */
-    MEASURED,
-
-    /**
-     * B. Written before the snapshot columns existed. Attributed to the
-     * session's CURRENT model, which may be wrong if the model was ever
-     * switched. Shown, but labelled as an estimate.
-     */
-    ESTIMATED,
-
-    /** C. Orphaned row: no snapshot AND no session to guess from. */
-    UNKNOWN_SESSION,
-
-    /**
-     * D. Snapshot present, but the model is no longer in the live config
-     * (provider deleted / model removed). Renders normally from the snapshot —
-     * this is the case that used to collapse into "Unknown".
-     */
-    MEASURED_REMOVED,
-}
-
-private data class ModelStats(
-    val modelId: String,
-    val displayName: String,
-    val provider: String,
-    val attribution: Attribution,
-    var inputTokens: Long = 0,
-    var outputTokens: Long = 0,
-    var cacheCreationTokens: Long = 0,
-    var cacheReadTokens: Long = 0,
-    val distinctDays: MutableSet<String> = mutableSetOf(),
-    val distinctSessions: MutableSet<String> = mutableSetOf(),
-) {
-    val totalInput: Long get() = inputTokens + cacheReadTokens + cacheCreationTokens
-}
-
-private data class ProviderGroup(val name: String, val models: List<ModelStats>)
-
-private data class GrandTotal(
-    val totalInput: Long = 0,
-    val outputTokens: Long = 0,
-    val cacheReadTokens: Long = 0,
-    val cacheCreationTokens: Long = 0,
-) {
-    val cacheHitRate: Double?
-        get() = if (totalInput <= 0 || cacheReadTokens <= 0) null
-        else (cacheReadTokens.toDouble() / totalInput) * 100
-}
-
-/**
- * [T-android-usage-orphan-rows] Bucket for usage rows whose session row is
- * missing, so their (really billed) tokens still appear in the totals. See
- * ChatDao.allUsageRecords.
- */
-private const val UNKNOWN_MODEL_KEY = "(unknown model)"
-
-private const val UNKNOWN_PROVIDER = "Unknown"
-
-/**
- * [T-token-attribution-snapshot] Map a stored `ProviderType` rawValue back to
- * its display name.
- *
- * Snapshots store the rawValue (`openAI`) rather than the display name
- * (`OpenAI`) precisely so grouping is stable: display names are localized and
- * historically inconsistent — iOS ended up with `Google`, `Gemini` and
- * `Google Gemini` as three separate sections for one provider. An unrecognised
- * rawValue (a provider type removed in a later build) degrades to the raw
- * string rather than vanishing.
- */
-internal fun providerDisplayName(rawValue: String): String =
-    runCatching { ProviderType.valueOf(rawValue).displayName }.getOrDefault(rawValue)
-
-/**
- * [T-token-attribution-snapshot] Decide how trustworthy a usage row's model
- * attribution is.
- *
- * Extracted from the Composable so it can be unit-tested on the JVM: this is
- * the rule that decides whether a number is presented as fact or as a guess,
- * and getting it wrong in either direction is invisible in a screenshot.
- *
- * @param modelId resolved id (snapshot, else the session's current model),
- *   or null for an orphaned row with no session to fall back to.
- * @param hasSnapshot whether the row carries a per-message snapshot.
- * @param resolvesInConfig whether that id still exists in the live config.
- */
-internal fun classifyAttribution(
-    modelId: String?,
-    hasSnapshot: Boolean,
-    resolvesInConfig: Boolean,
-): Attribution = when {
-    modelId == null -> Attribution.UNKNOWN_SESSION
-    !hasSnapshot -> Attribution.ESTIMATED
-    !resolvesInConfig -> Attribution.MEASURED_REMOVED
-    else -> Attribution.MEASURED
-}
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import java.time.ZoneId
 
 @Composable
-fun UsageStatsScreen(
-    chatDao: ChatDao,
-    providerConfig: ProviderConfig? = null,
-    onBack: () -> Unit,
-) {
-    var grandTotal by remember { mutableStateOf(GrandTotal()) }
-    var providerGroups by remember { mutableStateOf<List<ProviderGroup>>(emptyList()) }
-    var isLoaded by remember { mutableStateOf(false) }
-    var days by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
-    var search by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
+fun UsageStatsScreen(chatDao: ChatDao, providerConfig: ProviderConfig? = null, onBack: () -> Unit) {
+    var samples by remember { mutableStateOf<List<UsageSample>>(emptyList()) }
+    var loaded by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    var reload by remember { mutableStateOf(0) }
+    var days by rememberSaveable { mutableStateOf(0) }
+    var search by rememberSaveable { mutableStateOf("") }
+    var selectedProvider by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedModel by rememberSaveable { mutableStateOf<String?>(null) }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    val zone = ZoneId.systemDefault()
 
-
-    LaunchedEffect(days, providerConfig) {
-        val records = chatDao.allUsageRecords()
-        val now = System.currentTimeMillis()
-
-        val modelLookup = mutableMapOf<String, Pair<String, String>>()
-        for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
-        providerConfig?.let { config ->
-            for (entry in config.modelEntries) {
-                if (entry.model.id !in modelLookup) {
-                    val instance = config.instances.find { it.id == entry.providerInstanceId }
-                    val providerName = instance?.providerType?.displayName ?: entry.model.provider
-                    modelLookup[entry.model.id] = entry.model.displayName to providerName
-                }
-            }
-        }
-
-        val statsMap = mutableMapOf<String, ModelStats>()
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-
-        for (record in records) {
-            if (!usageInDateRange(record.createdAt, now, days)) continue
-            val usage = try { JSONObject(record.tokenUsage) } catch (_: Exception) { continue }
-            val input = usage.optLong("inputTokens", 0)
-            val output = usage.optLong("outputTokens", 0)
-            val cacheCr = usage.optLong("cacheCreationTokens", usage.optLong("cacheCreationInputTokens", 0))
-            val cacheRd = usage.optLong("cacheReadTokens", usage.optLong("cacheReadInputTokens", 0))
-
-            // [T-android-usage-orphan-rows] GH#168: modelId is null for a
-            // message whose session row is gone (LEFT JOIN). Those tokens were
-            // still billed, so they are counted under a single "unknown" bucket
-            // instead of being dropped — matching iOS, where an unresolvable id
-            // falls back to the raw id and the "Other" provider group.
-            val modelKey = record.modelId ?: UNKNOWN_MODEL_KEY
-            val resolved = modelLookup[modelKey]
-
-            // [T-token-attribution-snapshot] Four distinct states — see
-            // [Attribution]. Bucket key includes the state so an estimated row
-            // never merges into a measured one and quietly inherits its
-            // credibility.
-            val attribution = classifyAttribution(
-                modelId = record.modelId,
-                hasSnapshot = record.hasSnapshot,
-                resolvesInConfig = resolved != null,
-            )
-
-            // Prefer the snapshot's own strings: for a removed provider they
-            // are the ONLY remaining source of a human-readable name.
-            val displayName = record.modelDisplayName?.takeIf { it.isNotBlank() }
-                ?: resolved?.first
-                ?: modelKey
-            val provider = record.providerType?.takeIf { it.isNotBlank() }
-                ?.let { raw -> providerDisplayName(raw) }
-                ?: resolved?.second
-                ?: UNKNOWN_PROVIDER
-
-            val stats = statsMap.getOrPut("$provider#$modelKey#${attribution.name}") {
-                ModelStats(modelKey, displayName, provider, attribution)
-            }
-            stats.inputTokens += input
-            stats.outputTokens += output
-            stats.cacheCreationTokens += cacheCr
-            stats.cacheReadTokens += cacheRd
-            stats.distinctDays.add(dateFormat.format(Date(record.createdAt)))
-            stats.distinctSessions.add(record.sessionId)
-        }
-
-        val providerOrder = listOf("OpenAI", "Anthropic", "Google Gemini", "Google", "Antigravity", "Unknown")
-        val grouped = statsMap.values.groupBy { it.provider }
-        val sortedGroups = grouped.entries.sortedBy { (name, _) ->
-            val idx = providerOrder.indexOf(name)
-            if (idx >= 0) idx else providerOrder.size
-        }.map { (name, models) ->
-            ProviderGroup(name, models.sortedByDescending { it.totalInput })
-        }
-
-        val allStats = statsMap.values
-        grandTotal = GrandTotal(
-            totalInput = allStats.sumOf { it.totalInput },
-            outputTokens = allStats.sumOf { it.outputTokens },
-            cacheReadTokens = allStats.sumOf { it.cacheReadTokens },
-            cacheCreationTokens = allStats.sumOf { it.cacheCreationTokens },
-        )
-
-        providerGroups = sortedGroups
-        isLoaded = true
+    // Re-evaluate local midnight/timezone changes while the page stays open.
+    LaunchedEffect(Unit) {
+        while (true) { now = System.currentTimeMillis(); delay(60_000) }
     }
+    LaunchedEffect(chatDao, providerConfig, reload) {
+        loaded = false
+        failed = false
+        try {
+            samples = withContext(Dispatchers.IO) { usageSamples(chatDao.allUsageRecords(), providerConfig) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            failed = true
+        }
+        loaded = true
+    }
+    val inRange = remember(samples, days, now, zone) { samples.filter { usageInDateRange(it.createdAt, now, days, zone) } }
+    val filtered = remember(inRange, selectedProvider, selectedModel, search) {
+        inRange.filter {
+            (selectedProvider == null || it.providerKey == selectedProvider) &&
+                (selectedModel == null || it.modelId == selectedModel) &&
+                usageMatchesSearch(it.modelId, it.displayName, it.providerName, search)
+        }
+    }
+    val total = remember(filtered) { usageTotal(filtered) }
+    val models = remember(filtered, zone) { usageModelStats(filtered, zone) }
+    val trend = remember(filtered, now, days, zone) { usageTrend(filtered, now, days, zone) }
 
     SettingsScaffold(title = stringResource(R.string.usage_title), onBack = onBack) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 16.dp)) {
-            for ((value, label) in listOf(0 to R.string.pr_usage_all, 7 to R.string.pr_usage_week, 30 to R.string.pr_usage_month)) {
-                androidx.compose.material3.FilterChip(selected = days == value, onClick = { days = value }, label = { Text(stringResource(label)) })
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for ((value, label) in listOf(1 to R.string.b34_usage_today, 7 to R.string.b34_usage_7_days,
+                30 to R.string.b34_usage_30_days, 0 to R.string.b34_usage_all)) {
+                FilterChip(selected = days == value, onClick = { days = value }, label = { Text(stringResource(label)) })
             }
         }
-        androidx.compose.material3.OutlinedTextField(
-            value = search, onValueChange = { search = it }, singleLine = true,
+        OutlinedTextField(value = search, onValueChange = { search = it }, singleLine = true,
             label = { Text(stringResource(R.string.pr_usage_search)) },
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-        )
-        if (!isLoaded) return@SettingsScaffold
-
-        SettingsSection(header = stringResource(R.string.usage_section_total)) {
-            val stats = listOfNotNull(
-                stringResource(R.string.usage_label_total_input) to formatCount(grandTotal.totalInput),
-                stringResource(R.string.usage_label_output) to formatCount(grandTotal.outputTokens),
-                if (grandTotal.cacheReadTokens > 0) stringResource(R.string.usage_label_cache_read) to formatCount(grandTotal.cacheReadTokens) else null,
-                if (grandTotal.cacheCreationTokens > 0) stringResource(R.string.usage_label_cache_creation) to formatCount(grandTotal.cacheCreationTokens) else null,
-                grandTotal.cacheHitRate?.let { rate -> stringResource(R.string.usage_label_cache_hit_rate) to String.format("%.1f%%", rate) },
-            )
-            stats.forEachIndexed { idx, (label, value) ->
-                SettingsValueRow(
-                    title = label,
-                    value = value,
-                    valueColor = MaterialTheme.colorScheme.onSurface,
-                    showDivider = idx < stats.size - 1,
-                )
-            }
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
+        if (!loaded) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().padding(16.dp))
+            return@SettingsScaffold
         }
-
-        for (original in providerGroups) {
-            val group = original.copy(models = original.models.filter {
-                usageMatchesSearch(it.modelId, it.displayName, it.provider, search)
-            })
-            if (group.models.isEmpty()) continue
-            SettingsSection(header = group.name) {
-                group.models.forEachIndexed { idx, model ->
-                    ExpandableModelRow(
-                        model = model,
-                        showDivider = idx < group.models.size - 1,
-                    )
+        if (failed) {
+            Text(stringResource(R.string.b34_usage_load_failed), modifier = Modifier.padding(16.dp))
+            TextButton(onClick = { reload++ }, modifier = Modifier.padding(horizontal = 16.dp)) {
+                Text(stringResource(R.string.b34_usage_retry))
+            }
+            return@SettingsScaffold
+        }
+        if (selectedProvider != null || selectedModel != null) {
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { selectedProvider = null; selectedModel = null }) {
+                    Text(stringResource(R.string.b34_usage_all_providers))
+                }
+                selectedProvider?.let { key ->
+                    val label = samples.firstOrNull { it.providerKey == key }?.providerName ?: key
+                    TextButton(onClick = { selectedModel = null }) { Text(label) }
+                }
+                selectedModel?.let { id ->
+                    Text(samples.firstOrNull { it.modelId == id && it.providerKey == selectedProvider }?.displayName ?: id,
+                        modifier = Modifier.align(Alignment.CenterVertically))
                 }
             }
         }
-
+        SettingsSection(header = stringResource(R.string.usage_section_total)) { TokenTotals(total) }
+        SettingsSection(header = stringResource(R.string.b34_usage_trend)) {
+            Text(stringResource(R.string.b34_usage_timezone, zone.id),
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            if (total.total <= 0) {
+                Text(stringResource(R.string.b34_usage_no_data), modifier = Modifier.padding(16.dp))
+            } else UsageTrendChart(trend)
+        }
+        for ((provider, providerModels) in models.groupBy { it.sample.providerKey }) {
+            val name = providerModels.first().sample.providerName
+            SettingsSection(header = name) {
+                if (selectedProvider == null) {
+                    SettingsRow(title = stringResource(R.string.b34_usage_provider_details),
+                        subtitle = formatCount(providerModels.sumOf { it.tokens.total }),
+                        onClick = { selectedProvider = provider; selectedModel = null })
+                }
+                providerModels.forEachIndexed { index, stats ->
+                    UsageModelRow(stats, selectedModel == stats.sample.modelId, index < providerModels.lastIndex) {
+                        selectedProvider = provider
+                        selectedModel = stats.sample.modelId
+                    }
+                }
+            }
+        }
         Spacer(Modifier.height(24.dp))
     }
 }
 
 @Composable
-private fun ExpandableModelRow(model: ModelStats, showDivider: Boolean) {
-    var expanded by remember { mutableStateOf(false) }
-    val summary = "${formatCount(model.totalInput)} / ${formatCount(model.outputTokens)}"
+private fun TokenTotals(tokens: UsageTokens) {
+    val values = listOfNotNull(
+        stringResource(R.string.b34_usage_total_tokens) to formatCount(tokens.total),
+        stringResource(R.string.usage_label_total_input) to formatCount(tokens.totalInput),
+        stringResource(R.string.usage_label_output) to formatCount(tokens.output),
+        if (tokens.cacheRead > 0) stringResource(R.string.usage_label_cache_read) to formatCount(tokens.cacheRead) else null,
+        if (tokens.cacheCreation > 0) stringResource(R.string.usage_label_cache_creation) to formatCount(tokens.cacheCreation) else null,
+        tokens.cacheHitRate?.takeIf { tokens.cacheRead > 0 }?.let { stringResource(R.string.usage_label_cache_hit_rate) to String.format("%.1f%%", it) },
+    )
+    values.forEachIndexed { index, (label, value) ->
+        SettingsValueRow(title = label, value = value, valueColor = MaterialTheme.colorScheme.onSurface,
+            showDivider = index < values.lastIndex)
+    }
+}
 
+@Composable
+private fun UsageModelRow(stats: UsageModelStats, selected: Boolean, showDivider: Boolean, onClick: () -> Unit) {
+    val row = stats.sample
     Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // [T-token-attribution-snapshot] Name plus, for the two states a
-            // user can act on, one short line saying why.
-            //
-            // ESTIMATED deliberately shows NOTHING. It was explained at first,
-            // but it is by far the most common state (every row predating the
-            // per-message columns) and repeating the same sentence under
-            // almost every row was pure noise — reported as such. The
-            // distinction still matters internally: estimated rows stay in
-            // their own bucket and never merge into a measured one, so the
-            // numbers remain honest even though the label is gone.
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    model.displayName,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                val caveat = when (model.attribution) {
-                    Attribution.MEASURED, Attribution.ESTIMATED -> null
-                    Attribution.UNKNOWN_SESSION -> stringResource(R.string.usage_attr_unknown_session)
-                    Attribution.MEASURED_REMOVED -> stringResource(R.string.usage_attr_removed)
+        SettingsRow(title = row.displayName,
+            subtitle = when (row.attribution) {
+                Attribution.ESTIMATED -> stringResource(R.string.b34_usage_estimated)
+                Attribution.UNKNOWN_SESSION -> stringResource(R.string.usage_attr_unknown_session)
+                Attribution.MEASURED_REMOVED -> stringResource(R.string.usage_attr_removed)
+                Attribution.MEASURED -> row.modelId
+            },
+            trailing = { Text(formatCount(stats.tokens.total), style = MaterialTheme.typography.bodyMedium) },
+            onClick = onClick, showDivider = showDivider && !selected)
+        if (selected) {
+            Column(Modifier.padding(start = 32.dp, end = 16.dp, bottom = 12.dp)) {
+                DetailRow(stringResource(R.string.usage_detail_input), formatCount(stats.tokens.input))
+                DetailRow(stringResource(R.string.usage_detail_output), formatCount(stats.tokens.output))
+                if (stats.tokens.cacheRead > 0) DetailRow(stringResource(R.string.usage_label_cache_read), formatCount(stats.tokens.cacheRead))
+                if (stats.tokens.cacheCreation > 0) DetailRow(stringResource(R.string.usage_label_cache_creation), formatCount(stats.tokens.cacheCreation))
+                stats.tokens.cacheHitRate?.takeIf { stats.tokens.cacheRead > 0 }?.let {
+                    DetailRow(stringResource(R.string.usage_label_cache_hit_rate), String.format("%.1f%%", it))
                 }
-                if (caveat != null) {
-                    Text(
-                        caveat,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    summary,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Icon(
-                    if (expanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                )
+                if (stats.days > 0) DetailRow(stringResource(R.string.usage_detail_daily_avg), formatCount(stats.tokens.total / stats.days))
+                if (stats.sessions > 0) DetailRow(stringResource(R.string.usage_detail_session_avg), formatCount(stats.tokens.total / stats.sessions))
+                DetailRow(stringResource(R.string.usage_detail_sessions), stats.sessions.toString())
+                DetailRow(stringResource(R.string.usage_detail_active_days), stats.days.toString())
             }
         }
+    }
+}
 
-        AnimatedVisibility(visible = expanded) {
-            Column(modifier = Modifier.padding(start = 32.dp, end = 16.dp, bottom = 8.dp)) {
-                DetailRow(stringResource(R.string.usage_detail_input), formatCount(model.inputTokens))
-                DetailRow(stringResource(R.string.usage_detail_output), formatCount(model.outputTokens))
-                if (model.cacheReadTokens > 0) DetailRow(stringResource(R.string.usage_label_cache_read), formatCount(model.cacheReadTokens))
-                if (model.cacheCreationTokens > 0) DetailRow(stringResource(R.string.usage_label_cache_creation), formatCount(model.cacheCreationTokens))
-                val modelTotalInput = model.totalInput
-                if (modelTotalInput > 0 && model.cacheReadTokens > 0) {
-                    val rate = (model.cacheReadTokens.toDouble() / modelTotalInput) * 100
-                    DetailRow(stringResource(R.string.usage_label_cache_hit_rate), String.format("%.1f%%", rate))
-                }
-                val days = model.distinctDays.size
-                val sessions = model.distinctSessions.size
-                if (days > 0) {
-                    DetailRow(stringResource(R.string.usage_detail_daily_avg), formatCount((model.inputTokens + model.outputTokens) / days))
-                }
-                if (sessions > 0) {
-                    DetailRow(stringResource(R.string.usage_detail_session_avg), formatCount((model.inputTokens + model.outputTokens) / sessions))
-                }
-                DetailRow(stringResource(R.string.usage_detail_sessions), sessions.toString())
-                DetailRow(stringResource(R.string.usage_detail_active_days), days.toString())
+@Composable
+private fun UsageTrendChart(buckets: List<UsageBucket>) {
+    if (buckets.isEmpty()) return
+    var selected by remember(buckets) { mutableStateOf<Int?>(null) }
+    val colors = listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.tertiary,
+        MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.error)
+    val labels = listOf(stringResource(R.string.usage_detail_input), stringResource(R.string.usage_label_cache_read),
+        stringResource(R.string.usage_label_cache_creation), stringResource(R.string.usage_detail_output))
+    val peak = buckets.maxBy { it.tokens.total }
+    val max = peak.tokens.total.coerceAtLeast(1).toDouble()
+    val description = stringResource(R.string.b34_usage_chart_description,
+        formatCount(buckets.sumOf { it.tokens.total }), formatCount(peak.tokens.total), peak.label)
+    val highlight = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+    Column(Modifier.padding(16.dp)) {
+        Text(stringResource(R.string.b34_usage_peak, formatCount(peak.tokens.total)), style = MaterialTheme.typography.bodySmall)
+        Canvas(Modifier.fillMaxWidth().height(156.dp).padding(top = 8.dp)
+            .semantics { contentDescription = description }
+            .pointerInput(buckets) { detectTapGestures { point ->
+                selected = (point.x / size.width * buckets.size).toInt().coerceIn(0, buckets.lastIndex)
+            } }) {
+            val slot = size.width / buckets.size
+            buckets.forEachIndexed { index, bucket ->
+                val x = index * slot
+                if (selected == index) drawRect(highlight, Offset(x, 0f), Size(slot, size.height))
+                var bottom = size.height
+                listOf(bucket.tokens.input, bucket.tokens.cacheRead, bucket.tokens.cacheCreation, bucket.tokens.output)
+                    .forEachIndexed { segment, count ->
+                        val height = (count / max * size.height).toFloat()
+                        bottom -= height
+                        drawRect(colors[segment], Offset(x + slot * 0.12f, bottom), Size(slot * 0.76f, height))
+                    }
             }
         }
-
-        if (showDivider) {
-            val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 14.dp)
-                    .height(0.5.dp)
-                    .background(divider),
-            )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(buckets.first().label, style = MaterialTheme.typography.labelSmall)
+            Text(buckets.last().label, style = MaterialTheme.typography.labelSmall)
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            labels.forEachIndexed { index, label ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box(Modifier.size(8.dp).background(colors[index]))
+                    Text(label, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+        selected?.let { index ->
+            val bucket = buckets[index]
+            Text("${bucket.label} · ${bucket.tokens.total}", style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 8.dp))
+            labels.zip(listOf(bucket.tokens.input, bucket.tokens.cacheRead, bucket.tokens.cacheCreation, bucket.tokens.output))
+                .forEach { (label, value) -> DetailRow(label, value.toString()) }
         }
     }
 }
 
 @Composable
 private fun DetailRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Default)
+        Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }
 
 private fun formatCount(n: Long): String = when {
     n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
-    n >= 1_000 -> {
-        val k = n / 1000.0
-        if (k == k.toLong().toDouble()) "${k.toLong()}k"
-        else String.format("%.1fk", k)
-    }
+    n >= 1_000 -> String.format("%.1fk", n / 1_000.0)
     else -> n.toString()
 }
-
-/** Rolling window in milliseconds; future timestamps never leak into a bounded range. */
-internal fun usageInDateRange(createdAt: Long, now: Long, days: Int): Boolean =
-    days <= 0 || createdAt in (now - days.toLong() * 86_400_000L)..now
-
-internal fun usageMatchesSearch(id: String, name: String, provider: String, search: String): Boolean =
-    search.trim().let { query -> listOf(id, name, provider).any { it.contains(query, ignoreCase = true) } }

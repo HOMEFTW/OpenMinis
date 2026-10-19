@@ -30,14 +30,15 @@ class ToolStreamAttemptTest {
     }
 
     @Test fun fallbackRemovesFailedToolsAndPreservesPreviousTurnBoundary() {
-        val blocks = mutableListOf(AssistantBlock("old-info", "info"), AssistantBlock("old-tool", "tool_use"))
+        val blocks = mutableListOf(AssistantBlock("fallback_info_0", "info"),
+            AssistantBlock("compact", "info", toolName = "compact"), AssistantBlock("old-tool", "tool_use"))
         val boundary = blocks.size
         blocks.add(AssistantBlock("failed-tool", "tool_use"))
         blocks.add(AssistantBlock("failed-thinking", "thinking"))
         rollbackToolStreamAttempt(blocks, boundary)
-        val nextBoundary = replaceFallbackBanner(blocks, AssistantBlock("fallback", "info"))
+        val nextBoundary = replaceFallbackBanner(blocks, AssistantBlock("fallback_info_1", "info", toolName = "model_fallback"))
         blocks.add(AssistantBlock("new-text", "text", "ok"))
-        assertEquals(listOf("fallback", "old-tool", "new-text"), blocks.map { it.id })
+        assertEquals(listOf("fallback_info_1", "compact", "old-tool", "new-text"), blocks.map { it.id })
         assertEquals(listOf("new-text"), blocks.drop(nextBoundary).map { it.id })
     }
 

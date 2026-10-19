@@ -121,9 +121,12 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
             tts?.setPitch(field)
         }
 
+    private val volumeBoost = SpeechVolumeBoost()
+    private var volumeSessionId = 0
     var speechVolume: Float = 1.0f
         set(value) {
-            field = value.coerceIn(0f, 1f)
+            field = boundedSpeechVolume(value)
+            volumeBoost.apply(field, volumeSessionId)
         }
 
     /**
@@ -135,6 +138,10 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
         // previously kept no Context at all, which is part of why the language
         // decision could only ever look at the text's script.
         appContext = context.applicationContext
+        if (volumeSessionId <= 0) {
+            volumeSessionId = (context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager)
+                ?.generateAudioSessionId() ?: 0
+        }
         tts = TextToSpeech(context.applicationContext, this)
     }
 
@@ -411,6 +418,8 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      */
     fun shutdown() {
         stop()
+        volumeBoost.release()
+        volumeSessionId = 0
         tts?.shutdown()
         explicitLocale = null
         appContext = null
@@ -487,7 +496,8 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
 
     private fun buildSpeechParams(): android.os.Bundle {
         return android.os.Bundle().apply {
-            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, speechVolume)
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volumeBoost.apply(speechVolume, volumeSessionId))
+            if (volumeSessionId > 0) putInt(TextToSpeech.Engine.KEY_PARAM_SESSION_ID, volumeSessionId)
         }
     }
 

@@ -59,6 +59,7 @@ import com.openminis.app.ui.MinisImageFetcher
 import kotlinx.coroutines.launch
 
 class MinisApp : Application(), ImageLoaderFactory {
+    private val updateScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
     /**
      * T-android-safemode-lateinit-crash: true once the heavy subsystem
      * block in [onCreate] has fully run (DB + every repository assigned).
@@ -502,6 +503,7 @@ class MinisApp : Application(), ImageLoaderFactory {
             object : androidx.lifecycle.DefaultLifecycleObserver {
                 override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
                     skillRepository.requestReload("foreground")
+                    updateScope.launch { com.openminis.app.data.UpdatePreferences.onForeground(this@MinisApp) }
                 }
             }
         )

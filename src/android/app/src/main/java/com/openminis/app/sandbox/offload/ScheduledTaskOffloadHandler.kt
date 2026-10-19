@@ -117,6 +117,12 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         val label = args.get("label", "l") ?: ""
         val trigger = parseTrigger(args) { ofRaw -> resolveUpstream(ofRaw) }
         val thinking = parseThinking(args.get("thinking"))
+        val selectedModel = args.get("model", "m")?.let { raw ->
+            val repository = (context.applicationContext as com.openminis.app.MinisApp).providerRepository
+            com.openminis.app.scheduled.ScheduledModelSelection.resolve(
+                raw, repository.config.value.modelEntries, repository.config.value.modelGroups,
+            )
+        }
         // [T-android-scheduled-default-follow-up] Without --target, a task
         // created inside a chat fires back into that chat (iOS c32dda5a7).
         val (target, defaulted) = resolveTarget(args, callerSessionId)
@@ -137,7 +143,8 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
                 customDays = trigger.customDays,
                 prompt = prompt,
                 targetMode = target,
-                modelId = args.get("model", "m"),
+                modelId = selectedModel?.modelId,
+                modelBinding = selectedModel?.binding,
                 thinkingLevel = thinking,
                 prefillToolCall = prefill,
                 enabled = !args.hasFlag("disabled"),

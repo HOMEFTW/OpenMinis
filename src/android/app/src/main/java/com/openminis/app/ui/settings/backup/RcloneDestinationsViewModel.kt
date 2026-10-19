@@ -9,11 +9,14 @@ import com.openminis.app.backup.remote.RcloneBrowser
 import com.openminis.app.backup.remote.RcloneRemoteStore
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 /**
  * [T-android-rclone-ui] Drives the backup DESTINATION management UI — the
@@ -42,7 +45,10 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
         val remote: RcloneRemoteStore.Remote,
         val path: String,
         val entries: List<RcloneBrowser.Entry>,
-    )
+        val connectionName: String = remote.name,
+    ) {
+        val connection: RcloneRemoteStore.Remote get() = remote.copy(name = connectionName)
+    }
 
     /**
      * True once a connection attempt has been refused because the server's TLS
@@ -141,6 +147,8 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
         // actually succeeded. Null keeps the old behaviour (stop in the folder
         // browser); the restore host passes a save-and-return closure.
         onConnected: (() -> Unit)? = null,
+        originalName: String? = null,
+        clearSecret: Boolean = false,
     ) {
         if (_busy.value) return
         _busy.value = true
@@ -154,7 +162,24 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                             ?.firstOrNull { it.key == key }?.isSecret != true
                     }
                     val secretKeyName = if (backend == "s3") "secret_access_key" else "pass"
-                    val secret = values[secretKeyName]
+                    val secret = when {
+                        clearSecret -> ""
+                        originalName != null && values[secretKeyName].isNullOrEmpty() ->
+                            store.secretForConnection(originalName)
+                        else -> values[secretKeyName]
+                    }
+                    // Validate before touching rclone. In particular, an add
+                    // with an existing name must not replace its live config.
+                    if (originalName != null) {
+                        val edited = RcloneRemoteStore.editedRemote(
+                            store.remotes, originalName, displayName, nonSecret,
+                            startPath, allowInsecureTLS,
+                        )
+                        check(edited.backend == backend) { "The server type cannot be changed here." }
+                    } else {
+                        check(store.remote(displayName) == null) { "A destination with that name already exists." }
+                    }
+                    deleteEphemeral()
                     // The candidate's certificate choice has to be live for THIS
                     // connection test, not just persisted at save time —
                     // otherwise "Trust this certificate" would appear to do
@@ -162,16 +187,19 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                     RcloneBridge.setInsecureTLS(
                         allowInsecureTLS || store.remotes.any { it.allowInsecureTLS }
                     )
-                    // Register under the intended name so fsSpec is stable; a
-                    // later savePending persists the same config.
-                    registerEphemeral(displayName, backend, nonSecret, secret, allowInsecureTLS)
+                    // A failed/cancelled edit must never retarget a saved
+                    // destination or overwrite its in-memory credential.
+                    val connectionName = "minis-backup-${UUID.randomUUID()}"
+                    ephemeralName = connectionName
+                    registerEphemeral(connectionName, backend, nonSecret, secret, allowInsecureTLS)
                     val remote = RcloneRemoteStore.Remote(
                         name = displayName, backend = backend,
                         params = nonSecret, path = startPath,
                         allowInsecureTLS = allowInsecureTLS,
                     )
-                    val entries = RcloneBrowser.listDirectories(remote, startPath)
-                    BrowseState(remote, startPath, entries)
+                    val entries = RcloneBrowser.listDirectories(remote.copy(name = connectionName), startPath)
+                    pendingOriginalName = originalName
+                    BrowseState(remote, startPath, entries, connectionName)
                 }
                 _browse.value = candidate
                 _certificateRejected.value = false
@@ -181,6 +209,8 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                 // `finally` would immediately clear it again — leaving the UI
                 // idle mid-save and re-enterable. Fired after the flag settles.
                 connected = true
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 // Never log the exception body verbatim at error level with the
                 // values map in scope — the message can echo the URL, and the
@@ -197,6 +227,12 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                     _certificateRejected.value = true
                 }
             } finally {
+                if (!connected) withContext(NonCancellable + Dispatchers.IO) {
+                    deleteEphemeral()
+                    pendingSecret = null
+                    pendingOriginalName = null
+                    RcloneBridge.setInsecureTLS(store.remotes.any { it.allowInsecureTLS })
+                }
                 _busy.value = false
             }
             if (connected) onConnected?.invoke()
@@ -211,7 +247,7 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val entries = withContext(Dispatchers.IO) {
-                    RcloneBrowser.listDirectories(b.remote, path)
+                    RcloneBrowser.listDirectories(b.connection, path)
                 }
                 _browse.value = b.copy(path = path, entries = entries)
             } catch (e: Exception) {
@@ -229,10 +265,10 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val newPath = withContext(Dispatchers.IO) {
-                    RcloneBrowser.createFolder(b.remote, b.path, name)
+                    RcloneBrowser.createFolder(b.connection, b.path, name)
                 }
                 val entries = withContext(Dispatchers.IO) {
-                    RcloneBrowser.listDirectories(b.remote, b.path)
+                    RcloneBrowser.listDirectories(b.connection, b.path)
                 }
                 _browse.value = b.copy(entries = entries)
                 // Descend into the folder just created — matches iOS behaviour.
@@ -248,18 +284,26 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
     /** Persist the browsed candidate as a real remote, writing at [path]. */
     fun savePending(path: String, onDone: () -> Unit) {
         val b = _browse.value ?: return
+        if (_busy.value) return
         _busy.value = true
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val secretKeyName = if (b.remote.backend == "s3") "secret_access_key" else "pass"
                     // The secret was passed to registerEphemeral; re-read it from
                     // the live rclone config is not possible, so we require the
                     // caller to have kept it — instead we persist non-secret
                     // params + the secret we still hold on the browse candidate's
                     // registration. To keep the secret, connectAndBrowse stashed
                     // it; here we re-store via the store's add (which re-obscures).
-                    store.add(
+                    val original = pendingOriginalName
+                    if (original != null) store.update(
+                        originalName = original,
+                        name = b.remote.name,
+                        params = b.remote.params,
+                        secret = pendingSecret,
+                        path = path,
+                        allowInsecureTLS = b.remote.allowInsecureTLS,
+                    ) else store.add(
                         name = b.remote.name,
                         backend = b.remote.backend,
                         params = b.remote.params,
@@ -268,10 +312,15 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                         allowInsecureTLS = b.remote.allowInsecureTLS,
                     )
                     store.syncToRclone()
+                    if (original != null && original != b.remote.name) {
+                        runCatching { RcloneBridge.rpc("config/delete", mapOf("name" to original)) }
+                    }
+                    deleteEphemeral()
                 }
                 refresh()
                 _browse.value = null
                 pendingSecret = null
+                pendingOriginalName = null
                 onDone()
             } catch (e: Exception) {
                 _error.value = e.message ?: "Could not save the destination."
@@ -296,12 +345,35 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelPending() {
+        if (_busy.value) return
         _browse.value = null
         pendingSecret = null
+        pendingOriginalName = null
+        _error.value = null
+        _certificateRejected.value = false
+        if (ephemeralName == null) return
+        _busy.value = true
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    deleteEphemeral()
+                    RcloneBridge.setInsecureTLS(store.remotes.any { it.allowInsecureTLS })
+                }
+            } finally { _busy.value = false }
+        }
     }
 
     // The secret is held only in memory between connect and save; never logged.
     @Volatile private var pendingSecret: String? = null
+    @Volatile private var pendingOriginalName: String? = null
+    @Volatile private var ephemeralName: String? = null
+
+    private fun deleteEphemeral() {
+        ephemeralName?.let { name ->
+            runCatching { RcloneBridge.rpc("config/delete", mapOf("name" to name)) }
+        }
+        ephemeralName = null
+    }
 
     private fun registerEphemeral(
         name: String,

@@ -5,6 +5,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ComposerDraftStoreTest {
+    @Test fun latestUnsentNewChatDraftIsCarriedOverWithItsAttachments() {
+        var time = 1_000_000L
+        val store = ComposerDraftStore(MemorySharedPreferences()) { time }
+        store.save("__new__old", ComposerDraft("old", emptyList()))
+        time += 1_000
+        val latest = ComposerDraft("latest", listOf(DraftAttachment("a", "note.txt", "content://test/note", "text/plain", "DOCUMENT")))
+        store.save("__new__latest", latest)
+        time += 14 * 60 * 1000
+        assertEquals(latest, store.takeRecentNewDraft("__new__next"))
+        assertNull(store.load("__new__latest"))
+        assertEquals(latest, store.load("__new__next"))
+        assertNull(store.takeRecentNewDraft("__new__next"))
+    }
+
+    @Test fun expiredFutureAndExistingChatDraftsAreNotCarriedIntoANewChat() {
+        var time = 2_000_000L
+        val store = ComposerDraftStore(MemorySharedPreferences()) { time }
+        store.save("saved-chat", ComposerDraft("existing", emptyList()))
+        store.save("__new__expired", ComposerDraft("expired", emptyList()))
+        time += 15 * 60 * 1000 + 10_001
+        assertNull(store.takeRecentNewDraft("__new__next"))
+        store.save("__new__future", ComposerDraft("future", emptyList()))
+        time -= 1_000
+        assertNull(store.takeRecentNewDraft("__new__next"))
+        assertTrue(store.has("saved-chat"))
+    }
+
     @Test fun confirmedSharedDraftSurvivesBeforeThePendingShareIsAcknowledged() {
         val prefs = MemorySharedPreferences()
         val draft = ComposerDraft("Shared text", listOf(
