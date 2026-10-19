@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
@@ -107,6 +108,7 @@ import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
+import com.openminis.app.ui.components.copySessionLinkToClipboard
 import com.openminis.app.ui.components.SectionDesign
 import com.openminis.app.ui.components.SectionTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -512,6 +514,9 @@ fun SessionListScreen(
         factory = SessionListViewModel.factory(chatRepository, providerRepository, context),
     )
     val persistedSessions by viewModel.displayedSessions.collectAsState()
+    val persistedSessionIds = remember(persistedSessions) {
+        persistedSessions.mapTo(mutableSetOf()) { it.id }
+    }
     // [T-android-draft-placeholder-row] Prepend the synthetic draft row. Built
     // here rather than in the ViewModel precisely because it must never reach
     // the database or the repository's flows — it exists for exactly as long
@@ -1059,6 +1064,12 @@ fun SessionListScreen(
                                     onEditRequest = { editSession = it },
                                     onExportRequest = { s, fmt ->
                                         exportSession(context, s, chatRepository, scope, fmt)
+                                    },
+                                    canCopySessionLink = session.id in persistedSessionIds,
+                                    onCopySessionLink = { id ->
+                                        scope.launch {
+                                            copySessionLinkToClipboard(context, chatRepository, id)
+                                        }
                                     },
                                     onRegenerateTitle = { viewModel.regenerateTitle(it) },
                                     onDuplicate = { viewModel.duplicateSession(it) },
@@ -1935,6 +1946,8 @@ private fun SessionItemContent(
     onPinToggle: (String) -> Unit,
     onEditRequest: (ChatSessionEntity) -> Unit,
     onExportRequest: (ChatSessionEntity, String) -> Unit,
+    canCopySessionLink: Boolean,
+    onCopySessionLink: (String) -> Unit,
     onRegenerateTitle: (String) -> Unit,
     onDuplicate: (String) -> Unit,
     onDeleteRequest: (String) -> Unit,
@@ -2069,6 +2082,17 @@ private fun SessionItemContent(
                             if (isPinned) Icons.Default.Close else Icons.Default.PushPin,
                             contentDescription = null,
                         )
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.session_link_copy)) },
+                    enabled = canCopySessionLink,
+                    onClick = {
+                        showContextMenu = false
+                        onCopySessionLink(session.id)
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Link, contentDescription = null)
                     },
                 )
                 // Export submenu (JSON / Plain Text)

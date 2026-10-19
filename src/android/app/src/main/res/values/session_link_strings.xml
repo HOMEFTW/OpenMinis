@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="session_link_copy">Copy conversation link</string>
+    <string name="session_link_copy_failed">Failed to copy conversation link</string>
+</resources>

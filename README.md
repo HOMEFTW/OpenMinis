@@ -9,7 +9,7 @@ OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手�
 
 **[下载 Android 1.16.3 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.3) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
 
-**1.16.3 · 2026-10-19**：补齐 build34 的隐藏模型折叠与删除、用量时间范围与趋势、备份服务器编辑、ZIP64、可见会话分享、15 分钟新会话草稿、停止范围选择、语音识别回退与 200% 朗读音量等功能；新增五种语言和 minis-config 设置。自动更新仅连接 [本 fork 的 Releases](https://github.com/HOMEFTW/OpenMinis/releases)，支持稳定／测试渠道。源码与 APK 对应 [1.16.3 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16.3)，实现与验证范围见 [build34 同步记录](docs/fixes/2026-10-19-build34-sync.md)。
+**1.16.3 · 2026-10-19，追加会话链接更新**：复制原会话链接后，可在新对话要求“阅读对话 <链接>，帮我……”，分页读取本机原会话并继续任务，也可按链接发送消息。包含 build34 的模型管理、用量趋势、备份服务器编辑、ZIP64、会话草稿、停止范围、语音回退、200% 朗读音量及新增五种语言等更新。自动更新仅连接 [本 fork 的 Releases](https://github.com/HOMEFTW/OpenMinis/releases)，支持稳定／测试渠道。本次 APK 的对应源码见 [追加更新源码 ZIP](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/OpenMinis-1.16.3-session-links-source.zip) 和 [更新与验收记录](docs/fixes/2026-10-19-session-links.md)；原 [1.16.3 标签](https://github.com/HOMEFTW/OpenMinis/tree/1.16.3) 保留首发归档。
 
 **1.16.2 · 2026-10-14**：补齐上游 1.15 beta 的后台提问通知、等待倒计时、MCP／Skills 菜单、朗读音量与长按开关；支持六个会话同时运行，长任务在摘要前逐步回收旧思考及工具步骤。新增手动清理孤立会话文件、Kimi Code 订阅用量和 MiniMax／OpenCode 官方控制台入口，修复 DeepSeek 工具误写进思考时的恢复、列表嵌套表格、转写双击选词、沙箱 Git 配置及 Unicode 输出边界。10 月 18 日补充 GPT Fast 开关及显示修复，对应源码为 [6e49d0d](https://github.com/HOMEFTW/OpenMinis/tree/6e49d0d3feabd5133fb6a29590bc84bfad404bf2)；原同步范围见 [验收记录](docs/fixes/2026-10-14-upstream115-sync.md)。
 
@@ -64,7 +64,7 @@ DeepSeek、GPT、Claude 模型自动使用对应背景；对话中切换模型�
 | 朗读与交互 | 朗读胶囊上方提供最高 200% 的独立音量滑块；长按工具状态栏开关预览，长按思考块切换流式展开；停止按钮支持长按设置和停止范围选择。 |
 | 输入区 | 模型与思考强度入口移入输入框，使用可搜索模型列表和分档滑块；保留模型分组、当前项勾选及详细选择器。 |
 | 上下文管理 | 独立设置页提供 64K / 105K / 272K / 1M 预设及 8K–1M 自定义上限；结合全局、模型与模型组限制，按服务端输入用量校准预算，计入 Anthropic 缓存 Token。 |
-| 会话通信 | 支持手动文本转发及 AI 主动请求，提供接收授权、持久化排队、关联回复和防循环保护；不自动合并两边历史。 |
+| 会话通信与链接 | 可复制会话深度链接，在新对话按链接分页读取原会话并继续任务，或按链接发信；支持手动转发、AI 请求、接收授权、持久化排队、关联回复及防循环，不自动合并历史或复制附件。 |
 | 生图结果 | 修复已返回图片却只保存提示词的问题。JSON 输出包含 `media_files` 清单，多图全部保存；无图片、下载失败及写入失败明确报错。 |
 | 图片预算 | 单图 5 MiB、单次请求图片预算 100 MiB；校验编码与 MIME，按需加载历史图片，超预算时保留原附件。服务商自身限制仍适用。 |
 | 会话隔离 | 输入 JSON、系统文件、参考图及输出按调用会话解析，避免并行任务读写其他会话目录。 |
@@ -124,6 +124,8 @@ DeepSeek 官方 Key：添加服务商时选择 **DeepSeek** 并填写密钥。�
 
 ## 会话通信怎么用
 
+会话链接已加入 1.16.3 追加更新：在原会话「⋯ → 复制会话链接」，或在会话列表长按后复制；新对话输入“阅读对话 `<复制的链接>`，帮我……”即可让 AI 分页读取原会话并在当前对话继续处理。仅引用当前安装中的本地历史，读取不会唤醒原会话模型或自动共享附件；按链接发信仍需目标开启 AI 消息接收。请使用上方最新 APK，详见 [实施与验证记录](docs/fixes/2026-10-19-session-links.md)。
+
 - **手动发送**：打开一个已有会话 → 右上角「⋯」→ 会话通信，选择目标会话，输入文本或点击“填入最近一次 AI 回复”，再点击“发送并在目标会话执行”。
 - **AI 主动通信**：先在目标会话的通信面板开启“允许其他会话的 AI 向本会话发送请求”，再让发送方 AI 联系它。AI 使用 `session_message` 查询目标、异步发送和读取结果。
 - **查看进度与回复**：双方通信面板都可查看排队、处理中、完成或失败状态。目标忙碌、有未完成任务或未发送草稿时继续等待；需要审批或停止执行时，前往目标聊天页。
@@ -159,13 +161,13 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
-2026-10-19，1.16.3 本机验证：通过 `scripts/build_android_windows.ps1 -RunAllTests -BuildAndroidTests` 运行 **361 个测试组、2761 项 JVM 单元测试**，2753 通过、0 失败、0 错误、8 项条件跳过；跳过项涉及 opt-in 的 4 GiB 大文件用例及平台文件系统／权限条件。覆盖模型默认限制、跨协议工具 ID、用量日历日与趋势、凭据刷新、备份合并／历史／服务器编辑、实际生成的 JavaScript、语音回退、权限总超时和停止范围。
+2026-10-19，1.16.3 追加更新本机验证：通过 `scripts/build_android_windows.ps1 -RunAllTests -BuildAndroidTests` 运行 **365 个测试组、2780 项 JVM 单元测试**，2772 通过、0 失败、0 错误、8 项条件跳过；跳过项涉及 opt-in 的 4 GiB 大文件用例及平台文件系统／权限条件。覆盖原 build34 回归及新增 19 项会话链接测试，包括只读历史、长消息分页、Unicode、源消息删除与重读、落盘回读、内存预算和接收授权。
 
 独立 ZIP64 验证已实际完成 4 GiB＋4 KiB 和 65,537 文件往返。此前 1.16.2 在 WSL Linux 补测过 40 项存储测试，39 通过、0 失败、1 项条件跳过，Windows 跳过的 5 项安全删除测试全部通过；本次未重复该项历史验证，均不等于 Android 设备验证。
 
-应用与完整 Android 仪器测试包均编译成功。应用 APK 的签名、ZIP 完整性、20 个 DEX 校验和及 16 KiB 页 ZIP 对齐检查通过；44 个品牌／启动图标资源与此前版本一致，沿用本 fork 原签名。11 个 build34 新实现类及本 fork 的更新地址已确认入包。
+应用与完整 Android 仪器测试包均编译成功。追加更新 APK 的 v2 签名、ZIP CRC、重复条目及 16 KiB 页 ZIP 对齐检查通过；新会话链接、历史分页、剪贴板和 Unicode 实现类、续读字段与系统提示已确认入包，沿用本 fork 原签名。首发包的 44 个品牌／启动图标资源及 build34 检查见原同步记录，本次未改动品牌素材。
 
-安装包 SHA-256 见 [1.16.3 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.3) 附带的 [校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk.sha256)。完整清单见 [build34 同步与验收记录](docs/fixes/2026-10-19-build34-sync.md)。
+安装包 SHA-256 见 [1.16.3 Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.16.3) 附带的 [校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.16.3/app-debug.apk.sha256)。最新清单见 [会话链接追加更新记录](docs/fixes/2026-10-19-session-links.md)，首发范围见 [build34 同步与验收记录](docs/fixes/2026-10-19-build34-sync.md)。
 
 当前没有连接 ADB 设备，未执行真机安装、仪器测试、通知直接回复、触控选词、后台 Doze、系统 TTS 或真实服务商联调。这是本地执行记录，不代表 GitHub CI 或真机验收；开发验证使用模拟接口，没有自动调用用户的付费 API。上下文 Token 预算仍为校准估算，不是精确 tokenizer 计数。
 
@@ -173,6 +175,7 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 更多说明
 
+- [2026-10-19 会话链接与 1.16.3 追加更新记录](docs/fixes/2026-10-19-session-links.md)
 - [2026-10-19 Android build34 同步与 1.16.3 验收记录](docs/fixes/2026-10-19-build34-sync.md)
 - [GPT Fast 模式与显示修复记录](docs/fixes/2026-10-17-gpt-fast-mode.md)
 - [2026-10-14 Android 1.15 beta 同步与 1.16.2 验收记录](docs/fixes/2026-10-14-upstream115-sync.md)

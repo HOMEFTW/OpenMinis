@@ -14,6 +14,7 @@ import com.openminis.app.data.storage.SessionStorageMaintenanceGate
 import com.openminis.app.data.storage.SessionStorageReferences
 import com.openminis.app.data.storage.SessionStorageOwners
 import com.openminis.app.sandbox.SessionWorkspaceRegistry
+import com.openminis.app.util.takeUnicodeSafe
 
 class ChatRepository(internal val dao: ChatDao) {
 
@@ -822,6 +823,52 @@ class ChatRepository(internal val dao: ChatDao) {
 
     suspend fun messageCount(sessionId: String): Int = dao.messageCountForSession(sessionId)
 
+    /** Preserve raw row offsets, including hidden rows, so linked history never skips a message. */
+    internal suspend fun sessionHistoryPage(
+        sessionId: String,
+        offset: Int,
+        limit: Int,
+        textOffset: Int,
+        expectedMessageId: String?,
+    ): org.json.JSONObject {
+        require(limit in 1..SessionHistoryPage.MAX_ROWS && offset >= 0 && textOffset >= 0) {
+            "History requires offset/text_offset >= 0 and limit between 1 and ${SessionHistoryPage.MAX_ROWS}"
+        }
+        val continuing = offset != 0 || textOffset != 0
+        require(!continuing || !expectedMessageId.isNullOrBlank()) {
+            "Continue history with next_message_id as message_id, plus next_offset and next_text_offset"
+        }
+        val total = messageCount(sessionId)
+        require(offset <= total) { "History offset is beyond this conversation; restart at offset 0" }
+        val rows = mutableListOf<MessagePageItem>()
+        var textChars = 0L
+        // A page budget must also bound work: do not materialize twenty huge JSON rows
+        // just to discover that the first message already fills the response.
+        while (rows.size < limit && offset + rows.size < total) {
+            val row = loadMessagePageRaw(sessionId, offset + rows.size, 1).firstOrNull() ?: break
+            require(rows.isNotEmpty() || !continuing || row.id == expectedMessageId) {
+                "History changed: the expected message was moved or deleted; restart at offset 0 with text_offset 0"
+            }
+            val text = extractTextForOffload(row.partsJson)
+            val start = if (rows.isEmpty()) textOffset else 0
+            require(start <= text.length) { "Message changed; read this offset again with text_offset 0" }
+            rows += MessagePageItem(row.id, row.role, row.createdAt, text)
+            if (text.isNotBlank()) textChars += text.length - start
+            if (textChars >= SessionHistoryPage.MAX_CHARS) break
+        }
+        val page = SessionHistoryPage.build(rows, offset, textOffset, total)
+        if (page.getBoolean("has_more")) {
+            val nextOffset = page.getInt("next_offset")
+            val nextId = rows.getOrNull(nextOffset - offset)?.messageId
+                ?: dao.loadMessageMetadataPage(sessionId, nextOffset, 1, null, null).firstOrNull()?.id
+            requireNotNull(nextId) { "History changed while reading; restart at offset 0 with text_offset 0" }
+            page.put("next_message_id", nextId)
+        } else {
+            page.put("next_message_id", org.json.JSONObject.NULL)
+        }
+        return page
+    }
+
     /**
      * [T-android-sessions-cli-messages-daterange] Count under the same optional
      * range [loadMessagePage] filters by, so `total` and the returned slice
@@ -882,12 +929,12 @@ class ChatRepository(internal val dao: ChatDao) {
                     val toolTitle = try {
                         org.json.JSONObject(inp).optString("tool_title", "")
                     } catch (_: Exception) { "" }
-                    if (toolTitle.isNotBlank()) toolTitle.take(100) else title
+                    if (toolTitle.isNotBlank()) toolTitle.takeUnicodeSafe(100) else title
                 }
             }
             if (toolResults.isNotEmpty()) {
                 return toolResults.joinToString("\n") { tr ->
-                    val output = tr.optString("output", "").take(200)
+                    val output = tr.optString("output", "").takeUnicodeSafe(200)
                     "[Tool result: $output]"
                 }
             }

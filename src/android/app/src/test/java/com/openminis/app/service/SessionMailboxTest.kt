@@ -4,6 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionMailboxTest {
+    @Test fun `a conversation link does not grant AI reception or bypass self-message checks`() {
+        val box = SessionMailbox(null) {}
+        val target = com.openminis.app.deeplink.SessionLink.requireSessionId("minis://session/b")
+        assertThrows(IllegalArgumentException::class.java) { box.enqueue("a", target, "hello", true) }
+        box.setAllowed(target, true)
+        assertEquals("b", box.enqueue("a", target, "hello", true).target)
+        assertThrows(IllegalArgumentException::class.java) { box.enqueue(target, target, "loop", true) }
+    }
+
     @Test fun `deleted participants cannot leave a full unreachable mailbox after restart`() {
         val records = org.json.JSONArray((0 until SessionMailbox.MAX_RECORDS).map {
             SessionMail("old-$it", "deleted-a", "deleted-b", "old", false, 1, "completed").toJson()

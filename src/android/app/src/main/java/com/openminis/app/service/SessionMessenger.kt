@@ -3,6 +3,7 @@ package com.openminis.app.service
 import android.util.AtomicFile
 import com.openminis.app.MinisApp
 import com.openminis.app.debug.HeadlessChatRunner
+import com.openminis.app.deeplink.SessionLink
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,11 +60,12 @@ class SessionMessenger(private val app: MinisApp) {
     }
 
     suspend fun send(source: String, target: String, text: String, fromAgent: Boolean): SessionMail = withContext(Dispatchers.IO) {
+        val targetId = SessionLink.requireSessionId(target)
         require(app.chatRepository.getSession(source) != null) { "Source session no longer exists" }
-        require(app.chatRepository.getSession(target) != null) { "Target session no longer exists" }
+        require(app.chatRepository.getSession(targetId) != null) { "Target session no longer exists on this device" }
         require(!fromAgent || !isHandling(source)) { "Cross-session requests cannot send nested requests; return a reply instead" }
         pruneDeletedSessions()
-        mailbox.enqueue(source, target, text, fromAgent)
+        mailbox.enqueue(source, targetId, text, fromAgent)
     }
 
     private suspend fun deliver(candidate: SessionMail) {

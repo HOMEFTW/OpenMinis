@@ -170,6 +170,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
+import com.openminis.app.ui.components.copySessionLinkToClipboard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -266,6 +267,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.filled.SkipNext
@@ -2806,6 +2808,21 @@ fun ChatScreen(
                                 },
                                 leadingIcon = {
                                     com.openminis.app.ui.components.MenuItemIcon(com.openminis.app.ui.components.MinisIcons.SquareAndPencil)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.session_link_copy)) },
+                                enabled = storedSession != null,
+                                onClick = {
+                                    showChatMenu = false
+                                    storedSession?.id?.let { id ->
+                                        coroutineScope.launch {
+                                            copySessionLinkToClipboard(context, chatRepository, id)
+                                        }
+                                    }
+                                },
+                                leadingIcon = {
+                                    com.openminis.app.ui.components.MenuItemIcon(Icons.Default.Link)
                                 },
                             )
                             MinisMenuDivider()

@@ -1,6 +1,7 @@
 package com.openminis.app.sandbox.offload
 
 import com.openminis.app.data.repository.ChatRepository
+import com.openminis.app.deeplink.SessionLink
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
@@ -150,7 +151,7 @@ class SessionsOffloadHandler(
     }
 
     private fun cmdMessages(args: OffloadArgs): NativeOffloadResult {
-        val sessionId = args.get("id")?.takeIf { it.isNotBlank() }
+        val reference = args.get("id")?.takeIf { it.isNotBlank() }
             ?: run {
                 val err = errorEnvelope(
                     "messages",
@@ -162,6 +163,16 @@ class SessionsOffloadHandler(
                     OffloadOutput.formatBody(err.toString(2), args) + "\n" + HELP_TEXT,
                 )
             }
+        val sessionId = SessionLink.parse(reference) ?: return NativeOffloadResult(
+            EXIT_INVALID_ARGS,
+            OffloadOutput.formatBody(errorEnvelope("messages", "INVALID_ARGS",
+                "--id must be a local session ID or minis://session/<id> conversation link").toString(2), args) + "\n",
+        )
+        if (runBlocking { repo.getSession(sessionId) } == null) return NativeOffloadResult(
+            1,
+            OffloadOutput.formatBody(errorEnvelope("messages", "NOT_FOUND",
+                "Conversation not found on this device; it may have been deleted or belongs to another installation").toString(2), args) + "\n",
+        )
         val limit = parseLimit(args)
         val offset = (args.getInt("offset") ?: 0).coerceAtLeast(0)
         // [T-android-sessions-cli-full] --full lifts the per-message text cap
@@ -355,7 +366,7 @@ COMMANDS:
 OPTIONS:
   --keywords <words>    Space-separated keywords (AND logic, required for search)
   --ids <id1,id2,...>   Filter by comma-separated session IDs (list/search)
-  --id <session_id>     Session ID to read messages from (messages)
+  --id <id-or-link>     Session ID or minis://session/<id> link (messages)
   --full                (messages only) Return full message text up to 50000 chars
   --tools               (messages only) Also return each message's tool calls:
                         tool_calls [{tool_use_id, name, input}] with the full
@@ -400,6 +411,7 @@ EXAMPLES:
   minis-sessions-cli search --keywords "API error" --limit 20
   minis-sessions-cli search --keywords deploy --ids abc123,def456
   minis-sessions-cli messages --id <session_id>
+  minis-sessions-cli messages --id minis://session/<session_id>
   minis-sessions-cli messages --id <session_id> --full
   minis-sessions-cli messages --id <session_id> --tools --full
   minis-sessions-cli messages --id <session_id> --offset 20 --limit 10
