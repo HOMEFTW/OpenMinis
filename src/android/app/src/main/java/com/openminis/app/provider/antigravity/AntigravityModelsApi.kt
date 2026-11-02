@@ -45,6 +45,7 @@ object AntigravityModelsApi {
         baseURL: String,
         context: Context? = null,
         forceRefresh: Boolean = false,
+        netTag: String? = null,
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         val cacheKey = baseURL + "|" + accessToken
         if (context != null && !forceRefresh) {
@@ -62,7 +63,7 @@ object AntigravityModelsApi {
             .build()
 
         val response = try {
-            client.newCall(request).execute()
+            com.openminis.app.network.NetworkHttp.client(netTag, client).newCall(request).execute()
         } catch (_: Exception) {
             return@withContext emptyList()
         }

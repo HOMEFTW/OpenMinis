@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-multi-select-share] Share Chat picker and export, from upstream strings.xml. -->
+<resources>
+    <string name="chat_share_share_chat">Sdílet konverzaci…</string>
+    <string name="chat_share_select_messages">Vybrat zprávy</string>
+    <string name="chat_share_share_count">Sdílet (%1$d)</string>
+    <string name="chat_share_select_all_below">Vybrat vše níže</string>
+    <string name="chat_share_deselect_all_below">Zrušit výběr všech níže</string>
+    <string name="chat_share_select_below">Vybrat níže</string>
+    <string name="chat_share_show_tools">Zobrazit nástroje</string>
+    <string name="chat_share_hide_tools">Skrýt nástroje</string>
+    <string name="chat_share_show_thinking">Zobrazit uvažování</string>
+    <string name="chat_share_hide_thinking">Skrýt uvažování</string>
+    <string name="chat_share_clear_selection">Zrušit výběr</string>
+    <string name="chat_share_creating">Vytváření…</string>
+    <string name="chat_share_error_nothing">Ve vybraných zprávách není nic ke sdílení.</string>
+    <string name="chat_share_error_image_too_large">Na jeden obrázek je to příliš dlouhé. Sdílej to raději jako PDF.</string>
+    <string name="chat_share_error_write_failed">Soubor se nepodařilo vytvořit.</string>
+    <string name="chat_share_long_image">Dlouhý obrázek</string>
+    <string name="chat_share_pdf">PDF</string>
+    <string name="chat_share_too_long_image">Příliš dlouhé na spojení do jednoho obrázku.</string>
+    <string name="chat_share_width_label">Šířka: %1$s</string>
+    <string name="chat_share_table_label">Tabulka: %1$s</string>
+    <string name="chat_share_appearance_label">Vzhled: %1$s</string>
+    <string name="chat_share_switched_to">Přepnuto na %1$s</string>
+    <string name="chat_share_table_adaptive">Adaptivní šířka</string>
+    <string name="chat_share_table_default">Výchozí šířka</string>
+    <string name="chat_share_width_phone">Telefon</string>
+    <string name="chat_share_width_tablet">Tablet</string>
+    <string name="chat_share_n_selected">Vybráno: %1$d</string>
+    <string name="chat_share_select_all">Vybrat vše</string>
+    <string name="chat_share_deselect_all">Zrušit výběr všeho</string>
+</resources>

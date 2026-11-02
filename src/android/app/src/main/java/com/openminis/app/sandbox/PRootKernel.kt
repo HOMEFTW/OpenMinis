@@ -207,9 +207,11 @@ object PRootKernel {
         // Avoid Git's object hardlinks under --link2symlink. Unlike "copy",
         // "rename" is a supported core.createObject mode. Both login terminals
         // and non-login Agent commands inherit these defaults.
-        customEnvironment.putIfAbsent("GIT_CONFIG_COUNT", "1")
-        customEnvironment.putIfAbsent("GIT_CONFIG_KEY_0", "core.createObject")
-        customEnvironment.putIfAbsent("GIT_CONFIG_VALUE_0", "rename")
+        if (!customEnvironment.containsKey("GIT_CONFIG_COUNT")) {
+            customEnvironment.putIfAbsent("GIT_CONFIG_COUNT", "1")
+            customEnvironment.putIfAbsent("GIT_CONFIG_KEY_0", "core.createObject")
+            customEnvironment.putIfAbsent("GIT_CONFIG_VALUE_0", "rename")
+        }
 
         // Inject device timezone so Alpine userspace sees local time.
         // Mirrors iOS ISHShellExecutor.m:335-353 — uses POSIX TZ format with a
@@ -724,6 +726,7 @@ object PRootKernel {
         cmd.add("--link2symlink")
         // Requires the pinned OpenMinis PRoot fork with rtnetlink emulation.
         cmd.add("--fake-netlink")
+        cmd.addAll(com.openminis.app.network.ShellTransparentNet.prootArgs(rootfsManager.prootBinary))
 
         // Set rootfs
         cmd.add("-r")
@@ -756,7 +759,7 @@ object PRootKernel {
         // Native offload: route registered handler names to the host-side
         // NativeOffloadServer over the abstract unix socket.
         val handlers = NativeOffloadServer.registeredHandlers
-        if (handlers.isNotEmpty()) {
+        if (handlers.isNotEmpty() && NativeOffloadServer.awaitListening()) {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
 
@@ -842,8 +845,11 @@ object PRootKernel {
         var existed = 0
         for (name in NativeOffloadServer.registeredHandlers) {
             val stub = File(binDir, name)
-            if (stub.exists()) { existed++; continue }
-            stub.writeText("#!/bin/sh\nexit 0\n")
+            if (stub.exists() && runCatching { stub.readText() }.getOrNull() != HandlerStub.LEGACY_CONTENT) {
+                existed++
+                continue
+            }
+            stub.writeText(HandlerStub.content(name))
             stub.setExecutable(true, false)
             created++
         }

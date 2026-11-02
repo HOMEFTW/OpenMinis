@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-provider-quota] Provider balance and subscription usage, from upstream strings.xml. -->
+<resources>
+    <string name="quota_source">Source</string>
+    <string name="quota_done">Terminé</string>
+    <string name="quota_status_unknown">Inconnu</string>
+    <string name="quota_status_low">Faible</string>
+    <string name="quota_updated">Mis à jour</string>
+</resources>

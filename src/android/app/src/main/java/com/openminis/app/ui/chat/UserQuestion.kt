@@ -11,11 +11,20 @@ data class PendingUserQuestion(
     val answers: Map<String, String> = emptyMap(),
     val selections: Map<String, UserQuestionSelection> = emptyMap(),
     val freeTextDrafts: Map<String, String> = emptyMap(),
+    /** Persist this deadline; elapsedRealtime is only meaningful within one boot. */
+    val expiresAtWallMs: Long = 0L,
+    val deferred: Boolean = false,
+    val createdAtWallMs: Long = 0L,
+    /** -1 preserves the old first-unanswered navigation for existing records. */
+    val displayedIndex: Int = -1,
 ) {
-    val currentIndex: Int get() = questions.indexOfFirst { it.id !in answers }
+    val currentIndex: Int get() = displayedIndex.takeIf { it in questions.indices }
+        ?: questions.indexOfFirst { it.id !in answers }
     val currentQuestion: UserQuestionPrompt? get() = questions.getOrNull(currentIndex)
+    val hasCountdown: Boolean get() = timeoutMs > 0L && !deferred
 
-    fun remainingMs(nowElapsedMs: Long): Long = (expiresAtElapsedMs - nowElapsedMs).coerceAtLeast(0L)
+    fun remainingMs(nowElapsedMs: Long): Long = if (!hasCountdown && !deferred) Long.MAX_VALUE
+        else (expiresAtElapsedMs - nowElapsedMs).coerceAtLeast(0L)
 }
 
 enum class UserQuestionKind { CHOICE, TEXT, CONFIRMATION }

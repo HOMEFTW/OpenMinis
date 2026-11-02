@@ -93,6 +93,10 @@ object Routes {
     const val SESSION_LIST = "sessions"
     const val CHAT = "chat/{sessionId}"
     const val SETTINGS = "settings"
+    const val NETWORK = "network"
+    const val NETWORK_TAILSCALE = "network_tailscale"
+    const val NETWORK_PROXIES = "network_proxies"
+    const val CONTAINER_DNS = "container_dns"
     const val CONTEXT_WINDOW = "context_window"
     const val PROVIDER_LIST = "providers"
     const val ADD_PROVIDER = "add_provider"
@@ -131,6 +135,7 @@ object Routes {
     const val FILE_PREVIEW = "file_preview"
     const val ENV_VARS = "env_vars"
     const val SKILLS = "skills"
+    const val FORGE = "forge"
     const val SKILL_DETAIL = "skill/{skillId}"
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
     const val MINIS_SKILLS_BROWSER = "minis_skills_browser"
@@ -592,15 +597,23 @@ fun AppNavigation(
             }
         }
 
+        composable(Routes.FORGE) {
+            com.openminis.app.forge.ForgeScreen(onBack = { navController.safePopBackStack() })
+        }
         composable(Routes.SETTINGS) {
             SettingsScreen(
                 onBack = { navController.safePopBackStack() },
                 onProvidersClick = { navController.safeNavigate(Routes.PROVIDER_LIST) },
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
                 onRootfsClick = { navController.safeNavigate(Routes.STORAGE) },
+                onNetworkClick = { navController.safeNavigate(Routes.NETWORK) },
+                onTailscaleClick = { navController.safeNavigate(Routes.NETWORK_TAILSCALE) },
+                onProxiesClick = { navController.safeNavigate(Routes.NETWORK_PROXIES) },
+                onContainerDnsClick = { navController.safeNavigate(Routes.CONTAINER_DNS) },
                 onBackupClick = { navController.safeNavigate(Routes.BACKUP) },
                 onEnvVarsClick = { navController.safeNavigate(Routes.ENV_VARS) },
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
+                onForgeClick = { navController.safeNavigate(Routes.FORGE) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
                 onAgentsClick = { navController.safeNavigate(Routes.SUB_AGENTS) },
@@ -1079,6 +1092,11 @@ fun AppNavigation(
                     FilePreviewHolder.fileBrowserViewModel = FileBrowserViewModel(
                         rootPath = rootfs.rootfsDir,
                         rootLabel = "/",
+                        // [T-filebrowser-delete-symlink-target] The rows ARE the
+                        // Linux tree, so name them by their Linux path: delete
+                        // then knows /proc, /var/minis/skills… are bind targets,
+                        // and Copy Absolute Path gives what the shell sees.
+                        displayLinuxPrefix = "/",
                     )
                     navController.safeNavigate(Routes.FILE_BROWSER)
                 },
@@ -1191,6 +1209,29 @@ fun AppNavigation(
             )
         }
 
+        composable(Routes.NETWORK) {
+            com.openminis.app.ui.settings.NetworkSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+                providers = providerRepository.instances.map {
+                    com.openminis.app.ui.settings.NetworkProviderRow(it.id, it.label)
+                },
+            )
+        }
+        composable(Routes.NETWORK_TAILSCALE) {
+            com.openminis.app.ui.settings.NetworkSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+                page = com.openminis.app.ui.settings.NetworkPage.TAILSCALE,
+            )
+        }
+        composable(Routes.NETWORK_PROXIES) {
+            com.openminis.app.ui.settings.NetworkSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+                page = com.openminis.app.ui.settings.NetworkPage.PROXIES,
+            )
+        }
+        composable(Routes.CONTAINER_DNS) {
+            com.openminis.app.ui.sandbox.ContainerDnsScreen(onBack = { navController.safePopBackStack() })
+        }
         composable(Routes.ENV_VARS) {
             if (envVarRepository != null) {
                 EnvironmentVariablesScreen(

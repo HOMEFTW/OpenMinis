@@ -124,6 +124,10 @@ object ShellExecutor {
         for ((key, value) in PRootKernel.customEnvironment) {
             env[key] = value
         }
+        // [T-net-android-phase3] Settings > Network "Shell" route: proxy
+        // variables for the local entry (empty = direct, unchanged). Before
+        // the caller's / user's own variables, which may override them.
+        env.putAll(com.openminis.app.network.NetworkShellEnvironment.proxyVariables())
 
         // Apply per-call environment overrides
         for ((key, value) in environment) {
@@ -141,7 +145,8 @@ object ShellExecutor {
 
         try {
             withTimeout(timeout) {
-                val process = processBuilder.start()
+                // [T-shell-stall-yes-head] SIGPIPE unblocked in the child; see SpawnSignalMask.
+                val process = SpawnSignalMask.start(processBuilder)
                 currentProcess = process
 
                 try {

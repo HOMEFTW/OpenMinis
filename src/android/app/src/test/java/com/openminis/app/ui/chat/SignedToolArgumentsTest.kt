@@ -9,6 +9,36 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SignedToolArgumentsTest {
+    @Test fun nestedQuestionStringsAreCoercedOnlyForExecutionWithoutChangingSignedHistory() {
+        val questionSchema = AgentSchemaNode.Obj(properties = listOf(
+            "question" to AgentSchemaNode.Str(),
+            "options" to AgentSchemaNode.Arr(items = AgentSchemaNode.Obj(properties = listOf(
+                "label" to AgentSchemaNode.Str()))),
+        ))
+        val definition = AgentToolDefinition("user_ask", "Ask", mapOf(
+            "questions" to AgentToolParam("array", "Questions", schema = AgentSchemaNode.Arr(items = questionSchema))),
+            required = listOf("questions"))
+        val args = JSONObject().put("questions", JSONArray().put(JSONObject().put("question", "Choose a route")
+            .put("options", """[{"label":"A"},{"label":"B"}]""")).toString())
+        val original = args.toString()
+        val blocks = JSONArray().put(JSONObject().put("type", "thinking").put("thinking", "thought").put("signature", "opaque=="))
+            .put(JSONObject().put("type", "tool_use").put("id", "ask_1").put("name", "user_ask").put("input", args))
+        val anthropic = AnthropicReplay.capture("model", blocks)
+        val deepseek = DeepSeekMessages.replay("model", blocks)
+        val prepared = prepareToolArguments("user_ask", args, null, listOf(definition), preserveExactInput = true)
+        val execution = definition.coerceNestedJsonStrings(args)
+        assertEquals(original, prepared.json)
+        assertEquals(original, args.toString())
+        assertTrue(args.get("questions") is String)
+        assertEquals("A", execution.getJSONArray("questions").getJSONObject(0)
+            .getJSONArray("options").getJSONObject(0).getString("label"))
+        val history = LLMMessage(LLMMessage.Role.ASSISTANT, "", contentParts = listOf(
+            AgentContentPart.ToolUse("ask_1", "user_ask", args)), reasoningContent = "thought",
+            anthropicReplay = anthropic, deepSeekReplay = deepseek)
+        assertNotNull(AnthropicReplay.read(history, "model"))
+        assertNotNull(DeepSeekMessages.readReplay(history, "model"))
+    }
+
     @Test fun signedTypoIsRejectedByPreflightWithoutInvalidatingReplay() {
         val tools = listOf(AgentToolDefinition("shell_execute", "Shell", mapOf(
             "command" to AgentToolParam("string", "command")), listOf("command")))

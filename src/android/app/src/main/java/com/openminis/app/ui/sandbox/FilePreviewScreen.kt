@@ -111,6 +111,7 @@ private const val MAX_TEXT_PREVIEW_BYTES = 512_000 // 500 KB
 fun FilePreviewScreen(
     item: FileItem,
     onBack: () -> Unit,
+    sessionId: String? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -125,7 +126,28 @@ fun FilePreviewScreen(
     key(current.file.absolutePath) {
         FilePreviewContent(current, goBack) { link ->
             scope.launch {
-                when (val target = withContext(Dispatchers.IO) { resolvePreviewLink(current.file, link) }) {
+                val previewLink = MarkdownPreviewLinks.target(link, current.file)
+                if (previewLink == MarkdownPreviewLinkTarget.Ignore) return@launch
+                var resolved = withContext(Dispatchers.IO) { resolvePreviewLink(current.file, link) }
+                if (previewLink is MarkdownPreviewLinkTarget.Chat && (
+                        previewLink.url.startsWith("minis:", ignoreCase = true) ||
+                            (previewLink.url.startsWith("/") && !previewLink.url.startsWith("//"))
+                        )) {
+                    val action = withContext(Dispatchers.IO) {
+                        val linkSessionId = sessionId ?: MarkdownPreviewLinks.sessionIdForFile(current.file, context.filesDir)
+                        com.openminis.app.ui.chat.ChatLinkResolver.resolve(previewLink.url, linkSessionId, context)
+                    }
+                    if (action is com.openminis.app.ui.chat.ChatLinkAction.DeepLink) {
+                        com.openminis.app.ui.chat.ChatLinkResolver.dispatchDeepLink(context, previewLink.url)
+                        return@launch
+                    }
+                    resolved = when (action) {
+                        is com.openminis.app.ui.chat.ChatLinkAction.SandboxFile -> PreviewLinkTarget.LocalFile(action.item.file)
+                        // Host absolute paths remain valid for files opened from storage.
+                        else -> if (resolved is PreviewLinkTarget.LocalFile) resolved else PreviewLinkTarget.Unsupported
+                    }
+                }
+                when (val target = resolved) {
                     is PreviewLinkTarget.Web -> webUrl = target.url
                     is PreviewLinkTarget.LocalFile -> {
                         val linked = withContext(Dispatchers.IO) {
@@ -541,7 +563,11 @@ private fun HtmlPreview(item: FileItem) {
                 // viewport units.
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
-                webViewClient = object : WebViewClient() {
+        webViewClient = object : WebViewClient() {
+            override fun onReceivedHttpAuthRequest(view: android.webkit.WebView?, handler: android.webkit.HttpAuthHandler?, host: String?, realm: String?) {
+                if (handler != null && com.openminis.app.network.WebViewNetworkProxy.answerAuth(handler, host, realm, view?.url)) return
+                super.onReceivedHttpAuthRequest(view, handler, host, realm)
+            }
                     override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                         rendererFailed = true
                         view.disposeSafely()
@@ -1304,6 +1330,10 @@ private fun printFile(context: Context, item: FileItem) {
         // Keep a reference alive until the print job is dispatched.
         var holder: WebView? = webView
         webView.webViewClient = object : WebViewClient() {
+            override fun onReceivedHttpAuthRequest(view: WebView?, handler: android.webkit.HttpAuthHandler?, host: String?, realm: String?) {
+                if (handler != null && com.openminis.app.network.WebViewNetworkProxy.answerAuth(handler, host, realm, view?.url)) return
+                super.onReceivedHttpAuthRequest(view, handler, host, realm)
+            }
             override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                 holder = null
                 view.disposeSafely()

@@ -278,7 +278,10 @@ fun ScheduledTaskEditScreen(
             isNew = isNew,
             canRunNow = canRunNow,
             canSave = canSave,
-            onRunNow = { vm.runNow(currentTask()) },
+            onRunNow = {
+                val preview = currentTask()
+                vm.runNow(if (taskId == null) preview.copy(enabled = false) else preview)
+            },
             onSave = {
                 scope.launch { vm.upsert(currentTask(), isNew = isNew); onBack() }
             },

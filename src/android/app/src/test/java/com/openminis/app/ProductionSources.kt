@@ -41,7 +41,7 @@ object ProductionSources {
         val root = mainRoot() ?: error("production source root not found from ${File("").absolutePath}")
         val f = File(root, relPath)
         require(f.isFile) { "production source missing: ${f.absolutePath}" }
-        return f.readText()
+        return f.readText().replace("\r\n", "\n")
     }
 
     /** Every `.kt` file under `src/main`, for whole-tree symbol scans. */

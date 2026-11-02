@@ -16,6 +16,14 @@ internal class SessionStorageMaintenanceGate {
     private val deleting = mutableSetOf<String>()
     private val changed = MutableStateFlow(0L)
     private val maintenance = Mutex()
+    private var treeClaim: Maintenance.TreeClaim? = null
+
+    /** VM entry wins over a provisional sweep; committed deletion is awaited by suspend reads. */
+    fun reserveForViewModel(sessionId: String): Closeable = synchronized(monitor) {
+        validate(setOf(sessionId))
+        treeClaim?.yieldToViewModel(sessionId)
+        reserveLocked(setOf(sessionId))
+    }
 
     /** Never waits for file IO; a synchronous caller can retry from a coroutine. */
     fun reserve(sessionIds: Set<String>): Closeable = synchronized(monitor) {
@@ -107,9 +115,48 @@ internal class SessionStorageMaintenanceGate {
             }
         }
 
+        /** Claim a whole tree and both file layouts atomically, before fresh owner checks. */
+        fun claimTreeIfUnreserved(sessionIds: Set<String>): TreeClaim? = synchronized(monitor) {
+            check(open)
+            validate(sessionIds)
+            if (sessionIds.isEmpty() || sessionIds.any { it.startsWith("__new__") }) return@synchronized null
+            val ids = sessionIds + SessionStorageReferences.ALL_WORKSPACES + SessionStorageReferences.ALL_MEDIA
+            if (ids.any { it in reservations || it in deleting }) return@synchronized null
+            deleting += ids
+            claims += ids
+            TreeClaim(sessionIds.toSet(), ids).also { treeClaim = it }
+        }
+
+        inner class TreeClaim internal constructor(private val sessions: Set<String>, private val ids: Set<String>) : Closeable {
+            private var closed = false
+            private var committing = false
+
+            /** Linearization point: later VM readers retry after rows and files finish. */
+            fun beginCommit(expectedIds: List<String>): Boolean = synchronized(monitor) {
+                check(expectedIds.toSet() == sessions)
+                if (closed) return@synchronized false
+                committing = true
+                true
+            }
+
+            internal fun yieldToViewModel(sessionId: String) {
+                if (!committing && sessionId in sessions) close()
+            }
+
+            override fun close() = synchronized(monitor) {
+                if (!closed) {
+                    closed = true
+                    ids.forEach { if (claims.remove(it)) deleting.remove(it) }
+                    if (treeClaim === this) treeClaim = null
+                    changed.value++
+                }
+            }
+        }
+
         override fun close() = synchronized(monitor) {
             if (open) {
                 open = false
+                treeClaim?.close()
                 deleting.removeAll(claims)
                 claims.clear()
                 changed.value++

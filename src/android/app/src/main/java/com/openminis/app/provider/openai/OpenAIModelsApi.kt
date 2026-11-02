@@ -7,6 +7,8 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.ProviderModelsCache
 import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -89,6 +91,8 @@ object OpenAIModelsApi {
         "-instruct", "-realtime", "-audio", "-transcribe", "-tts", "-embedding"
     )
 
+    data class FetchResult(val models: List<LLMModel>, val error: String?)
+
     suspend fun fetchModels(
         apiKey: String,
         baseURL: String? = null,
@@ -97,15 +101,26 @@ object OpenAIModelsApi {
         // [T-provider-custom-user-agent] Per-provider UA override; null/blank
         // keeps the default UA. Threaded from ProviderRepository.refreshModels.
         customUserAgent: String? = null,
-    ): List<LLMModel> = withContext(Dispatchers.IO) {
+        netTag: String? = null,
+    ): List<LLMModel> = fetchModelsDetailed(apiKey, baseURL, context, forceRefresh, customUserAgent, netTag).models
+
+    suspend fun fetchModelsDetailed(
+        apiKey: String,
+        baseURL: String? = null,
+        context: Context? = null,
+        forceRefresh: Boolean = false,
+        customUserAgent: String? = null,
+        netTag: String? = null,
+    ): FetchResult = withContext(Dispatchers.IO) {
         val isCustomBase = baseURL != null && !isOfficialOpenAI(baseURL)
         // For third-party endpoints (vLLM, Ollama, etc.), return empty on failure
         // so the caller preserves existing models instead of replacing with built-in GPT list.
         val fallback = if (isCustomBase) emptyList() else LLMModel.allOpenAI
+        fun fail(why: String) = FetchResult(fallback, why)
 
         val cacheKey = (baseURL ?: "") + "|" + apiKey
         if (context != null && !forceRefresh) {
-            cache.load(context, cacheKey)?.let { return@withContext it }
+            cache.load(context, cacheKey)?.let { return@withContext FetchResult(it, null) }
         }
 
         val url = buildURL(baseURL)
@@ -116,24 +131,28 @@ object OpenAIModelsApi {
             .applyUserAgentOverride(customUserAgent)
             .build()
 
-        val endpointClient = com.openminis.app.network.EndpointCertificates.configure(client.newBuilder(), url).build()
-        val response = endpointClient.newCall(request).execute()
-        val body = response.body?.string() ?: return@withContext fallback
+        val endpointClient = com.openminis.app.network.NetworkHttp.client(
+            netTag, com.openminis.app.network.EndpointCertificates.client(client, url),
+        )
+        val (status, body) = endpointClient.newCall(request).execute().use { it.code to it.body?.string().orEmpty() }
 
-        if (!response.isSuccessful) {
-            if (context != null && (response.code == 401 || response.code == 403)) {
+        if (status !in 200..299) {
+            if (context != null && (status == 401 || status == 403)) {
                 cache.invalidate(context, cacheKey)
             }
-            return@withContext fallback
+            return@withContext fail("HTTP $status: ${errorSnippet(body)}")
         }
 
+        val data = modelArray(body)
+            ?: return@withContext fail("the response is not a model list: ${errorSnippet(body)}")
         val models = try {
-            val json = JSONObject(body)
-            val data = json.optJSONArray("data") ?: return@withContext fallback
             val parsed = mutableListOf<LLMModel>()
             for (i in 0 until data.length()) {
-                val obj = data.getJSONObject(i)
-                val id = obj.getString("id")
+                val raw = data.opt(i)
+                val obj = raw as? JSONObject ?: JSONObject().put("id", raw?.toString().orEmpty())
+                val id = listOf("id", "model", "model_id", "name")
+                    .firstNotNullOfOrNull { key -> obj.safeOptString(key, "").trim().takeIf { it.isNotEmpty() } }
+                    ?: continue
 
                 // Only filter by chat prefixes for official OpenAI endpoints;
                 // custom endpoints (vLLM, Ollama) may serve any model ID.
@@ -179,20 +198,42 @@ object OpenAIModelsApi {
                         inputModalities = inputModalities ?: defaults.inputModalities,
                         outputModalities = outputModalities ?: defaults.outputModalities,
                         supportsReasoning = if (knownReasoning) true else defaults.supportsReasoning,
+                        limitsReportedByEndpoint = if (limits.context != null || limits.output != null) true else null,
                         contextWindow = limits.context ?: defaults.contextWindow,
                         maxOutputTokens = limits.output ?: defaults.maxOutputTokens,
                         supportedServiceTiers = OpenAISpeedTiers.read(obj),
                     )
                 )
             }
-            if (parsed.isEmpty()) return@withContext fallback
+            if (parsed.isEmpty()) return@withContext fail("the provider listed no models")
             ModelsDevApi.enrichModels(parsed, preserveProviderLimits = isCustomBase)
-        } catch (_: Exception) {
-            return@withContext fallback
+        } catch (error: Exception) {
+            return@withContext fail("could not read the model list: ${error.message ?: error.javaClass.simpleName}")
         }
 
         if (context != null) cache.save(context, cacheKey, models)
-        models
+        FetchResult(models, null)
+    }
+
+    internal fun modelArray(body: String): JSONArray? {
+        val text = body.trim()
+        if (text.startsWith("[")) return runCatching { JSONArray(text) }.getOrNull()
+        val json = runCatching { JSONObject(text) }.getOrNull() ?: return null
+        val keys = listOf("data", "models", "items", "results", "result")
+        for (key in keys) json.optJSONArray(key)?.let { return it }
+        for (key in keys) {
+            val inner = json.optJSONObject(key) ?: continue
+            for (nested in keys) inner.optJSONArray(nested)?.let { return it }
+        }
+        return null
+    }
+
+    internal fun errorSnippet(body: String): String {
+        val json = runCatching { JSONObject(body.trim()) }.getOrNull()
+        val message = json?.optJSONObject("error")?.safeOptString("message", "")?.takeIf { it.isNotBlank() }
+            ?: json?.safeOptString("message", "")?.takeIf { it.isNotBlank() }
+            ?: json?.safeOptString("error", "")?.takeIf { it.isNotBlank() && !it.startsWith("{") }
+        return (message ?: body).replace(Regex("\\s+"), " ").trim().take(200).ifEmpty { "(empty body)" }
     }
 
     private fun JSONArray.toStringList(): List<String> {

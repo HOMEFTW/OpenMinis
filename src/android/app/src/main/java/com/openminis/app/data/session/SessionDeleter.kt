@@ -8,6 +8,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.service.SessionBadgeStore
 import com.openminis.app.ui.chat.ChatViewModelStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 /**
@@ -45,8 +46,33 @@ object SessionDeleter {
         rootId: String,
         reason: String,
     ): Report = withContext(Dispatchers.IO) {
-        val storage = SessionStorage(context.applicationContext.filesDir)
         val ids = SessionTree.subtreeDeepestFirst(rootId) { repo.dao.childSessionIds(it) }
+        deleteFixedTree(context, repo, ids, reason, rowsDeleted = false)
+    }
+
+    /** The caller holds its claim until this fixed tree's files have been removed. */
+    internal suspend fun deleteClaimedOrphanTree(
+        context: Context,
+        repo: ChatRepository,
+        rootId: String,
+        ids: List<String>,
+        olderThanMs: Long,
+        claim: com.openminis.app.data.storage.SessionStorageMaintenanceGate.Maintenance.TreeClaim,
+    ): Report? = withContext(Dispatchers.IO) {
+        val fixedIds = ids.toList()
+        if (!claim.beginCommit(fixedIds)) return@withContext null
+        if (!repo.deleteOrphanTreeIfUnchanged(rootId, fixedIds, olderThanMs)) return@withContext null
+        withContext(NonCancellable) { deleteFixedTree(context, repo, fixedIds, "orphan-sweep", rowsDeleted = true) }
+    }
+
+    private suspend fun deleteFixedTree(
+        context: Context,
+        repo: ChatRepository,
+        ids: List<String>,
+        reason: String,
+        rowsDeleted: Boolean,
+    ): Report {
+        val storage = SessionStorage(context.applicationContext.filesDir)
         var freed = 0L
         var jobs = 0
         for (id in ids) {
@@ -56,7 +82,7 @@ object SessionDeleter {
             //    completion must not post an <agent_callback> into a session
             //    that is being deleted — the headless submit would re-create
             //    rows for it (a resurrected parent).
-            withContext(Dispatchers.Main) {
+            if (!rowsDeleted) withContext(Dispatchers.Main) {
             AgentJobRegistry.jobForSession(id)?.let {
                 if (it.isActive) {
                     AgentJobRegistry.setThen(it.id, com.openminis.app.agent.jobs.AgentJobThen.None)
@@ -78,7 +104,7 @@ object SessionDeleter {
             }
             // 3. DB rows. deleteSessionOnly is the non-cascading primitive; the
             //    cascade is this loop, which already walked the subtree.
-            repo.deleteSessionOnly(id)
+            if (!rowsDeleted) repo.deleteSessionOnly(id)
             (context.applicationContext as? com.openminis.app.MinisApp)?.chatWallpaperRepository?.removeSession(id)
             com.openminis.app.sandbox.SessionWorkspaceRegistry.forget(id)
             // 4. Files, then badges.
@@ -95,10 +121,10 @@ object SessionDeleter {
         }
         AppLogger.info(
             TAG,
-            "deleteTree root=${rootId.take(8)} reason=$reason sessions=${ids.size} " +
+            "deleteTree root=${ids.lastOrNull()?.take(8)} reason=$reason sessions=${ids.size} " +
                 "jobsCancelled=$jobs freed=${freed}B",
         )
-        Report(ids, freed, jobs)
+        return Report(ids, freed, jobs)
     }
 
     /**

@@ -45,23 +45,49 @@ object BackupProviderCredentials {
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
             }.getOrElse { invalid.add(field); null }
         }
-        fun changed(value: String?, old: String?): String? = value?.takeIf { it != old }
         val key = decode("apiKey", backup.apiKey)
         val replaceOAuth = current.manualOAuthToken.isNullOrEmpty() && current.oauthToken.isNullOrEmpty() ||
             overwriteExisting && current.oauthNeedsReauth
-        val manual = if (replaceOAuth) decode("manualOAuthToken", backup.manualOAuthToken) else null
+        // A pasted bearer is an API-key credential, independent of a refreshable login.
+        val manual = decode("manualOAuthToken", backup.manualOAuthToken)
         val token = if (replaceOAuth) decode("oauthToken", backup.oauthToken)?.let { json ->
             if (runCatching { Json.parseToJsonElement(json) is JsonObject }.getOrDefault(false)) json
             else { invalid.add("oauthToken"); null }
         } else null
-        val email = if (replaceOAuth) decode("oauthEmail", backup.oauthEmail) else null
-        val project = if (replaceOAuth) decode("oauthGcpProject", backup.oauthGcpProject) else null
+        // Keep the fork's bundle protection and strict UTF-8/JSON validation:
+        // a corrupt token must not pair an old login with another account's metadata.
+        val importLogin = replaceOAuth && (backup.oauthToken == null || token != null)
+        val email = if (importLogin) decode("oauthEmail", backup.oauthEmail) else null
+        val project = if (importLogin) decode("oauthGcpProject", backup.oauthGcpProject) else null
+        val local = linkedMapOf(
+            BackupCredentialRestore.Slot.API_KEY to current.apiKey,
+            BackupCredentialRestore.Slot.MANUAL_OAUTH_TOKEN to current.manualOAuthToken,
+            BackupCredentialRestore.Slot.OAUTH_TOKEN to current.oauthToken,
+            BackupCredentialRestore.Slot.OAUTH_EMAIL to current.oauthEmail,
+            BackupCredentialRestore.Slot.OAUTH_GCP_PROJECT to current.oauthGcpProject,
+        )
+        val decoded = linkedMapOf<BackupCredentialRestore.Slot, String>()
+        fun add(slot: BackupCredentialRestore.Slot, value: String?) { if (value != null) decoded[slot] = value }
+        if (overwriteExisting || current.apiKey.isNullOrEmpty()) add(BackupCredentialRestore.Slot.API_KEY, key)
+        if (overwriteExisting || current.manualOAuthToken.isNullOrEmpty()) add(BackupCredentialRestore.Slot.MANUAL_OAUTH_TOKEN, manual)
+        if (importLogin) {
+            add(BackupCredentialRestore.Slot.OAUTH_TOKEN, token)
+            add(BackupCredentialRestore.Slot.OAUTH_EMAIL, email)
+            add(BackupCredentialRestore.Slot.OAUTH_GCP_PROJECT, project)
+        }
+        val writes = linkedMapOf<BackupCredentialRestore.Slot, String>()
+        BackupCredentialRestore.restore(decoded, object : BackupCredentialRestore.Store {
+            override fun supports(slot: BackupCredentialRestore.Slot) = true
+            override fun read(slot: BackupCredentialRestore.Slot) = local[slot]
+            override fun write(slot: BackupCredentialRestore.Slot, value: String) { local[slot] = value; writes[slot] = value }
+            override fun oauthNeedsReauth() = current.oauthNeedsReauth
+        })
         return Plan(
-            apiKey = if (overwriteExisting || current.apiKey.isNullOrEmpty()) changed(key, current.apiKey) else null,
-            manualOAuthToken = changed(manual, current.manualOAuthToken),
-            oauthToken = changed(token, current.oauthToken),
-            oauthEmail = changed(email, current.oauthEmail),
-            oauthGcpProject = changed(project, current.oauthGcpProject),
+            apiKey = writes[BackupCredentialRestore.Slot.API_KEY],
+            manualOAuthToken = writes[BackupCredentialRestore.Slot.MANUAL_OAUTH_TOKEN],
+            oauthToken = writes[BackupCredentialRestore.Slot.OAUTH_TOKEN],
+            oauthEmail = writes[BackupCredentialRestore.Slot.OAUTH_EMAIL],
+            oauthGcpProject = writes[BackupCredentialRestore.Slot.OAUTH_GCP_PROJECT],
             invalidFields = invalid,
         )
     }

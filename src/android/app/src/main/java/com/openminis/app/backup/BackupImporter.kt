@@ -78,6 +78,8 @@ class BackupImporter(
         var credentialsRestored: Int = 0,
         var credentialsKept: Int = 0,
         var failed: String? = null,
+        val warnings: MutableList<String> = mutableListOf(),
+        var declaredAccounted: Int? = null,
     )
 
     /**
@@ -236,6 +238,7 @@ class BackupImporter(
                 }
                 categoryReport?.let {
                     report.categories.add(it)
+                    report.warnings += it.warnings
                     // [T-android-restore-logging] Per-category outcome, on
                     // disk. The summary below only reports totals, so a
                     // category that wrote 500 of 2350 records read exactly like
@@ -257,7 +260,7 @@ class BackupImporter(
                     // A category that wrote materially less than the manifest
                     // promised is the signal that matters, and it is easy to
                     // miss inside a line of counters.
-                    val wrote = it.imported + it.updated
+                    val wrote = it.declaredAccounted ?: (it.imported + it.updated)
                     if (total != null && wrote < total) {
                         AppLogger.warning(
                             TAG,
@@ -701,6 +704,7 @@ class BackupImporter(
         } catch (e: Exception) {
             report.unreadable += 1
             AppLogger.error(TAG, "[Restore] provider_config.json unreadable: ${e.message}")
+            report.warnings += providerConfigWarnings(null, e)
             return report
         }
         val config = parsed.config
@@ -708,6 +712,8 @@ class BackupImporter(
         // Counted individually so the report says "1 of 8 unreadable" rather
         // than failing the whole category.
         report.unreadable += parsed.droppedInstances
+        report.warnings += providerConfigWarnings(parsed, null)
+        report.declaredAccounted = config.instances.size
         if (parsed.droppedInstances > 0) {
             AppLogger.warning(
                 TAG,
@@ -772,15 +778,24 @@ class BackupImporter(
 
         // Credentials (secrets.json lives at the work root, already decrypted).
         val secrets = readSecrets(root)
+        val credentialsWritten = mutableSetOf<String>()
         if (secrets != null) {
             var restored = 0
             var kept = 0
             for (s in secrets.providers) {
-                if (repo.restoreBackupProviderSecret(s, overwriteExisting = true)) restored++ else kept++
+                if (repo.restoreBackupProviderSecret(s, overwriteExisting = true)) {
+                    restored++
+                    credentialsWritten += s.instanceId
+                } else kept++
             }
             report.credentialsRestored = restored
             report.credentialsKept = kept
         }
+        val counts = BackupProviderMerge.counts(merged, config.instances.map { it.id }, credentialsWritten)
+        // Retain the fork's separately counted thinking rules and subagents.
+        report.imported += counts.imported - merged.imported
+        report.updated += counts.updated - merged.updated
+        report.skipped += counts.skipped - merged.skipped
         return report
     }
 
@@ -893,7 +908,7 @@ class BackupImporter(
                 report.skipped += 1
                 continue
             }
-            if (repo.add(meta.key, restored, meta.note)) report.imported += 1
+            if (repo.add(meta.key, restored, meta.note, enabled = meta.enabled)) report.imported += 1
             else report.skipped += 1
         }
         return report
@@ -1036,7 +1051,11 @@ class BackupImporter(
         internal data class LenientProviderConfig(
             val config: com.openminis.app.data.model.ProviderConfig,
             val droppedInstances: Int,
+            val dropReasons: List<String> = emptyList(),
         )
+
+        internal fun providerConfigWarnings(parsed: LenientProviderConfig?, failure: Throwable?): List<String> =
+            BackupProviderWire.warnings(parsed?.let { BackupProviderWire.Decoded(it.config, it.droppedInstances, it.dropReasons) }, failure)
 
         /**
          * [T-android-restore-provider-type-tolerance] Decode provider_config.json
@@ -1065,67 +1084,8 @@ class BackupImporter(
          * from the same object with the instances array replaced, so a bad instance
          * costs only that instance.
          */
-        internal fun parseProviderConfigLeniently(text: String): LenientProviderConfig {
-            val root = BackupFormat.json.parseToJsonElement(text).jsonObject
-            val rawInstances = root["instances"] as? kotlinx.serialization.json.JsonArray
-
-            // No instances array at all — nothing to be tolerant about; let the
-            // ordinary decode handle (or reject) the document.
-            if (rawInstances == null) {
-                return LenientProviderConfig(
-                    BackupFormat.json.decodeFromJsonElement(
-                        com.openminis.app.data.model.ProviderConfig.serializer(), root,
-                    ),
-                    droppedInstances = 0,
-                )
-            }
-
-            val knownTypes = com.openminis.app.data.model.ProviderType.entries.map { it.name }.toSet()
-            val kept = mutableListOf<kotlinx.serialization.json.JsonElement>()
-            var dropped = 0
-            for (element in rawInstances) {
-                val obj = element as? JsonObject ?: run { dropped++; null } ?: continue
-                val rawType = (obj["providerType"] as? kotlinx.serialization.json.JsonPrimitive)
-                    ?.contentOrNull
-                val normalized = if (rawType != null && rawType !in knownTypes) {
-                    AppLogger.warning(
-                        TAG,
-                        "[Restore] provider instance ${obj["id"]?.jsonPrimitive?.contentOrNull}: " +
-                            "unknown providerType '$rawType' — importing as unsupported",
-                    )
-                    JsonObject(
-                        obj + ("providerType" to kotlinx.serialization.json.JsonPrimitive(
-                            com.openminis.app.data.model.ProviderType.unsupported.name,
-                        )),
-                    )
-                } else obj
-                // Prove it decodes before keeping it, so a malformed sibling is
-                // rejected here rather than at the whole-document decode below.
-                val decodes = runCatching {
-                    BackupFormat.json.decodeFromJsonElement(
-                        com.openminis.app.data.model.ProviderInstance.serializer(), normalized,
-                    )
-                }
-                if (decodes.isSuccess) {
-                    kept.add(normalized)
-                } else {
-                    dropped++
-                    AppLogger.warning(
-                        TAG,
-                        "[Restore] provider instance dropped (undecodable): " +
-                            "${decodes.exceptionOrNull()?.message}",
-                    )
-                }
-            }
-
-            val patched = JsonObject(root + ("instances" to kotlinx.serialization.json.JsonArray(kept)))
-            return LenientProviderConfig(
-                BackupFormat.json.decodeFromJsonElement(
-                    com.openminis.app.data.model.ProviderConfig.serializer(), patched,
-                ),
-                droppedInstances = dropped,
-            )
-        }
+        internal fun parseProviderConfigLeniently(text: String): LenientProviderConfig =
+            BackupProviderWire.decode(text).let { LenientProviderConfig(it.config, it.droppedInstances, it.dropReasons) }
 
         /** Shared with the exporter: the two must never run at once. */
         private val activityLock = backupActivityLock

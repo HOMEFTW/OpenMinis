@@ -56,6 +56,7 @@ object ScheduledAgentRunner {
         deliveryQueue?.let { return it }
         val prefs = context.getSharedPreferences("minis_scheduled_deliveries", Context.MODE_PRIVATE)
         val queue = ScheduledDeliveryQueue(prefs.getString("pending", null), onChanged = { pending ->
+            ScheduledSessionCoordinator.setQueuedDeliveries(pending)
             SessionActivityTracker.setPendingWork("scheduled-queue", pending.map { it.executionId }.toSet())
         }) { json ->
             check(prefs.edit().putString("pending", json).commit()) { "Scheduled delivery persistence failed" }
@@ -102,13 +103,19 @@ object ScheduledAgentRunner {
             // and can be retried after restart instead of silently disappearing.
             ScheduledTaskManager(app).markFired(
                 taskId = delivery.task.id, sessionId = delivery.sessionId,
-                resultPreview = "Cancelled: superseded before delivery", ok = false,
+                resultPreview = "Cancelled: stopped or superseded before delivery", ok = false,
                 executionId = delivery.executionId, firedAt = delivery.firedAt,
             )
             queue.finish(delivery.executionId)
             return
         }
-        if (app.chatRepository.getSession(delivery.sessionId) == null || ScheduledTaskManager(app).get(delivery.task.id) == null) {
+        val currentTask = ScheduledTaskManager(app).get(delivery.task.id)
+        if (currentTask != null && currentTask.stopGeneration != delivery.task.stopGeneration) {
+            recordFailure(app, delivery.task, delivery.executionId, delivery.sessionId, "Cancelled: scheduled task stopped before delivery", delivery.firedAt)
+            queue.finish(delivery.executionId)
+            return
+        }
+        if (app.chatRepository.getSession(delivery.sessionId) == null || currentTask == null) {
             recordFailure(app, delivery.task, delivery.executionId, delivery.sessionId,
                 "Target chat or scheduled task was deleted", delivery.firedAt)
             queue.finish(delivery.executionId)
@@ -154,6 +161,45 @@ object ScheduledAgentRunner {
         waitForCompletion: Boolean = true,
         executionId: String = "scheduled_${UUID.randomUUID()}",
         scheduledFire: Boolean = false,
+    ): String? {
+        if (!ScheduledSessionCoordinator.beginHandoff(executionId, task, manual = !scheduledFire)) return null
+        try {
+            var admitted = task
+            var consumesSchedule = scheduledFire
+            if (!scheduledFire && (context.applicationContext as? MinisApp)?.subsystemsReady() == true) {
+                val manager = ScheduledTaskManager(context)
+                val now = System.currentTimeMillis()
+                val current = manager.get(task.id) ?: return null
+                if (!ScheduledTaskManager.samePendingRun(current, task, now)) return null
+                if (current.enabled) {
+                    val claimed = manager.claimRunNow(task.id, now, expected = task,
+                        isRunning = { ScheduledSessionCoordinator.isTaskRunning(it, executionId) }) ?: return null
+                    // The editor may preview changed prompt content; bookkeeping
+                    // still comes from the atomic persisted slot claim.
+                    admitted = task.copy(enabled = claimed.enabled, anchorMs = claimed.anchorMs,
+                        triggeredCount = claimed.triggeredCount, runNowSlotMs = claimed.runNowSlotMs,
+                        creatorSessionId = claimed.creatorSessionId)
+                    consumesSchedule = true
+                }
+                // A disabled task is the fork's explicit off-schedule/editor
+                // preview. It has no pending slot or finite count to consume.
+            }
+            return runAdmitted(context, admitted, waitForCompletion, executionId, consumesSchedule)
+        } finally {
+            ScheduledSessionCoordinator.endHandoff(executionId)
+        }
+    }
+
+    internal fun cancelQueuedByCreators(context: Context, sessionIds: Set<String>) {
+        deliveryQueue?.cancelCreatedBy(sessionIds)
+    }
+
+    private suspend fun runAdmitted(
+        context: Context,
+        task: ScheduledTask,
+        waitForCompletion: Boolean,
+        executionId: String,
+        scheduledFire: Boolean,
     ): String? {
         val firedAt = System.currentTimeMillis()
         // [T-android-scheduled-lateinit-crash-156] `as? MinisApp` only rules out
@@ -224,6 +270,9 @@ object ScheduledAgentRunner {
 
             val queue = queue(app)
             queue.enqueue(ScheduledDelivery(task, sessionId, executionId, firedAt, scheduledFire))
+            if (ScheduledSessionCoordinator.isCancelled(executionId)) {
+                queue.cancelCreatedBy(setOfNotNull(task.creatorSessionId))
+            }
             if (waitForCompletion) queue.deliveries.first { pending -> pending.none { it.executionId == executionId } }
             return sessionId
         } finally {

@@ -30,6 +30,7 @@ internal fun ChatWallpaperLayer(wallpaper: ChatWallpaper?, transparency: Int, mo
                 ChatWallpaper.DEEPSEEK -> R.drawable.chat_wallpaper_deepseek to Color(0xFFFEFBF5)
                 ChatWallpaper.GPT -> R.drawable.chat_wallpaper_gpt to Color(0xFFFEFBF8)
                 ChatWallpaper.CLAUDE -> R.drawable.chat_wallpaper_claude to Color(0xFFFDFAF3)
+                ChatWallpaper.GROK -> R.drawable.chat_wallpaper_grok to Color(0xFFFEFAF0)
             }
             // Match the artwork's flat canvas so Fit preserves the full character on tablets
             // and in landscape without showing a differently colored letterbox.

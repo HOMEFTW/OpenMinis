@@ -32,6 +32,9 @@ import java.util.WeakHashMap
  * mirroring the iOS finding in commit b830360.
  */
 object ImageBudget {
+    // Graphics seam for image readers and bounds-only token estimates.
+    @Volatile internal var codec: ImageCodec = AndroidImageCodec
+
     /** Single image bytes ceiling before re-encode kicks in. */
     const val MAX_PER_IMAGE_BYTES = 5L * 1024 * 1024
 
@@ -549,5 +552,62 @@ object ImageBudget {
         }
         // Mirrors uploads mount (see ChatViewModel.prepareUserAttachments).
         return "/var/minis/attachments/spillover/$sha.$ext"
+    }
+}
+
+internal interface ImageCodec {
+    /** Bounds-only decode: (outWidth, outHeight) as BitmapFactory reports them. */
+    fun bounds(input: ByteArray): Pair<Int, Int>
+
+    /** Full decode at [inSampleSize]; null when it cannot be decoded. */
+    fun decode(input: ByteArray, inSampleSize: Int): Any?
+
+    /** Full decode with default options; null when it cannot be decoded. */
+    fun decode(input: ByteArray): Any?
+
+    /** Full decode of a file with default options; null when it cannot be decoded. */
+    fun decodeFile(path: String): Any?
+
+    fun width(bitmap: Any): Int
+
+    fun height(bitmap: Any): Int
+
+    /** Filtered scale to exactly [width]×[height]; may return [bitmap] itself. */
+    fun scale(bitmap: Any, width: Int, height: Int): Any
+
+    /** Encode as PNG when [png], else JPEG at [quality], into [out]. */
+    fun compress(bitmap: Any, png: Boolean, quality: Int, out: java.io.OutputStream)
+
+    fun recycle(bitmap: Any)
+}
+
+/** [T-image-real-tests] Production [ImageCodec]: the BitmapFactory / Bitmap calls, unchanged. */
+internal object AndroidImageCodec : ImageCodec {
+    override fun bounds(input: ByteArray): Pair<Int, Int> {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(input, 0, input.size, opts)
+        return Pair(opts.outWidth, opts.outHeight)
+    }
+
+    override fun decode(input: ByteArray, inSampleSize: Int): Any? =
+        BitmapFactory.decodeByteArray(input, 0, input.size, BitmapFactory.Options().apply { this.inSampleSize = inSampleSize })
+
+    override fun decode(input: ByteArray): Any? = BitmapFactory.decodeByteArray(input, 0, input.size)
+
+    override fun decodeFile(path: String): Any? = BitmapFactory.decodeFile(path)
+
+    override fun width(bitmap: Any): Int = (bitmap as Bitmap).width
+
+    override fun height(bitmap: Any): Int = (bitmap as Bitmap).height
+
+    override fun scale(bitmap: Any, width: Int, height: Int): Any =
+        Bitmap.createScaledBitmap(bitmap as Bitmap, width, height, true)
+
+    override fun compress(bitmap: Any, png: Boolean, quality: Int, out: java.io.OutputStream) {
+        (bitmap as Bitmap).compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, quality, out)
+    }
+
+    override fun recycle(bitmap: Any) {
+        (bitmap as Bitmap).recycle()
     }
 }

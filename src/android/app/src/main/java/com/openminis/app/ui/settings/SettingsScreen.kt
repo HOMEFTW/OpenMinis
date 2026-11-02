@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.FrontHand
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
@@ -78,6 +79,10 @@ fun SettingsScreen(
     onProvidersClick: () -> Unit,
     onModelGroupsClick: () -> Unit,
     onRootfsClick: () -> Unit = {},
+    onNetworkClick: () -> Unit = {},
+    onTailscaleClick: () -> Unit = {},
+    onProxiesClick: () -> Unit = {},
+    onContainerDnsClick: () -> Unit = {},
     onBackupClick: () -> Unit = {},
     onEnvVarsClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
@@ -111,6 +116,7 @@ fun SettingsScreen(
     onContextWindowClick: () -> Unit = {},
     onAgentsClick: () -> Unit = {},
     onAgentToolsClick: () -> Unit = {},
+    onForgeClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val savedContextWindow by ContextWindowSettings.changes.collectAsState()
@@ -186,6 +192,13 @@ fun SettingsScreen(
 
             // -- Agent Runtime --
             SettingsSection(title = stringResource(R.string.settings_section_agent_runtime)) {
+                SettingsItem(
+                    icon = Icons.Outlined.Handyman,
+                    iconColor = Color(0xFF5E5CE6),
+                    title = "Forge 插件",
+                    subtitle = "无限画布、信息统计、技能包与待办",
+                    onClick = onForgeClick,
+                )
                 SettingsItem(
                     icon = Icons.Outlined.Handyman,
                     iconColor = Color(0xFF5E5CE6),
@@ -272,6 +285,39 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_backup_restore),
                     subtitle = stringResource(R.string.settings_backup_restore_subtitle),
                     onClick = onBackupClick,
+                    showDivider = false,
+                )
+            }
+
+            // -- Network --
+            SettingsSection(title = stringResource(R.string.network_title)) {
+                SettingsItem(
+                    icon = Icons.Outlined.Language,
+                    iconColor = Color(0xFF007AFF),
+                    title = stringResource(R.string.network_routing_title),
+                    subtitle = stringResource(R.string.network_settings_subtitle),
+                    onClick = onNetworkClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Shield,
+                    iconColor = Color(0xFF5856D6),
+                    title = stringResource(R.string.network_tailscale),
+                    subtitle = stringResource(R.string.network_tailscale_footer),
+                    onClick = onTailscaleClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Language,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.network_proxies),
+                    subtitle = stringResource(R.string.network_proxies_footer),
+                    onClick = onProxiesClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Language,
+                    iconColor = Color(0xFF5E5CE6),
+                    title = stringResource(R.string.network_container_dns),
+                    subtitle = stringResource(R.string.rootfs_dns_auto_desc),
+                    onClick = onContainerDnsClick,
                     showDivider = false,
                 )
             }

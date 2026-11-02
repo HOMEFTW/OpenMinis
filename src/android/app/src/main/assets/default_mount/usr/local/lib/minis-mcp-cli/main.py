@@ -224,6 +224,7 @@ def maybe_start_daemon():
 def send_to_daemon(request, timeout=CONN_TIMEOUT):
     """Send one newline-delimited JSON request over 127.0.0.1, return the parsed
     reply dict."""
+    request = dict(request, mcp_proxy=os.environ.get("MINIS_MCP_PROXY", ""))
     port = _read_daemon_port()
     if port is None:
         return {"ok": False, "error": "daemon not running", "code": "NO_DAEMON"}

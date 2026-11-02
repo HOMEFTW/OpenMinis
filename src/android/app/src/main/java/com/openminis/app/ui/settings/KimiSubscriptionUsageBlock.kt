@@ -37,7 +37,9 @@ import java.util.Date
 internal fun KimiSubscriptionUsageBlock(instanceId: String, credentialRevision: String) {
     val context = LocalContext.current.applicationContext
     val manager = remember(context, instanceId) { KimiOAuthManager(context, instanceId) }
-    val client = remember { KimiSubscriptionUsageClient() }
+    val client = remember(instanceId) {
+        KimiSubscriptionUsageClient(netTag = com.openminis.app.network.NetworkRuntime.providerTag(instanceId))
+    }
     // New credentials discard the previous account's snapshot immediately.
     var state by remember(instanceId, credentialRevision) { mutableStateOf<KimiUsageState>(KimiUsageState.Loading()) }
     var refresh by remember(instanceId, credentialRevision) { mutableIntStateOf(0) }

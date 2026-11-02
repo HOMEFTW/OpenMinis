@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="oauth_wait_notif_channel">登入</string>
+    <string name="oauth_wait_notif_title">正在等待登入…</string>
+    <string name="oauth_wait_notif_text">請在瀏覽器中完成登入，然後返回 Minis。</string>
+</resources>

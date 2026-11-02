@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="stable115_question_timeout">问题等待时间</string>
+    <string name="stable115_question_unlimited">无限等待</string>
+    <string name="stable115_question_minutes">%1$d 分钟</string>
+    <string name="stable115_question_previous">上一题</string>
+    <string name="stable115_question_deferred">有空时回复</string>
+</resources>

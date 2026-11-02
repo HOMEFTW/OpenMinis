@@ -162,6 +162,12 @@ data class ScheduledTask(
     val anchorMs: Long? = null,
     /** Counted at alarm admission, independently of completion history. */
     val triggeredCount: Int? = null,
+    /** The chat that created this task; null for editor-created and legacy tasks. */
+    val creatorSessionId: String? = null,
+    /** Calendar slot consumed early by Run now. */
+    val runNowSlotMs: Long? = null,
+    /** Explicit user Stop invalidates handoffs already claimed by an alarm. */
+    val stopGeneration: Long = 0L,
 ) {
 
     val isCalendar: Boolean get() = triggerKind == ScheduledTriggerKind.CALENDAR
@@ -208,7 +214,7 @@ data class ScheduledTask(
 
         // Earliest instant we may fire: max(now, start-of-startDate). This lets
         // a task created today with a future startDate wait until that day.
-        val floor = maxOf(now, startDateMs ?: Long.MIN_VALUE)
+        val floor = maxOf(now, startDateMs ?: Long.MIN_VALUE, runNowSlotMs?.let { it + 1L } ?: Long.MIN_VALUE)
 
         val cal = Calendar.getInstance().apply {
             timeInMillis = floor
@@ -292,6 +298,9 @@ data class ScheduledTask(
         if (onCompletionOf != null) put("onCompletionOf", onCompletionOf)
         if (anchorMs != null) put("anchorMs", anchorMs)
         if (triggeredCount != null) put("triggeredCount", triggeredCount)
+        if (creatorSessionId != null) put("creatorSessionId", creatorSessionId)
+        if (runNowSlotMs != null) put("runNowSlotMs", runNowSlotMs)
+        if (stopGeneration != 0L) put("stopGeneration", stopGeneration)
     }
 
     companion object {
@@ -342,6 +351,9 @@ data class ScheduledTask(
             onCompletionOf = if (o.has("onCompletionOf")) o.optString("onCompletionOf", null) else null,
             anchorMs = if (o.has("anchorMs")) o.optLong("anchorMs") else null,
             triggeredCount = if (o.has("triggeredCount")) o.optInt("triggeredCount") else null,
+            creatorSessionId = o.optString("creatorSessionId").takeIf { it.isNotBlank() && it != "null" },
+            runNowSlotMs = if (o.has("runNowSlotMs") && !o.isNull("runNowSlotMs")) o.optLong("runNowSlotMs") else null,
+            stopGeneration = o.optLong("stopGeneration", 0L),
         )
     }
 }

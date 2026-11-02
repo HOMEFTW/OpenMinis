@@ -39,7 +39,7 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
     private val micBusy = AtomicBoolean(false)
 
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
-        val args = OffloadArgs(request.argv.drop(1), booleanFlags = setOf("on-device"))
+        val args = OffloadArgs(request.argv.drop(1), booleanFlags = setOf("on-device", "probe"))
         if (args.hasFlag("h", "help") || args.positional.isEmpty()) {
             return NativeOffloadResult(if (args.hasFlag("h", "help")) 0 else 2, HELP)
         }
@@ -65,7 +65,19 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val system = SystemSpeechRecognitionEngine(context).isAvailable
         val provider = ProviderSpeechRecognitionEngine(context).isAvailable
         val microphone = context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)
-        return output(args, JSONObject()
+        val diagnostics = AndroidSpeechSystem(context)
+        val environment = diagnostics.environment()
+        val probe = if (args.hasFlag("probe")) {
+            when {
+                !hasMic() -> JSONObject().put("ok", false).put("result", "permission_required")
+                !SpeechRecognitionManager.acquireToolMicrophone() -> JSONObject().put("ok", false).put("result", "microphone_busy")
+                else -> try { diagnostics.probe(3_000) } finally { SpeechRecognitionManager.releaseToolMicrophone() }
+            }
+        } else null
+        val data = SpeechCli.status(environment, probe)
+            .put("recognizer_order", JSONArray(com.openminis.app.speech.RecognizerFallback.plan(false,
+                environment.sdkInt, environment.onDeviceAvailable).map { it.label }))
+            .put("engine", SpeechEngines.status(diagnostics.voiceInputModels(), environment.services.isNotEmpty(), SpeechCli.assess(environment).first))
             .put("default_engine", "system")
             .put("available", system || provider)
             .put("system_available", system)
@@ -75,7 +87,8 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
             .put("mic_available", (system || provider) && microphone && hasMic())
             .put("file_available", provider)
             .put("system_file_input", if (system && Build.VERSION.SDK_INT >= 33) "best_effort" else "unsupported")
-            .put("availability_check", "Local service/configuration only; network, credentials and language support are verified when transcribing."))
+            .put("availability_check", "Local service/configuration only; network, credentials and language support are verified when transcribing.")
+        return output(args, SpeechCli.ok("status", data))
     }
 
     private fun cmdTranscribe(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
@@ -261,29 +274,11 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         }
     }
 
-    /** List only locales actually returned by the system; provider ASR can auto-detect. */
     private fun cmdLanguages(args: OffloadArgs): NativeOffloadResult {
-        val latch = CountDownLatch(1)
-        val tags = AtomicReference<List<String>>(emptyList())
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, intent: Intent?) {
-                tags.set(getResultExtras(false)?.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES).orEmpty())
-                latch.countDown()
-            }
-        }
-        context.sendOrderedBroadcast(Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS), null,
-            receiver, Handler(Looper.getMainLooper()), 0, null, null)
-        val reported = latch.await(3, TimeUnit.SECONDS)
-        val prefix = args.get("language")
-        val items = JSONArray()
-        for (tag in tags.get().distinct().sorted()) {
-            if (!prefix.isNullOrBlank() && !tag.startsWith(prefix, ignoreCase = true)) continue
-            items.put(JSONObject().put("locale", tag)
-                .put("display_name", Locale.forLanguageTag(tag.replace('_', '-')).displayName.ifEmpty { tag }))
-        }
-        return output(args, JSONObject().put("locales", items).put("count", items.length())
-            .put("system_languages_reported", reported && tags.get().isNotEmpty())
-            .put("provider_auto_detect", ProviderSpeechRecognitionEngine(context).isAvailable))
+        val system = AndroidSpeechSystem(context)
+        val result = SpeechCli.languages(system.voiceDetails(3_000), system.recognitionSupport(3_000),
+            com.openminis.app.speech.RecognizerLocales.BUILTIN_TAGS, args.get("language"))
+        return output(args, result.body, result.exitCode)
     }
 
     private fun hasMic() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -317,8 +312,12 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         }
     }
 
-    private fun output(args: OffloadArgs, body: JSONObject, exit: Int = 0) =
-        NativeOffloadResult(exit, OffloadOutput.formatBody(body.toString(), args) + "\n")
+    private fun output(args: OffloadArgs, body: JSONObject, exit: Int = 0): NativeOffloadResult {
+        val action = args.positional.firstOrNull()?.let { if (it == "listen") "transcribe" else it } ?: "unknown"
+        val envelope = if (body.has("ok")) body else if (exit == 0) SpeechCli.ok(action, body) else
+            SpeechCli.error(action, body.optString("error", "failed"), body.optString("message", "Speech operation failed"), body)
+        return NativeOffloadResult(exit, OffloadOutput.formatBody(envelope.toString(), args) + "\n")
+    }
 
     private fun error(args: OffloadArgs, kind: String, message: String, exit: Int = 1) =
         output(args, JSONObject().put("error", kind).put("message", message), exit)
@@ -334,6 +333,7 @@ Usage: android-speech <transcribe|listen|languages|status> [options]
   --duration <1..60>       Maximum mic capture seconds (default: 30)
   --timeout <1..300>       Warmup/transcription deadline seconds, plus mic duration (default: 120)
   --language <locale>      Language hint (e.g. en-US, zh-CN)
+  --probe                 Test system recognizer readiness (status only; microphone permission required)
   --on-device             Prefer offline system recognition; language packs may be required
   --max <1..20>            Legacy option accepted; adapters return the best transcript
   --compact, -q, --quiet   Shape JSON output

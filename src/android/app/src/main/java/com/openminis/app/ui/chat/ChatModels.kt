@@ -101,6 +101,27 @@ data class StreamingDelta(
     val isAwaitingModelResponse: Boolean,
 )
 
+/** One completed reply's usage. Uses the same strict counters as the statistics page. */
+data class ChatTokenUsage(
+    val inputTokens: Int,
+    val outputTokens: Int,
+    val cacheCreationTokens: Int,
+    val cacheReadTokens: Int,
+    val latestContextTokens: Int,
+) {
+    companion object {
+        fun parse(json: String?): ChatTokenUsage? {
+            val stored = (com.openminis.app.usage.StoredUsageJson.parse(json)
+                as? com.openminis.app.usage.StoredUsageParse.Valid)?.usage ?: return null
+            fun bounded(value: Long) = value.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val context = runCatching { com.openminis.app.usage.UsageNumbers.stored(JSONObject(json!!), "latestContextTokens") }.getOrDefault(0)
+            if (stored.total == 0L && context == 0L) return null
+            return ChatTokenUsage(bounded(stored.input), bounded(stored.output), bounded(stored.cacheWrite),
+                bounded(stored.cacheRead), bounded(context))
+        }
+    }
+}
+
 data class ChatMessage(
     val id: String,
     val role: String,
@@ -147,6 +168,8 @@ data class ChatMessage(
     // ChatMessage.sourceSortOrder, which serves the same UI↔raw mapping
     // role (AIChatViewModel.swift:3411, 3421).
     val sourceDbIds: List<String> = emptyList(),
+    val tokenUsage: ChatTokenUsage? = null,
+    val completedAt: Long? = null,
 ) {
     /**
      * [T-bridge-message-ui-leak-android] True when this UI message is the

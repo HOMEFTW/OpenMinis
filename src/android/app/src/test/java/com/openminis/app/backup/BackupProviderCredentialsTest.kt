@@ -73,4 +73,22 @@ class BackupProviderCredentialsTest {
         assertTrue(plan.hasChanges)
         assertTrue(plan.invalidFields.isEmpty())
     }
+
+    @Test fun `explicit restore replaces a pasted bearer independently of a live OAuth login`() {
+        val current = BackupProviderCredentials.Current(manualOAuthToken = "old-manual", oauthToken = "{\"access_token\":\"local\"}")
+        val secret = BackupSecrets.ProviderSecret("p", manualOAuthToken = encoded("new-manual"), oauthToken = encoded(token))
+        val plan = BackupProviderCredentials.plan(current, secret)
+        assertEquals("new-manual", plan.manualOAuthToken)
+        assertNull(plan.oauthToken)
+        assertFalse(BackupProviderCredentials.plan(current, secret, overwriteExisting = false).hasChanges)
+    }
+
+    @Test fun `malformed backup OAuth cannot replace account metadata around the retained device token`() {
+        val plan = BackupProviderCredentials.plan(
+            BackupProviderCredentials.Current(oauthToken = "{\"access_token\":\"rejected\"}", oauthEmail = "local@example.com", oauthNeedsReauth = true),
+            backup(key = null, oauth = "not-json"),
+        )
+        assertFalse(plan.hasChanges)
+        assertEquals(listOf("oauthToken"), plan.invalidFields)
+    }
 }

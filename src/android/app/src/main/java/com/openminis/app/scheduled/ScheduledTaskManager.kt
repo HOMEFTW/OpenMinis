@@ -83,6 +83,27 @@ class ScheduledTaskManager(private val context: Context) {
         store.delete(taskId)
     }
 
+    /** Disable future fires while retaining each task's execution history. */
+    fun disableAllCreatedBy(sessionIds: Set<String>) {
+        store.stopCreatedBy(sessionIds).forEach { cancelAlarm(it.id) }
+    }
+
+    /** Both the pending slot identity and the running guard are checked under the store lock. */
+    fun claimRunNow(
+        taskId: String,
+        now: Long = System.currentTimeMillis(),
+        expected: ScheduledTask? = null,
+        isRunning: (String) -> Boolean = ScheduledSessionCoordinator::isTaskRunning,
+    ): ScheduledTask? {
+        val claimed = store.update(taskId) { current ->
+            if (isRunning(current.id)) return@update null
+            if (expected != null && !samePendingRun(current, expected, now)) return@update null
+            runNowTransition(current, now)
+        } ?: return null
+        if (claimed.enabled) registerAlarm(claimed, now) else cancelAlarm(taskId)
+        return claimed
+    }
+
     /**
      * Re-register every enabled task with AlarmManager. Called from
      * [com.openminis.app.offload.AlarmReceiver]'s BOOT_COMPLETED branch
@@ -118,8 +139,10 @@ class ScheduledTaskManager(private val context: Context) {
                 if (!relativeAlarmDue(t, now)) return@update null
                 afterAlarmFire(t, now)?.first
             } else if (t.repeatMode == ScheduledRepeatMode.ONCE) {
+                if (calendarSlotTakenByRunNow(t, now)) return@update null
                 t.copy(enabled = false, triggeredCount = 1)
             } else {
+                if (calendarSlotTakenByRunNow(t, now)) return@update null
                 // Repeated deliveries within the same slot must not launch two runs.
                 if (t.anchorMs?.let { now - it in 0 until 60_000 } == true) return@update null
                 t.copy(anchorMs = now, triggeredCount = (t.triggeredCount ?: 0) + 1)
@@ -138,33 +161,7 @@ class ScheduledTaskManager(private val context: Context) {
         executionId: String? = null,
         firedAt: Long = System.currentTimeMillis(),
     ): Boolean {
-        return store.update(taskId) { t ->
-            // Receiver handoff failures can be observed both by the runner and by
-            // the receiver catch block. Persisted execution ids make that one
-            // trigger produce one history row even across manager instances.
-            if (executionId != null && t.runHistory.any { it.executionId == executionId }) return@update null
-            val now = firedAt
-            // [T-android-scheduled-tasks-run-records] Prepend a run record
-            // (newest-first), capped at MAX_RUN_HISTORY. lastResult* are kept in
-            // sync for back-compat but are no longer surfaced in the list UI.
-            val run = ScheduledRun(
-                firedAt = now,
-                sessionId = sessionId,
-                preview = resultPreview,
-                ok = ok,
-                executionId = executionId,
-            )
-            val history = (listOf(run) + t.runHistory).sortedByDescending { it.firedAt }
-                .take(ScheduledTask.MAX_RUN_HISTORY)
-            val latest = history.first()
-            t.copy(
-                lastFiredAt = latest.firedAt,
-                lastResultPreview = latest.preview,
-                lastResultSessionId = latest.sessionId,
-                runHistory = history,
-                fireCount = t.firesSoFar + 1,
-            )
-        } != null
+        return store.update(taskId) { withRunResult(it, sessionId, resultPreview, ok, executionId, firedAt) } != null
     }
 
     private fun registerAlarm(task: ScheduledTask, now: Long = System.currentTimeMillis()) {
@@ -230,6 +227,51 @@ class ScheduledTaskManager(private val context: Context) {
         private const val TAG = "ScheduledTaskManager"
         private const val ALARM_EARLY_SLACK_MS = 5_000L
 
+        /** Completion time never replaces the envelope's original fire time. */
+        internal fun withRunResult(task: ScheduledTask, sessionId: String?, preview: String?, ok: Boolean,
+            executionId: String?, firedAt: Long): ScheduledTask? {
+            if (executionId != null && task.runHistory.any { it.executionId == executionId }) return null
+            val history = (listOf(ScheduledRun(firedAt, sessionId, preview, ok, executionId)) + task.runHistory)
+                .sortedByDescending { it.firedAt }.take(ScheduledTask.MAX_RUN_HISTORY)
+            val latest = history.first()
+            return task.copy(lastFiredAt = latest.firedAt, lastResultPreview = latest.preview,
+                lastResultSessionId = latest.sessionId, runHistory = history, fireCount = task.firesSoFar + 1)
+        }
+
+        internal fun pendingRunKey(task: ScheduledTask, now: Long): String? {
+            if (!task.enabled) return null
+            return when (task.triggerKind) {
+                ScheduledTriggerKind.CALENDAR -> task.nextTriggerMs(now)?.let { "slot:$it" }
+                ScheduledTriggerKind.AFTER, ScheduledTriggerKind.INTERVAL ->
+                    task.nextTriggerMs(now)?.let { "run:${task.triggeredCount ?: 0}" }
+                ScheduledTriggerKind.ON_COMPLETION -> if ((task.triggeredCount ?: 0) == 0) "completion:0" else null
+            }
+        }
+
+        internal fun samePendingRun(current: ScheduledTask, expected: ScheduledTask, now: Long): Boolean =
+            current.enabled == expected.enabled && current.triggerKind == expected.triggerKind &&
+                current.stopGeneration == expected.stopGeneration &&
+                current.anchorMs == expected.anchorMs && current.triggeredCount == expected.triggeredCount &&
+                current.runNowSlotMs == expected.runNowSlotMs && pendingRunKey(current, now) == pendingRunKey(expected, now)
+
+        internal fun runNowTransition(task: ScheduledTask, now: Long): ScheduledTask? {
+            if (!task.enabled) return null
+            return when (task.triggerKind) {
+                ScheduledTriggerKind.AFTER, ScheduledTriggerKind.INTERVAL ->
+                    if (task.nextTriggerMs(now) == null) null else afterAlarmFire(task, now)?.first
+                ScheduledTriggerKind.CALENDAR -> task.nextTriggerMs(now)?.let { slot ->
+                    task.copy(runNowSlotMs = slot, enabled = task.repeatMode != ScheduledRepeatMode.ONCE)
+                }
+                // Preserve the fork CLI's ability to run an event task immediately,
+                // consuming the same one-shot claim its upstream completion would take.
+                ScheduledTriggerKind.ON_COMPLETION -> if ((task.triggeredCount ?: 0) == 0)
+                    task.copy(enabled = false, triggeredCount = 1) else null
+            }
+        }
+
+        internal fun calendarSlotTakenByRunNow(task: ScheduledTask, now: Long): Boolean =
+            task.runNowSlotMs?.let { now >= it - ALARM_EARLY_SLACK_MS && now <= it + 30 * 60_000L } == true
+
         internal fun relativeAlarmDue(t: ScheduledTask, now: Long): Boolean {
             val anchor = t.anchorMs ?: t.createdAt
             return when (t.triggerKind) {
@@ -260,6 +302,9 @@ class ScheduledTaskManager(private val context: Context) {
             lastFiredAt = previous.lastFiredAt,
             lastResultPreview = previous.lastResultPreview,
             lastResultSessionId = previous.lastResultSessionId,
+            creatorSessionId = previous.creatorSessionId ?: incoming.creatorSessionId,
+            runNowSlotMs = previous.runNowSlotMs,
+            stopGeneration = previous.stopGeneration,
         )
         const val ACTION_FIRE = "com.openminis.app.scheduled.FIRE"
         const val EXTRA_TASK_ID = "task_id"

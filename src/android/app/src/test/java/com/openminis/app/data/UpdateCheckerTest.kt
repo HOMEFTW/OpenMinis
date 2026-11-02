@@ -5,7 +5,7 @@ import org.junit.Test
 
 class UpdateCheckerTest {
     @Test fun updateEndpointsStayOnTheUsersFork() {
-        assertEquals("https://api.github.com/repos/HOMEFTW/OpenMinis/releases?per_page=30", UpdateChecker.RELEASES_API_URL)
+        assertEquals("https://api.github.com/repos/HOMEFTW/OpenMinis/releases?per_page=100&page=1", UpdateChecker.RELEASES_API_URL)
         assertEquals("https://github.com/HOMEFTW/OpenMinis/releases", UpdateChecker.RELEASES_URL)
     }
 
@@ -40,5 +40,15 @@ class UpdateCheckerTest {
         assertEquals("2.0", UpdateChecker.highestVersion(releases) { it.first }?.first)
         assertEquals("1.20", UpdateChecker.highestVersion(releases.filter { it.second }) { it.first }?.first)
         assertNull(UpdateChecker.highestVersion(emptyList<String>()) { it })
+    }
+    @Test fun forkStableApkIsAlsoEligibleWhenBetaIncludesStableReleases() {
+        val release = UpdatePolicy.Release("1.17", "1.17", false, false, "", listOf(
+            UpdatePolicy.Asset("app-debug.apk", "https://example.test/current", 3L, null),
+            UpdatePolicy.Asset("app-debug-before-old.apk", "https://example.test/old", 1L, null),
+        ))
+        val candidate = UpdatePolicy.toCandidate(release, listOf("arm64-v8a"))!!
+        assertEquals("https://example.test/current", candidate.apk.url)
+        assertTrue(UpdatePolicy.isNewer(candidate, UpdatePolicy.Channel.BETA, "1.16.3", 31))
+        assertFalse(UpdatePolicy.isNewer(candidate, UpdatePolicy.Channel.BETA, "1.17", 32))
     }
 }

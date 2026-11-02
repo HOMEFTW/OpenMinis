@@ -2,11 +2,10 @@ package com.openminis.app.speech.correction
 
 import android.content.Context
 import android.util.Log
+import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.LLMMessage
-import com.openminis.app.data.model.ModelEntry
-import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ProviderCredential
-import com.openminis.app.data.model.effectiveOutputModalities
+import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.provider.ProviderFactory
@@ -23,6 +22,18 @@ sealed class CorrectionError(message: String) : Exception(message) {
     object EmptyResponse : CorrectionError("model returned nothing usable")
     internal class ModelsFailed(val failures: List<CorrectionFailure>) : CorrectionError(
         failures.joinToString { it.kind.name },
+    )
+
+    /**
+     * [T-voice-correction-fallback] Every candidate model failed. The message is
+     * the last model's error, so the panel's reason names a real cause (e.g. the
+     * provider's "credit balance is too low"); every attempt is kept for the log.
+     */
+    /** [T-voice-correction-fallback] One call ran past its own budget. */
+    class ModelTimedOut(budgetMs: Long) : CorrectionError("timed out after ${budgetMs}ms")
+
+    class AllModelsFailed(val attempts: List<CorrectionFallback.Attempt>) : CorrectionError(
+        attempts.joinToString { correctionFailure(it.model.entry.model.displayName, it.error as? Exception ?: Exception()).kind.name },
     )
 }
 
@@ -42,16 +53,33 @@ interface CorrectionStrategy {
 }
 
 /**
- * The LLM-backed strategy.
- *
- * Prompts are reproduced VERBATIM from iOS, including the full-width
+ * [T-android-voice-correction] LLM correction. The prompt and the response
+ * cleaning are reproduced VERBATIM from iOS, including the full-width
  * separators (`、` between terms, `→` between original and fix) — they are part
  * of the contract with the model, not incidental formatting.
+ *
+ * [T-voice-correction-fallback] The candidate list and the single model call are
+ * separate seams: the run walks the candidates with [CorrectionFallback], and
+ * tests drive it with fake models instead of a provider.
  */
-class LlmCorrectionStrategy(
-    private val context: Context,
-    private val repository: ProviderRepository,
+class LlmCorrectionStrategy internal constructor(
+    private val candidates: () -> List<CorrectionModel>,
+    private val callModel: suspend (model: CorrectionModel, request: CorrectionRequest) -> String,
+    private val callBudgetMs: Long = VoiceCorrectionConfig.CORRECTION_BUDGET_MS,
+    private val retryDelaysMs: List<Long> = CorrectionFallback.SAME_MODEL_RETRY_DELAYS_MS,
 ) : CorrectionStrategy {
+
+    /** What one model call sends; the same for every candidate. */
+    internal data class CorrectionRequest(
+        val prompt: String,
+        val systemPrompt: String,
+        val transcriptChars: Int,
+    )
+
+    constructor(context: Context, repository: ProviderRepository) : this(
+        candidates = { resolveCandidates(repository) },
+        callModel = { model, request -> sendViaProvider(context, repository, model, request) },
+    )
 
     override val strategyIdentifier = "llm"
 
@@ -62,17 +90,77 @@ class LlmCorrectionStrategy(
         locale: String,
     ): CorrectionOutcome {
         val started = System.currentTimeMillis()
-        val resolved = resolveModels() ?: throw CorrectionError.NoModelAvailable
-        val (group, groupKind, entries) = resolved
+        val models = candidates()
+        if (models.isEmpty()) {
+            Log.e(TAG, "[VoiceCorrection][Correct] no correction model available (neither sub nor primary group resolves)")
+            throw CorrectionError.NoModelAvailable
+        }
         val profile = CorrectionLanguageProfile.resolve(locale, transcript)
-        val prompt = buildPrompt(transcript, candidates, context, profile)
-        val cleaned = tryCorrectionModels(entries, group.fallbackStrategy) { entry ->
-            val instance = repository.instance(entry.providerInstanceId)?.takeIf { it.isEnabled }
-                ?: throw CorrectionError.NoModelAvailable
+        val request = CorrectionRequest(
+            prompt = buildPrompt(transcript, candidates, context, profile),
+            systemPrompt = systemPrompt(profile),
+            transcriptChars = transcript.length,
+        )
+        val (cleaned, model, attempt) = CorrectionFallback.run(
+            models,
+            callBudgetMs = callBudgetMs,
+            retryDelaysMs = retryDelaysMs,
+        ) { m ->
+            cleanResponse(callModel(m, request)).ifEmpty { throw CorrectionError.EmptyResponse }
+        }
+        return CorrectionOutcome(
+            correctedText = cleaned,
+            modelGroupUsed = if (attempt > 1) "${model.groupKind}+fallback$attempt" else model.groupKind,
+            durationMs = (System.currentTimeMillis() - started).toInt(),
+        )
+    }
+
+    companion object {
+        private const val TAG = "CorrectionStrategy"
+
+        /** Router-order seed for a correction, which belongs to no chat (as iOS). */
+        private const val ROUTER_SESSION = "voice-correction"
+
+        /**
+         * [T-voice-correction-fallback] The sub group's available members in
+         * router order, then the primary group's (iOS CorrectionModelResolver
+         * .candidates). Available = provider enabled + credentialed, the filter
+         * the chat's group fallback applies; text-capable only, as for titles -
+         * the same "lightweight model" title generation uses.
+         */
+        internal fun resolveCandidates(repository: ProviderRepository): List<CorrectionModel> {
+            fun ring(groupId: String?): List<ModelEntry> {
+                val group = groupId?.let { repository.group(it) } ?: return emptyList()
+                return com.openminis.app.ui.chat.TitleCandidates
+                    .expandGroup(group, repository.availableMemberEntries(group), ROUTER_SESSION)
+                    .filter { com.openminis.app.ui.chat.TitleCandidates.isTitleEligible(it) }
+            }
+            fun strategy(groupId: String?) =
+                groupId?.let { repository.group(it) }?.fallbackStrategy ?: FallbackStrategy.default
+            return CorrectionFallback.order(
+                sub = ring(repository.defaultSubGroupId),
+                primary = ring(repository.defaultPrimaryGroupId),
+                subStrategy = strategy(repository.defaultSubGroupId),
+                primaryStrategy = strategy(repository.defaultPrimaryGroupId),
+            )
+        }
+
+        /** One correction request on one model. */
+        private suspend fun sendViaProvider(
+            context: Context,
+            repository: ProviderRepository,
+            model: CorrectionModel,
+            request: CorrectionRequest,
+        ): String {
+            val entry = model.entry
+            val instance = repository.instance(entry.providerInstanceId)
+                ?: throw IllegalStateException("provider instance ${entry.providerInstanceId} not found")
+            // [T-android-keyless-provider-selection] usableApiKey — a keyless
+            // self-hosted correction model is usable. See QuickTestSheet.
             var apiKey = repository.usableApiKey(instance)
                 ?: if (repository.hasAnyCredential(instance)) "" else throw com.openminis.app.data.model.LLMError.InvalidApiKey()
             if (instance.credentialType == ProviderCredential.oauth) {
-                val manager = com.openminis.app.auth.OAuthManager.forInstance(this.context, instance)
+                val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
                 val fresh = manager?.validAccessToken()
                 if (manager != null && fresh == null) throw com.openminis.app.data.model.LLMError.InvalidApiKey()
                 if (fresh != null) {
@@ -80,39 +168,31 @@ class LlmCorrectionStrategy(
                     apiKey = fresh
                 }
             }
-            val provider = ProviderFactory.create(instance, apiKey, entry.model, this.context, overrides = entry.overrides)
-            Log.i(TAG, "[correction] type=${instance.providerType} model=${entry.model.id} group=$groupKind")
+            val provider = ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = ProviderFactory.oneOffSessionId(), overrides = entry.overrides)
+            // [T-android-voice-correction-diag] Name the resolved model BEFORE the
+            // request. A field report on 2026-08-15 showed only
+            // "correction failed / LLMError$InvalidApiKey" with a stack — which
+            // provider instance was actually used had to be reverse-engineered by
+            // matching the stack's provider class against every configured
+            // instance on the device (it turned out to be one with no API key
+            // saved). A user's log will never support that, so the identity has to
+            // be in the line itself.
+            Log.i(
+                TAG,
+                "[correction] resolved instance=${instance.label} (${instance.id}) " +
+                    "type=${instance.providerType} model=${entry.model.id} " +
+                    "group=${model.groupKind} hasKey=${apiKey.isNotBlank()}",
+            )
             val response = provider.sendMessage(
-                messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
-                systemPrompt = systemPrompt(profile),
-                maxTokens = correctionMaxTokens(transcript.length, entry.model.maxOutputTokens),
+                messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = request.prompt)),
+                systemPrompt = request.systemPrompt,
+                maxTokens = correctionMaxTokens(request.transcriptChars, entry.model.maxOutputTokens),
+                // Reasoning traces add latency for no benefit here, and on some
+                // providers yield empty text with finish_reason=tool_calls.
                 thinkingLevel = ThinkingLevel.OFF,
             )
-            cleanResponse(response.text).ifEmpty { throw CorrectionError.EmptyResponse }
+            return response.text
         }
-        return CorrectionOutcome(
-            correctedText = cleaned,
-            modelGroupUsed = groupKind,
-            durationMs = (System.currentTimeMillis() - started).toInt(),
-        )
-    }
-
-    private fun resolveModels(): Triple<ModelGroup, String, List<ModelEntry>>? {
-        for ((groupId, kind) in listOf(repository.defaultSubGroupId to "sub", repository.defaultPrimaryGroupId to "primary")) {
-            val group = groupId?.let(repository::group) ?: continue
-            val available = repository.availableMemberEntries(group).filter {
-                "text" in it.model.effectiveOutputModalities.orEmpty().ifEmpty { listOf("text") } &&
-                    !it.model.id.lowercase().let { id -> listOf("embedding", "embed-", "whisper").any(id::contains) }
-            }
-            val ordered = correctionModelOrder(group, available, kotlin.random.Random.nextInt())
-            if (ordered.isNotEmpty()) return Triple(group, kind, ordered)
-        }
-        Log.e(TAG, "no correction model available (neither sub nor primary group resolves)")
-        return null
-    }
-
-    companion object {
-        private const val TAG = "CorrectionStrategy"
 
         /**
          * [T-android-voice-mixed-term-restore] The rules half of the prompt. Port of

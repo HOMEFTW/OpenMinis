@@ -191,6 +191,7 @@ class PersistentShell(
         // hardlinks to symlinks so apk install of binutils/gcc works.
         cmd.add("--link2symlink")
         cmd.add("--fake-netlink")
+        cmd.addAll(com.openminis.app.network.ShellTransparentNet.prootArgs(rootfsManager.prootBinary))
         cmd.add("-r")
         cmd.add(rootfsManager.rootfsDir.absolutePath)
         cmd.add("-b"); cmd.add("/dev")
@@ -205,9 +206,11 @@ class PersistentShell(
         }
 
         val handlers = NativeOffloadServer.registeredHandlers
-        if (handlers.isNotEmpty()) {
+        if (handlers.isNotEmpty() && NativeOffloadServer.awaitListening()) {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
+
+        cmd.addAll(com.openminis.app.network.ShellTransparentNet.prootArgs(rootfsManager.prootBinary))
 
         cmd.add("/bin/sh")
 
@@ -247,6 +250,7 @@ class PersistentShell(
         for ((key, value) in PRootKernel.customEnvironment) {
             env[key] = value
         }
+        env.putAll(com.openminis.app.network.NetworkShellEnvironment.proxyVariables())
 
         // [T-android-seccomp-selfheal / GH#186] Applied last so nothing above
         // can clobber it once this device is known to need it.
@@ -255,7 +259,7 @@ class PersistentShell(
             env[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
         }
 
-        val p = processBuilder.start()
+        val p = SpawnSignalMask.start(processBuilder)
         process = p
         stdinWriter = BufferedWriter(OutputStreamWriter(p.outputStream, StandardCharsets.UTF_8))
 
@@ -364,10 +368,14 @@ class PersistentShell(
         try {
             val buffer = ByteArray(4096)
             val stream = p.inputStream
+            val decoder = Utf8StreamDecoder()
             while (true) {
                 val n = stream.read(buffer)
-                if (n < 0) break
-                val text = String(buffer, 0, n, StandardCharsets.UTF_8)
+                val text = if (n < 0) decoder.finish() else decoder.decode(buffer, 0, n)
+                if (text.isEmpty()) {
+                    if (n < 0) break
+                    continue
+                }
                 appendTail(text)
 
                 val cb = pendingCallback
@@ -399,6 +407,7 @@ class PersistentShell(
                     }
                 }
                 // If no pending callback, discard (shell prompt noise etc.)
+                if (n < 0) break
             }
         } catch (e: Exception) {
             Log.d(TAG, "Reader loop ended: ${e.message}")

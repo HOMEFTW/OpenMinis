@@ -33,3 +33,13 @@
 随输入框及键盘占用后的可用区域调整，不改变透明度或模型切换设置。
 `scripts/build_android_windows.ps1` 构建成功，新 APK v2 签名校验通过；本次仅布局调整，未重跑全量单元测试。
 新 APK SHA256：`B9E3EDDF6B614180F08B04BE20393010B868B7618BD4FF4D0863608F7A8720D2`。
+
+## 2026-11-02：加入 Grok
+
+- 读取同一素材对话的新一轮结果，复用 `D:/Code/outputs/grok-background-20261102/grok-1080x2400.png`，未重新生图。转换为 1080×2400 WebP，257,866 字节，保留完整人物与留白；补充来源说明。
+- Grok 实际模型 ID（包括 `x-ai/grok-*`、`xai/grok-*`、网关命名空间和版本路径）自动匹配新背景；不依赖服务商名称，避免把兼容服务上的其他模型误判为 Grok。沿用聊天切换、自动回退、背景开关和透明度逻辑。
+- 设置页调整为四款背景的两列预览；中英文、繁体中文说明与 README 更新。布局仍在输入框上方完整等比显示。
+- 使用统一构建脚本执行 `ChatWallpaperTest` 和 `ChatWallpaperRepositoryTest`：25 项全部通过，0 失败、0 错误、0 跳过；APK 编译成功。未重跑无关全量测试。
+- APK 的 Grok 资源与源码 WebP 字节一致；ZIP CRC、v2 签名、16 KiB 原生库及 4 字节 ZIP 对齐通过。版本仍为 1.16.3 / 31。
+- 本次 APK：`src/android/app/build/outputs/apk/debug/app-debug.apk`，89,326,274 字节；SHA-256：`4a16b38f51889e85ae2b2125110be7b32053618742439fb803a50e6655d00ae5`。日志与测试报告保存在 `D:/Code/.tools/openminis-grok-background-20261102/`。
+- 未连接设备，尚未真机验证；未提交或推送。

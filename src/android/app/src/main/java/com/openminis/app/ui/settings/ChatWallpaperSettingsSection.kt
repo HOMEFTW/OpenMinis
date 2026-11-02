@@ -19,9 +19,13 @@ internal fun ChatWallpaperSettingsSection() {
     val repository = (LocalContext.current.applicationContext as MinisApp).chatWallpaperRepository
     val state by repository.state.collectAsState()
     SettingsSection(header = stringResource(R.string.chat_wallpaper_title), footer = stringResource(R.string.chat_wallpaper_default_hint)) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ChatWallpaper.entries.forEach { wallpaper ->
-                WallpaperPreview(wallpaper, state.defaultTransparency, Modifier.weight(1f).height(176.dp))
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChatWallpaper.entries.chunked(2).forEach { wallpapers ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    wallpapers.forEach { wallpaper ->
+                        WallpaperPreview(wallpaper, state.defaultTransparency, Modifier.weight(1f).height(176.dp))
+                    }
+                }
             }
         }
         WallpaperTransparencySlider(state.defaultTransparency, repository::setDefaultTransparency)

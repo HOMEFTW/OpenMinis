@@ -100,7 +100,8 @@ internal class DeepSeekStream(private val model: String) {
             }
             "message_stop" -> {
                 if (reason == null || blocks.values.any { !it.closed }) malformed("unsettled message_stop")
-                if (blocks.isEmpty() && reason == "end_turn") throw LLMError.TransientError("DeepSeek returned an empty response")
+                // A complete empty turn belongs to the loop's reminder/group fallback path.
+                // Missing message_stop remains a transport failure in endOfInput().
                 val replay = JSONArray()
                 val reasoning = StringBuilder()
                 val ids = mutableSetOf<String>()
@@ -126,11 +127,7 @@ internal class DeepSeekStream(private val model: String) {
                     replay.put(value)
                 }
                 add(LLMStreamChunk.ReasoningContent(reasoning.toString(), DeepSeekMessages.replay(model, replay)))
-                val input = usage.optInt("input_tokens")
-                val read = usage.optInt("cache_read_input_tokens")
-                val write = usage.optInt("cache_creation_input_tokens")
-                add(LLMStreamChunk.Usage(LLMUsage(input, usage.optInt("output_tokens"), write, read,
-                    (input.toLong() + read + write).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())))
+                add(LLMStreamChunk.Usage(com.openminis.app.provider.parseMessagesUsage(usage)))
                 add(LLMStreamChunk.Finished(reason, discardToolCalls = reason == "max_tokens"))
                 completed = true
             }

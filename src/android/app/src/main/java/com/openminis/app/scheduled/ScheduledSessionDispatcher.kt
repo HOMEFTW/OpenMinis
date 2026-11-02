@@ -34,7 +34,7 @@ internal object ScheduledSessionDispatcher {
                 vm.canAcceptSessionMail() else vm.canAcceptScheduledMail()
             if (!canAccept()) return@withContext null
             val childMode = delivery.task.targetMode as? ScheduledTargetMode.ChildOfCurrent
-            if (childMode != null && !AgentJobRegistry.canStartChildJob) return@withContext null
+            if (childMode != null && !AgentJobRegistry.canStartChildJob(childMode.sessionId)) return@withContext null
             val ready = withTimeoutOrNull(5_000) { vm.activeEntryId.first { it != null } }
             if (!canAccept()) return@withContext null
             val claimed = withContext(Dispatchers.IO) { queue.claim(delivery.executionId) }
@@ -62,7 +62,7 @@ internal object ScheduledSessionDispatcher {
                     app.chatRepository.getSession(it)?.parentSessionId
                 }
                 SessionWorkspaceRegistry.register(delivery.sessionId, root)
-                vm.helperConfig = HelperConfig(childMode.sessionId, "", job.id, 25, job.title, HelperModelTier.PRIMARY)
+                vm.helperConfig = HelperConfig(childMode.sessionId, "", job.id, HelperRunner.MAX_TURNS, job.title, HelperModelTier.PRIMARY)
                 HeadlessChatRunner.existingViewModel(childMode.sessionId)?.let { parent ->
                     vm.adoptBrowserTabPool(parent.browserTabPool)
                 }
@@ -73,6 +73,7 @@ internal object ScheduledSessionDispatcher {
                 }
             }
             admittedRun = HeadlessChatRunner.SessionMailRun(vm, runId)
+            ScheduledSessionCoordinator.registerCancellation(delivery.executionId) { vm.cancelRun(runId) }
             if (ready == null) {
                 vm.rejectRun(runId, "no_provider_resolved_in_5s")
             } else {
@@ -81,12 +82,7 @@ internal object ScheduledSessionDispatcher {
                     vm.startScheduledRetryForRun(mode.messageId, runId, claimed.task.thinkingLevel)
                 } else {
                     val prefill = listOfNotNull(claimed.task.prefillToolCall)
-                    val marked = ScheduledTaskMarker(
-                        taskId = claimed.task.id, label = claimed.task.label,
-                        nextFireAtMs = ScheduledTaskManager(app).get(claimed.task.id)?.nextTriggerMs(),
-                        prompt = claimed.task.prompt, prefilledTool = prefill.firstOrNull()?.toolName,
-                        firedAtMs = claimed.firedAt,
-                    ).xml
+                    val marked = claimed.marker(ScheduledTaskManager(app).get(claimed.task.id)?.nextTriggerMs()).xml
                     vm.startScheduledForRun(marked, runId, claimed.task.thinkingLevel, prefill = prefill)
                 }
             }
@@ -121,6 +117,8 @@ internal object ScheduledSessionDispatcher {
                 admittedRun?.let { it.viewModel.cancelRun(it.runId) }
             }
             throw error
+        } finally {
+            ScheduledSessionCoordinator.unregisterCancellation(delivery.executionId)
         }
     }
 }

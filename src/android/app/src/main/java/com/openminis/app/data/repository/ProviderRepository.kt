@@ -680,7 +680,7 @@ class ProviderRepository(private val context: Context) {
     private fun workingCopy(): ProviderConfig {
         val live = _config.value
         return live.copy(
-            instances = live.instances.toMutableList(),
+            instances = live.instances.map { it.copy() }.toMutableList(),
             modelEntries = live.modelEntries.toMutableList(),
             // Deep-copy the groups too: ModelGroup.memberEntryIds is itself a
             // MutableList that removeEntry/removeGroup edit in place, so a
@@ -826,10 +826,9 @@ class ProviderRepository(private val context: Context) {
      * Mirrors iOS `ProviderConfigStore.isThirdPartyOpenAICompat`.
      */
     private fun isThirdPartyOpenAICompat(instance: ProviderInstance): Boolean {
-        if (instance.providerType != ProviderType.openAI) return false
-        val custom = instance.customBaseURL?.lowercase() ?: return false
-        val officialHosts = listOf("api.openai.com", "chatgpt.com")
-        return officialHosts.none { custom.contains(it) }
+        if (instance.providerType !in setOf(ProviderType.openAI, ProviderType.openAIResponses)) return false
+        val custom = instance.customBaseURL?.takeIf { it.isNotBlank() } ?: return false
+        return !OpenAIModelsApi.isOfficialOpenAI(custom)
     }
 
     fun updateInstance(instance: ProviderInstance): Unit = synchronized(configLock) {
@@ -2294,20 +2293,63 @@ class ProviderRepository(private val context: Context) {
             modelReconciler.trigger(instanceId, forceRefresh).join()
         }
 
+    enum class ModelRefreshSource { VENDOR, BUILT_IN, MODELS_DEV, KEPT }
+
+    data class ModelRefreshOutcome(
+        val source: ModelRefreshSource,
+        val total: Int,
+        val added: Int,
+        val removed: Int,
+        val vendorError: String?,
+    )
+
     suspend fun refreshModels(
         instance: ProviderInstance,
         forceRefresh: Boolean = false,
         onVendorError: ((String) -> Unit)? = null,
-    ) {
+    ): ModelRefreshOutcome = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val before = entriesFor(instance.id).map { it.baseModel.id }.toSet()
+        var vendorError: String? = null
+        val source = refreshModelsInner(instance, forceRefresh) { message ->
+            if (vendorError == null) vendorError = message
+            onVendorError?.invoke(message)
+        }
+        if (source != ModelRefreshSource.VENDOR && source != ModelRefreshSource.BUILT_IN) {
+            addMissingBuiltInModels(instance)
+        }
+        val after = entriesFor(instance.id).map { it.baseModel.id }.toSet()
+        ModelRefreshOutcome(source, after.size, (after - before).size, (before - after).size,
+            if (source == ModelRefreshSource.VENDOR) null else vendorError)
+    }
+
+    private fun addMissingBuiltInModels(instance: ProviderInstance): Unit = synchronized(configLock) {
+        ensureConfigLoaded()
+        if (instance.credentialType != ProviderCredential.oauth && isThirdPartyOpenAICompat(instance)) return@synchronized
+        if (instance.providerType == ProviderType.githubCopilot) return@synchronized
+        val config = workingCopy()
+        val have = config.modelEntries.filter { it.providerInstanceId == instance.id }.map { it.baseModel.id }.toSet()
+        val deleted = deletedModelIds(instance.id)
+        val missing = instance.providerType.builtInModels.filter { it.id !in have && it.id !in deleted }
+        if (missing.isNotEmpty()) {
+            config.modelEntries.addAll(missing.map { ModelEntry(providerInstanceId = instance.id, baseModel = it) })
+            saveConfig(config)
+        }
+    }
+
+    private suspend fun refreshModelsInner(
+        instance: ProviderInstance,
+        forceRefresh: Boolean,
+        reportVendorError: (String) -> Unit,
+    ): ModelRefreshSource {
         // Official API-key discovery is a static advisory catalog, independent of credentials.
         // Persist through replaceEntries so cache timestamps, entry IDs and user overrides survive.
         if (instance.providerType == ProviderType.deepSeek) {
             replaceEntries(instance.id, instance.providerType.builtInModels, manualRefresh = forceRefresh)
-            return
+            return ModelRefreshSource.BUILT_IN
         }
         if (instance.providerType == ProviderType.githubCopilot) {
             val models = com.openminis.app.auth.CopilotOAuthManager(context, instance.id)
-                .fetchModelsDetailed(onVendorError)
+                .fetchModelsDetailed(reportVendorError)
                 .map { model ->
                     LLMModel(
                         id = model.id,
@@ -2321,7 +2363,7 @@ class ProviderRepository(private val context: Context) {
                     )
                 }
             if (models.isNotEmpty()) replaceEntries(instance.id, models, manualRefresh = forceRefresh)
-            return // Copilot's entitlement must never fall back to another account's catalog.
+            return if (models.isNotEmpty()) ModelRefreshSource.VENDOR else ModelRefreshSource.KEPT
         }
         // [T-android-refresh-models-empty-key] usableApiKey, NOT loadApiKey.
         //
@@ -2353,7 +2395,7 @@ class ProviderRepository(private val context: Context) {
                 val freshToken = manager?.validAccessToken()
                 if (manager != null && freshToken == null) {
                     apiKey = null
-                    onVendorError?.invoke("OAuth sign-in is unavailable; sign in again.")
+                    reportVendorError("OAuth sign-in is unavailable; sign in again.")
                 } else if (freshToken != null && freshToken != apiKey) {
                     saveApiKey(instance.id, freshToken)
                     apiKey = freshToken
@@ -2362,7 +2404,7 @@ class ProviderRepository(private val context: Context) {
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 apiKey = null
-                onVendorError?.invoke(e.message ?: e.javaClass.simpleName)
+                reportVendorError(e.message ?: e.javaClass.simpleName)
                 android.util.Log.w("ProviderRepo", "OAuth token refresh failed: ${e.message}")
             }
         }
@@ -2376,7 +2418,7 @@ class ProviderRepository(private val context: Context) {
             val discovered = discoverCodexModels(instance, apiKey, forceRefresh)
             if (discovered != null) {
                 replaceEntries(instance.id, discovered, manualRefresh = forceRefresh)
-                return
+                return ModelRefreshSource.VENDOR
             }
             val models = OpenAIModelsApi.fetchModelsOAuth()
             if (models.isNotEmpty()) {
@@ -2384,7 +2426,7 @@ class ProviderRepository(private val context: Context) {
                 // OpenAI-compatible catalogs omit modalities, while
                 // models.dev has the authoritative image-input flag.
                 replaceEntries(instance.id, ModelsDevApi.enrichModels(models), manualRefresh = forceRefresh)
-                return
+                return ModelRefreshSource.BUILT_IN
             }
         }
 
@@ -2397,6 +2439,8 @@ class ProviderRepository(private val context: Context) {
 
         if (apiKey != null) {
             val baseURL = instance.effectiveBaseURL
+            val netTag = com.openminis.app.network.NetworkRuntime.providerTag(instance.id)
+            var usedBuiltIn = false
             val models = try {
                 when (instance.providerType) {
                     ProviderType.deepSeek -> instance.providerType.builtInModels
@@ -2405,15 +2449,20 @@ class ProviderRepository(private val context: Context) {
                         isOAuth = instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth,
                         // [T-provider-custom-user-agent] models-list UA override.
                         customUserAgent = instance.customUserAgent,
+                        netTag = netTag,
                     )
-                    ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey)
+                    ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey, netTag = netTag)
                     // [T-provider-custom-user-agent] models-list UA override.
                     // [T-android-provider-type-parity] openAIResponses lists
                     // models from the same /v1/models endpoint — only the
                     // completion endpoint differs.
                     ProviderType.openAI, ProviderType.openAIResponses ->
-                        OpenAIModelsApi.fetchModels(apiKey, baseURL, customUserAgent = instance.customUserAgent)
-                    ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(apiKey)
+                        OpenAIModelsApi.fetchModelsDetailed(apiKey, baseURL, customUserAgent = instance.customUserAgent, netTag = netTag)
+                            .also { result ->
+                                result.error?.let(reportVendorError)
+                                usedBuiltIn = result.error != null && result.models.isNotEmpty()
+                            }.models
+                    ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(apiKey, netTag = netTag)
                     // [T-provider-dynamic-catalog-reconcile] xAI: fetch the live
                     // catalog, fall back to the built-in list.
                     //
@@ -2450,6 +2499,7 @@ class ProviderRepository(private val context: Context) {
                         apiKey,
                         baseURL ?: "https://api.x.ai/v1",
                         customUserAgent = instance.customUserAgent,
+                        netTag = netTag,
                     ).ifEmpty { com.openminis.app.provider.xai.XAIModelsApi.fetchModelsOAuth() }
                     // [T-kimi-oauth] Kimi Code: unlike Codex OAuth, the Kimi
                     // OAuth token CAN call the models endpoint — real fetch
@@ -2460,6 +2510,7 @@ class ProviderRepository(private val context: Context) {
                         apiKey,
                         baseURL ?: "${com.openminis.app.auth.KimiDeviceFlow.CODING_API_BASE}/v1",
                         customUserAgent = instance.customUserAgent,
+                        netTag = netTag,
                     )
                     // [T-android-provider-type-parity] No models endpoint to
                     // query for a type this build cannot drive; the instance
@@ -2468,7 +2519,7 @@ class ProviderRepository(private val context: Context) {
                 }
             } catch (e: Exception) {
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                onVendorError?.invoke(e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName)
+                reportVendorError(e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName)
                 android.util.Log.e("ProviderRepo", "refreshModels fetch error: ${e.message}", e)
                 emptyList()
             }
@@ -2479,12 +2530,15 @@ class ProviderRepository(private val context: Context) {
                 // Enrich live catalog entries so existing models pick up
                 // newly published capabilities (notably DeepSeek Flash
                 // image input) while replaceEntries preserves user overrides.
-                val preserveLimits = instance.providerType in setOf(ProviderType.openAI, ProviderType.openAIResponses) &&
+                val preserveLimits = instance.providerType in setOf(ProviderType.openAI, ProviderType.openAIResponses, ProviderType.anthropic) &&
                     customBase != null && !OpenAIModelsApi.isOfficialOpenAI(customBase)
                 replaceEntries(instance.id, ModelsDevApi.enrichModels(models, preserveProviderLimits = preserveLimits),
                     manualRefresh = forceRefresh)
-                return
+                return if (usedBuiltIn) ModelRefreshSource.BUILT_IN else ModelRefreshSource.VENDOR
             }
+            reportVendorError("the provider returned no models")
+        } else {
+            reportVendorError("no API key for this provider")
         }
 
         // Step 3: Fallback to models.dev by base URL.
@@ -2493,13 +2547,15 @@ class ProviderRepository(private val context: Context) {
         // gateways by hostname, and when there's no match `fetchModels` returns
         // empty so the existing list (vLLM/Ollama on a private host) is preserved.
         val fallbackBaseURL = modelsDevBaseURL(instance)
-        val fallbackModels = ModelsDevApi.fetchModels(fallbackBaseURL)
+        val fallbackModels = ModelsDevApi.fetchModels(fallbackBaseURL, fresh = forceRefresh)
         if (fallbackModels.isNotEmpty()) {
             android.util.Log.i("ProviderRepo", "models.dev fallback returned ${fallbackModels.size} models for ${instance.label}")
             replaceEntries(instance.id, fallbackModels, manualRefresh = forceRefresh)
+            return ModelRefreshSource.MODELS_DEV
         } else if (isThirdParty) {
             android.util.Log.i("ProviderRepo", "Third-party endpoint, no models.dev match — preserving existing models for ${instance.label}")
         }
+        return ModelRefreshSource.KEPT
     }
 
     /**
@@ -2532,6 +2588,7 @@ class ProviderRepository(private val context: Context) {
             clientVersion = com.openminis.app.provider.openai.OpenAIProvider.CODEX_CLIENT_VERSION,
             context = ctx,
             forceRefresh = forceRefresh,
+            netTag = com.openminis.app.network.NetworkRuntime.providerTag(instance.id),
         )
 
         return when (result) {
@@ -2672,6 +2729,8 @@ class ProviderRepository(private val context: Context) {
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).apply()
         _credentialRevision.update { it + 1 }
+        // [T-provider-quota] A new key is a new quota subject.
+        com.openminis.app.quota.QuotaStore.credentialsChanged()
     }
 
     fun loadApiKey(instanceId: String): String? {
@@ -2697,6 +2756,7 @@ class ProviderRepository(private val context: Context) {
     fun deleteApiKey(instanceId: String) {
         encryptedPrefs.edit().remove("apikey_$instanceId").apply()
         _credentialRevision.update { it + 1 }
+        com.openminis.app.quota.QuotaStore.credentialsChanged()
     }
 
     // -- Import / Export --
@@ -2739,6 +2799,7 @@ class ProviderRepository(private val context: Context) {
                     put("displayName", entry.baseModel.displayName)
                     put("isHidden", entry.isHidden)
                     if (entry.isCustom) put("isCustom", true)
+                    if (entry.baseModel.limitsReportedByEndpoint == true) put("limitsReportedByEndpoint", true)
                     entry.baseModel.contextWindow?.let { put("contextWindow", it) }
                     entry.baseModel.maxOutputTokens?.let { put("maxOutputTokens", it) }
                     entry.baseModel.supportsReasoning?.let { put("supportsReasoning", it) }
@@ -3239,6 +3300,7 @@ class ProviderRepository(private val context: Context) {
                     provider = providerType.displayName,
                     contextWindow = contextWindow,
                     maxOutputTokens = maxOutputTokens,
+                    limitsReportedByEndpoint = if (m.optBoolean("limitsReportedByEndpoint", false)) true else null,
                     supportsReasoning = supportsReasoning,
                     interleavedReasoningField = interleavedReasoningField,
                     inputModalities = baseIn,

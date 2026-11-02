@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Autorisation</string>
+    <string name="mcp_form_auth_none">Aucun</string>
+    <string name="mcp_signin_not_signed_in">Non connecté</string>
+    <string name="mcp_signin_sign_in">Se connecter</string>
+    <string name="mcp_signin_reset_confirm">Réinitialiser</string>
+</resources>

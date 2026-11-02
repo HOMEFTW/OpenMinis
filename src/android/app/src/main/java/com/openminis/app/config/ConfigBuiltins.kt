@@ -1,6 +1,7 @@
 package com.openminis.app.config
 
 import android.content.Context
+import com.openminis.app.config.readable.*
 import com.openminis.app.config.collections.EnvVarsCollection
 import com.openminis.app.service.DynamicIslandSupport
 import com.openminis.app.config.collections.GroupsCollection
@@ -15,6 +16,7 @@ import com.openminis.app.config.fields.PrefsIntField
 import com.openminis.app.config.fields.PrefsLongField
 import com.openminis.app.config.fields.PrefsStringField
 import com.openminis.app.config.fields.ReadOnlyField
+import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.sandbox.ContainerDns
 import com.openminis.app.data.repository.EnvVarRepository
@@ -41,6 +43,7 @@ internal object ConfigBuiltins {
         envVarRepo: EnvVarRepository,
         chatRepo: ChatRepository,
     ) {
+        installReadable(context, providerRepo)
         registerSelfMeta(r)
         registerSession(r, providerRepo, chatRepo)
         registerAppearance(r, context)
@@ -53,6 +56,22 @@ internal object ConfigBuiltins {
         registerMemory(r, context)
         registerNetwork(r, context)
         Build34ConfigFields.register(r, context, providerRepo)
+        com.openminis.app.config.fields.NetworkConfigFields.build(envVarRepo).forEach { r.register(it) }
+        r.register(com.openminis.app.config.collections.ProxiesCollection(envVarRepo))
+    }
+
+    private fun installReadable(context: Context, providerRepo: ProviderRepository) {
+        val app = context.applicationContext
+        ConfigRefResolver.names = ProviderRepositoryNames(providerRepo)
+        ConfigReadableRenderer.localizerFactory = {
+            val ctx = com.openminis.app.i18n.LocaleWrap.wrap(app)
+            val lookup: (String) -> String? = { key -> ConfigReadableStrings.lookup(ctx, key) }
+            lookup
+        }
+        ConfigReadableRenderer.currentLocale = {
+            com.openminis.app.i18n.LocaleWrap.wrap(app).resources.configuration.locales[0] ?: Locale.getDefault()
+        }
+        ConfigReadableRenderer.currentLanguage = { ConfigReadableRenderer.currentLocale().toLanguageTag() }
     }
 
     // -- Network — the sandbox's DNS (Container Network) --
@@ -104,6 +123,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "permissions.minisConfig.enabled",
+                readable = ConfigReadable.notWritable,
                 displayName = "Allow minis-config",
                 description = "Master switch. Read-only here — toggle via Settings → Permissions.",
                 valueSchema = ConfigSchema.Bool,
@@ -135,6 +155,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "session.thinkingLevel",
+                readable = ConfigReadable(ConfigValueFormatter.EnumLabels(ThinkingLevel.entries.associate { it.name.lowercase(Locale.ROOT) to it.name })),
                 displayName = "Thinking level (current session)",
                 description = "off / low / medium / high / xhigh / max / ultra. Applied to the active chat.",
                 valueSchema = ConfigSchema.StrEnum(
@@ -168,6 +189,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "session.primaryModel",
+                readable = ConfigReadable(ConfigValueFormatter.Ref(ConfigRefKind.ModelSource)),
                 displayName = "Primary model (current session)",
                 description = "Set as `entry:<uuid>` or `group:<id>` (use `models` / `groups` topics to discover ids). Empty clears the binding.",
                 valueSchema = ConfigSchema.Str(maxLength = 200),
@@ -300,6 +322,7 @@ internal object ConfigBuiltins {
                 prefs = prefs,
                 key = "theme_mode",
                 cases = listOf("system", "light", "dark"),
+                valueLabels = mapOf("system" to "System", "light" to "Light", "dark" to "Dark"),
                 defaultIndex = 0,
             )
         )
@@ -319,6 +342,7 @@ internal object ConfigBuiltins {
         r.register(
             PrefsStringField(
                 path = "appearance.language",
+                readable = ConfigReadable(ConfigValueFormatter.Text(empty = "System")),
                 displayName = "App language",
                 // T311: aligned with iOS appearance.language help wording.
                 description = "BCP-47 code (zh-Hans, en, ja, …) or empty for system.",
@@ -357,6 +381,7 @@ internal object ConfigBuiltins {
                 prefs = appearancePrefs,
                 key = com.openminis.app.ui.settings.KEY_RETURN_KEY_BEHAVIOR,
                 cases = listOf("newline", "send"),
+                valueLabels = mapOf("newline" to "New line", "send" to "Send"),
                 defaultIndex = 0,
             )
         )
@@ -450,6 +475,7 @@ internal object ConfigBuiltins {
         val cases = listOf("xSmall", "small", "default", "medium", "large", "extraLarge")
         return ClosureField(
             path = path,
+            readable = ConfigReadable(ConfigValueFormatter.EnumLabels(cases.associateWith { it })),
             displayName = displayName,
             description = description,
             valueSchema = ConfigSchema.StrEnum(cases),
@@ -488,7 +514,7 @@ internal object ConfigBuiltins {
     // -- Background --
 
     private fun registerBackground(r: ConfigRegistry, context: Context) {
-        val prefs = context.getSharedPreferences("background_settings", Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(BackgroundSettingsRepository.PREFS_NAME, Context.MODE_PRIVATE)
         r.register(
             PrefsBoolField(
                 path = "background.enhanced",
@@ -506,8 +532,14 @@ internal object ConfigBuiltins {
                 displayName = "Background notifications",
                 description = "Post a system notification when long-running tasks complete.",
                 prefs = prefs,
-                key = "background_notifications_enabled",
-                defaultValue = true,
+                // [T-android-config-prefs-mismatch] The key Settings ->
+                // Background's "Task Notifications" switch and the notifier
+                // read. This wrote "background_notifications_enabled", which
+                // nothing reads, so `minis-config set background.notifications`
+                // reported ok and changed nothing (found verifying
+                // FIX-261021-02 on a Pixel 4a).
+                key = BackgroundSettingsRepository.KEY_TASK_NOTIFICATIONS,
+                defaultValue = BackgroundSettingsRepository.DEFAULT_TASK_NOTIFICATIONS,
             )
         )
         // [T-android-config-feature-unavailable] Live Updates / "dynamic
@@ -533,7 +565,7 @@ internal object ConfigBuiltins {
             displayName = "Live Updates (dynamic island)",
             description = "Show agent progress in the Android 16 Live Updates status chip.",
             prefs = prefs,
-            key = "dynamicIslandEnabled",
+            key = BackgroundSettingsRepository.KEY_DYNAMIC_ISLAND_ENABLED,
             defaultValue = false,
         )
         r.register(
@@ -546,6 +578,25 @@ internal object ConfigBuiltins {
                         "Live Updates permission; this device doesn't support it.",
                 )
             }
+        )
+        // [FIX-261025-03] Settings > Background > Scheduled Task Countdown:
+        // how long before a waiting scheduled task's next run its chat shows the
+        // countdown and keeps the service. Same prefs file + key the repository
+        // reads; its listener picks a write up at once.
+        r.register(
+            PrefsIntCodedEnumField(
+                path = "background.scheduledCountdown",
+                displayName = "Scheduled task countdown",
+                description = "How long before a scheduled task's next run its chat shows the countdown in the notification and keeps running in the background.",
+                prefs = prefs,
+                key = BackgroundSettingsRepository.KEY_SCHEDULED_COUNTDOWN_LEAD,
+                cases = BackgroundSettingsRepository.SCHEDULED_COUNTDOWN_CASES,
+                valueLabels = mapOf(
+                    "off" to "Off", "1m" to "1 minute before", "5m" to "5 minutes before",
+                    "15m" to "15 minutes before", "always" to "Whole wait",
+                ),
+                defaultIndex = BackgroundSettingsRepository.DEFAULT_SCHEDULED_COUNTDOWN_LEAD,
+            )
         )
     }
 
@@ -561,6 +612,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "logs.enabled",
+                readable = ConfigReadable(ConfigValueFormatter.Bool()),
                 displayName = "Logging enabled",
                 description = "Capture stdout/stderr to daily log files for diagnostics.",
                 valueSchema = ConfigSchema.Bool,
@@ -696,6 +748,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "envvars.privacyMode",
+                readable = ConfigReadable(ConfigValueFormatter.Bool()),
                 displayName = "Privacy Mode",
                 description = "When ON, env-var values that appear in shell-execute output are masked before reaching the model. Turning OFF lets the model see raw values — only do this if the user explicitly asked.",
                 valueSchema = ConfigSchema.Bool,
@@ -772,6 +825,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "defaults.primaryGroup",
+                readable = ConfigReadable(ConfigValueFormatter.Ref(ConfigRefKind.Group)),
                 displayName = "Default primary group",
                 description = "Group used by new sessions. Empty string clears the default.",
                 valueSchema = ConfigSchema.Str(maxLength = 200),
@@ -794,6 +848,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "defaults.subGroup",
+                readable = ConfigReadable(ConfigValueFormatter.Ref(ConfigRefKind.Group)),
                 displayName = "Default sub group",
                 description = "Secondary group for fallback. Empty string clears the default.",
                 valueSchema = ConfigSchema.Str(maxLength = 200),
@@ -816,6 +871,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "defaults.agentLoopEntries",
+                readable = ConfigReadable(ConfigValueFormatter.RefList(ConfigRefKind.ModelEntry, ordered = true)),
                 displayName = "Agent loop model entries",
                 description = "Model entries available via minis-model-use. Replace with full list to set; use .append/.remove for single-element ops.",
                 valueSchema = ConfigSchema.Array(ConfigSchema.Str()),
@@ -857,6 +913,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "defaults.agentLoopGroups",
+                readable = ConfigReadable(ConfigValueFormatter.RefList(ConfigRefKind.Group, ordered = true)),
                 displayName = "Agent loop groups",
                 description = "Whole groups exposed via minis-model-use.",
                 valueSchema = ConfigSchema.Array(ConfigSchema.Str()),
@@ -998,6 +1055,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "soul.name",
+                readable = ConfigReadable(ConfigValueFormatter.Text()),
                 displayName = "Soul name",
                 description = "The agent's name as shown in chat bubble headers and as the system-prompt identity. Trimmed; empty falls back to \"Minis\".",
                 valueSchema = ConfigSchema.Str(maxLength = 64),
@@ -1036,6 +1094,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "soul.icon",
+                readable = ConfigReadable(ConfigValueFormatter.Image),
                 displayName = "Soul icon",
                 // The description IS the API doc — `minis-config topic-help
                 // soul` prints it verbatim. It leads with every word a user
@@ -1108,6 +1167,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "soul.style",
+                readable = ConfigReadable(ConfigValueFormatter.Text()),
                 displayName = "Soul style",
                 description = "Short style descriptor used as a hint in the system prompt (e.g. \"Warm, direct, opinionated\").",
                 valueSchema = ConfigSchema.Str(maxLength = 256),
@@ -1130,6 +1190,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "soul.lang",
+                readable = ConfigReadable(ConfigValueFormatter.EnumLabels(mapOf("auto" to "Auto", "zh" to "Chinese", "en" to "English"))),
                 displayName = "Soul language",
                 description = "Preferred response language: auto / zh / en. Older SOUL.md files missing the field are upgraded on first write.",
                 valueSchema = ConfigSchema.StrEnum(listOf("auto", "zh", "en")),
@@ -1157,6 +1218,7 @@ internal object ConfigBuiltins {
         r.register(
             ClosureField(
                 path = "soul.body",
+                readable = ConfigReadable(ConfigValueFormatter.LongText),
                 displayName = "Soul personality prompt",
                 description = "Personality / voice instructions injected as a block in the system prompt. Length cap is language-aware: Chinese ≤ ${com.openminis.app.agent.SoulStore.CHINESE_CHAR_LIMIT} chars OR English ≤ ${com.openminis.app.agent.SoulStore.ENGLISH_WORD_LIMIT} words (rule picked by the majority language). The writer also rejects prompt-injection patterns (\"ignore previous instructions\" etc.) — keep this to genuine character / tone guidance.",
                 // No schema maxLength because either character or word

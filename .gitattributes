@@ -1,2 +1,6 @@
 scripts/gen_debug_skill_android.sh text eol=lf
 src/android/app/src/main/assets/default_mount/etc/profile.d/minis.sh text eol=lf
+
+# Bundled skills are verified against catalog byte counts and SHA-256 hashes.
+# Preserve upstream bytes on checkout, including Windows with core.autocrlf.
+src/android/app/src/main/assets/forge/bundled-skills/** -text

@@ -13,6 +13,8 @@ import com.openminis.app.provider.gemini.GeminiProvider
 import com.openminis.app.provider.openai.OpenAIProvider
 
 object ProviderFactory {
+    fun oneOffSessionId(): String = java.util.UUID.randomUUID().toString()
+
     /**
      * Create a provider, optionally with OAuth support.
      * [context] is needed for OpenAI OAuth to access encrypted storage for token refresh.
@@ -22,7 +24,7 @@ object ProviderFactory {
         apiKey: String,
         model: LLMModel,
         context: Context? = null,
-        sessionId: String? = null,
+        sessionId: String? = oneOffSessionId(),
         overrides: ModelOverrides? = null,
     ): LLMProvider {
         // T174: route through ProviderInstance.effectiveBaseURL instead of
@@ -52,8 +54,12 @@ object ProviderFactory {
                 val isOAuth = instance.credentialType == ProviderCredential.oauth
                 // [T-provider-custom-user-agent] Only meaningful for custom-base
                 // (relay) instances; on the official direct path it's null.
-                if (basePath != null) AnthropicProvider(apiKey, model, basePath, isOAuth = isOAuth, customUserAgent = instance.customUserAgent)
+                val anthropic = if (basePath != null) AnthropicProvider(apiKey, model, basePath, isOAuth = isOAuth, customUserAgent = instance.customUserAgent)
                 else AnthropicProvider(apiKey, model, isOAuth = isOAuth)
+                // [T-quota-claude-subscription] Tag OAuth instances so their
+                // replies' usage headers reach the quota store.
+                if (isOAuth) anthropic.quotaInstanceId = instance.id
+                anthropic
             }
             ProviderType.gemini -> {
                 if (basePath != null) GeminiProvider(apiKey, model, basePath)
@@ -85,7 +91,11 @@ object ProviderFactory {
                         oauthTokenProvider = { oauthManager.validAccessToken() ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey() },
                         model = model,
                         codexAccountId = oauthManager.accountId,
-                    )
+                    ).also {
+                        // [T-quota-codex-subscription] Replies' x-codex-*
+                        // headers feed this instance's quota.
+                        it.quotaInstanceId = instance.id
+                    }
                 } else {
                     // API key, or manual OAuth bearer (with or without custom
                     // base URL). The user can flip `useResponsesAPI` on a
@@ -235,6 +245,8 @@ object ProviderFactory {
         // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
+        (provider as? com.openminis.app.network.NetworkTagged)?.netTag =
+            com.openminis.app.network.NetworkRuntime.providerTag(instance.id)
         (provider as? OpenAIProvider)?.supportsGptFastMode = FastModeSupport.supportsGptRoute(instance.providerType)
         (provider as? OpenAIProvider)?.responseTimeoutSeconds = instance.responseTimeoutSeconds
         (provider as? OpenAIProvider)?.sessionId = sessionId

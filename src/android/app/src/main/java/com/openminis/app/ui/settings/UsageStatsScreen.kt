@@ -142,7 +142,7 @@ private fun TokenTotals(tokens: UsageTokens) {
         stringResource(R.string.usage_label_output) to formatCount(tokens.output),
         if (tokens.cacheRead > 0) stringResource(R.string.usage_label_cache_read) to formatCount(tokens.cacheRead) else null,
         if (tokens.cacheCreation > 0) stringResource(R.string.usage_label_cache_creation) to formatCount(tokens.cacheCreation) else null,
-        tokens.cacheHitRate?.takeIf { tokens.cacheRead > 0 }?.let { stringResource(R.string.usage_label_cache_hit_rate) to String.format("%.1f%%", it) },
+        tokens.cacheHitRate?.let { stringResource(R.string.usage_label_cache_hit_rate) to String.format("%.1f%%", it) },
     )
     values.forEachIndexed { index, (label, value) ->
         SettingsValueRow(title = label, value = value, valueColor = MaterialTheme.colorScheme.onSurface,
@@ -169,7 +169,7 @@ private fun UsageModelRow(stats: UsageModelStats, selected: Boolean, showDivider
                 DetailRow(stringResource(R.string.usage_detail_output), formatCount(stats.tokens.output))
                 if (stats.tokens.cacheRead > 0) DetailRow(stringResource(R.string.usage_label_cache_read), formatCount(stats.tokens.cacheRead))
                 if (stats.tokens.cacheCreation > 0) DetailRow(stringResource(R.string.usage_label_cache_creation), formatCount(stats.tokens.cacheCreation))
-                stats.tokens.cacheHitRate?.takeIf { stats.tokens.cacheRead > 0 }?.let {
+                stats.tokens.cacheHitRate?.let {
                     DetailRow(stringResource(R.string.usage_label_cache_hit_rate), String.format("%.1f%%", it))
                 }
                 if (stats.days > 0) DetailRow(stringResource(R.string.usage_detail_daily_avg), formatCount(stats.tokens.total / stats.days))

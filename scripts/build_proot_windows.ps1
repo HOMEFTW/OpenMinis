@@ -76,6 +76,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or ($elf -join "`n") -notmatch 'AArch64') { throw 'Output is not AArch64 ELF' }
     $strings = & "$bin/llvm-strings.exe" 'proot-aarch64'
     if ($strings -notcontains '--fake-netlink') { throw 'Missing fake-netlink extension' }
+    if ($strings -notcontains '--xnet') { throw 'Missing xnet extension' }
     Copy-Item -LiteralPath 'proot-aarch64' -Destination "$repo/src/android/app/src/main/assets/proot-aarch64" -Force
     Copy-Item -LiteralPath 'proot-aarch64' -Destination "$jni/libproot.so" -Force
     Get-FileHash -LiteralPath "$jni/libproot.so" -Algorithm SHA256

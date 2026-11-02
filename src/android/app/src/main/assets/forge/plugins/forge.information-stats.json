@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 2,
+  "version": "0.3.2",
+  "compatibility": {
+    "codex": [
+      "26.1027.3384.0",
+      "26.1023.6123.0",
+      "26.1016.8622.0",
+      "26.1021.2667.0"
+    ],
+    "forge": [
+      ">=0.3.0 <0.4.0"
+    ]
+  },
+  "permissions": [
+    "panels",
+    "conversation.read",
+    "sidebar"
+  ],
+  "capabilities": [
+    {
+      "name": "panels",
+      "version": 1
+    },
+    {
+      "name": "ui",
+      "version": 1
+    }
+  ],
+  "changelog": [
+    {
+      "version": "0.3.2",
+      "date": "2026-11-01",
+      "items": [
+        "适配 Codex 26.1027.3384.0，保持 Forge API 2；修复主页面入口需要先进入设置的问题。",
+        "指纹采样使用独立临时会话和空目录，避免继承任务历史或项目工具指令；修正事件分类并完善异常清理。"
+      ]
+    },
+    {
+      "version": "0.3.1",
+      "date": "2026-10-28",
+      "items": [
+        "适配 Codex 26.1023.6123.0，保持 Forge API 2。",
+        "修复运行中回合截点和临时分支来源丢失导致的检测失败；完善取消、校验失败与进程管道清理。"
+      ]
+    },
+    {
+      "version": "0.3.0",
+      "date": "2026-10-27",
+      "items": [
+        "升级至 Codex Forge 0.3.0 / Forge API 2。"
+      ]
+    },
+    {
+      "version": "0.2.4",
+      "date": "2026-10-27",
+      "items": [
+        "新增速度统计、模型指纹诊断与左侧简要信息卡。"
+      ]
+    }
+  ],
+  "id": "forge.information-stats",
+  "name": "信息统计插件",
+  "description": "Agent 速度、ModelTrace 数字指纹与 is-gpt-nerfed 一致性诊断。",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "信息统计",
+        "builtinPage": "information-stats",
+        "placement": "right"
+      }
+    ],
+    "sidebar": [
+      {
+        "id": "open",
+        "title": "信息统计",
+        "panel": "main"
+      }
+    ]
+  },
+  "androidHost": {
+    "name": "OpenMinis",
+    "apiVersion": 2,
+    "surfaces": [
+      "plugin.menu",
+      "conversation.menu",
+      "screen"
+    ]
+  }
+}

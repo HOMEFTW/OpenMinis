@@ -6,7 +6,7 @@
 - PRoot 使用已有 Windows NDK 27.0.12077973、MinGW GNU Make 和 Git Bash 从源码交叉编译为 ARM64。
 - 原有 Termux 64/32 位加载器保持不变，已通过项目内置 SHA-256 校验。
 - Alpine 3.21.3 aarch64 minirootfs 已下载并通过官方 SHA-256 校验。
-- `rclone.aar` 使用工作目录内的便携 Go 1.27.1 和 gomobile 从 `deps/rclone-mobile` 编译，含真实的 ARM64 `libgojni.so`，没有用空壳实现代替备份功能。
+- `rclone.aar` 使用固定 Go 1.25.5 工具链和 gomobile 从 `deps/rclone-mobile` 编译，含真实的 ARM64 `libgojni.so`，没有用空壳实现代替备份功能。
 - Gradle 自动补装了项目声明的 CMake 3.22.1。
 
 ## 首次模型接入构建记录（历史版本）
@@ -26,7 +26,16 @@
 
 ## 后续修改 Kotlin 后重新打包
 
-本轮同步将 PRoot 固定到上游 `1b444ee1`，包含 rtnetlink 模拟及原生工具退出码修复。
+Forge 插件的前端源码位于 `src/android/forge-ui/`。修改 JSX/CSS 前先在该目录运行 `npm ci`；统一构建脚本在 Node 和依赖可用时自动重建 `app/src/main/assets/forge/ui/`。没有前端工具时使用仓库自带的已打包资源；修改前端后必须安装依赖并重新构建，避免带入旧界面。
+
+```powershell
+Push-Location src/android/forge-ui
+npm ci
+Pop-Location
+.\scripts\build_android_windows.ps1 -RunAllTests -BuildAndroidTests
+```
+
+本轮稳定版同步将 PRoot 固定到 `8b31a69345730692f2f49a88694fdcaec78b2031`，包含 rtnetlink 模拟、原生工具退出码修复及 `--xnet` 透明网络支持。
 首次更新该依赖后先执行 `./scripts/build_proot_windows.ps1`，再执行下方 APK 构建脚本。
 原生构建缓存放在 `D:/Code/.tools/openminis-proot-build`；脚本校验并保留 Termux 加载器，
 生成匹配其已验证入口偏移的 PRoot，不使用不兼容的 fork 加载器。
@@ -53,6 +62,14 @@
 .\scripts\build_android_windows.ps1 -RunModelTests
 ```
 
+只运行指定回归类时，仍使用同一脚本入口；完成后会编译应用 APK：
+
+```powershell
+.\scripts\build_android_windows.ps1 -TestFilter 'com.openminis.app.tools.FileToolReliabilityTest'
+```
+
+`-TestFilter` 支持多个类名或 Gradle 测试匹配模式；指定它时只执行匹配的测试。完整验收时去掉过滤条件，使用 `-RunAllTests -BuildAndroidTests`。
+
 脚本优先使用 PATH 中的 Gradle，其次使用用户缓存中的 Gradle 8.13；也可用 `-GradlePath '完整的gradle.bat路径'` 指定。没有可用版本时，使用仓库的 Gradle Wrapper 下载它声明的版本。
 
 预期产物：`src/android/app/build/outputs/apk/debug/app-debug.apk`。它使用调试签名，支持 Android 8.0+ ARM64 设备。构建成功不代表已完成真机运行或真实模型账号验证。
@@ -64,3 +81,22 @@
 - debug skill 的 shell 脚本使用 LF 换行，避免 Windows 检出 CRLF 导致 Bash 报错。
 
 本机开发使用的临时编译目录没有上传到仓库。上述脚本只负责重新打包，不自动重建这些原生依赖。`rclone.aar`、PRoot 和 Alpine 都是被 Git 忽略的本地构建产物；复制工作副本时应保留它们。重新克隆仓库后仍需按 `BUILDING.md` 准备依赖，或重新执行对应的原生构建流程。
+
+## 稳定版网络原生依赖（2026-11-02）
+
+Go 模块以 `deps/rclone-mobile/go.mod` 声明的 Go 1.25.5 构建；使用更新的宿主 Go 时设置 `GOTOOLCHAIN=go1.25.5`。1.27 工具链与当前间接 JSON 依赖不兼容，不能只因版本较新就替换。工具均放在 `D:/Code/.tools/`。
+
+```powershell
+$env:GOTOOLCHAIN = 'go1.25.5'
+.\scripts\build_rclone_windows.ps1 -GoPath '实际的go.exe路径' -GomobilePath '实际的gomobile.exe路径' -NdkPath 'C:/Users/homeftw/Android/Sdk/ndk/27.0.12077973'
+.\scripts\build_proot_windows.ps1
+.\scripts\build_android_windows.ps1 -RunAllTests -BuildAndroidTests
+```
+
+rclone 脚本生成 Android 26+ ARM64 AAR，校验 Java 类与 `libgojni.so` 后复制到 `app/libs/rclone.aar`。网络主机测试使用 Unix 系统调用，因此在 WSL Linux 运行；可给脚本加 `-RunTests -WslDistribution Ubuntu -WslGoPath '/实际Linux路径/go'`，或在 WSL 的 `deps/rclone-mobile` 中执行：
+
+```sh
+CGO_ENABLED=0 go test -tags=ts_omit_logtail,ts_omit_portmapper ./nethub ./tsnet ./rcloneroute ./netfs
+```
+
+Kotlin 编译器堆设为 4 GiB，解决完整网络集成后的 2 GiB 堆耗尽；这不改变 APK 的运行时堆大小。最终验证结果见 `docs/fixes/2026-11-02-stable-115-sync.md`。

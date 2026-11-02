@@ -16,6 +16,7 @@ private fun toolResultSnapshot(content: String): String {
 /** Media refs stay top-level so existing restore, sync and media cleanup can find them. */
 internal fun serializeToolResults(
     results: List<AgentContentPart.ToolResult>,
+    durationsMs: Map<String, Long> = emptyMap(),
     saveImage: (AgentContentPart.ToolResult) -> JSONObject,
 ): String {
     val parts = JSONArray()
@@ -25,8 +26,8 @@ internal fun serializeToolResults(
             .put("name", result.name)
             .put("output", result.content)
             .put("success", !result.isError)
-            .put("snapshot", JSONObject().put("type", "text")
-                .put("text", toolResultSnapshot(result.content)))))
+            .put("snapshot", ToolDurationWire.stamp(JSONObject().put("type", "text")
+                .put("text", toolResultSnapshot(result.content)), durationsMs[result.id]))))
         if (result.imageData != null) {
             val reference = saveImage(result)
             reference.getJSONObject("value").put("toolUseId", result.id)

@@ -74,7 +74,11 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         return try {
             when (val sub = args.positional.firstOrNull() ?: "list") {
                 "list" -> handleList()
-                "create", "add" -> handleCreate(args, request.sessionId)
+                "create", "add" -> {
+                    val caller = OffloadCallerSession.resolve(request.sessionId)
+                    AppLogger.info(TAG, "create caller=${caller.sid} source=${caller.source}")
+                    handleCreate(args, caller.sid)
+                }
                 "delete", "remove", "rm" -> handleDelete(args)
                 "enable" -> handleSetEnabled(args, true)
                 "disable" -> handleSetEnabled(args, false)
@@ -136,6 +140,7 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         }
         val task = manager.create(
             ScheduledTask(
+                creatorSessionId = callerSessionId?.takeIf { it.isNotBlank() },
                 label = label,
                 timeOfDayHour = trigger.hour,
                 timeOfDayMinute = trigger.minute,

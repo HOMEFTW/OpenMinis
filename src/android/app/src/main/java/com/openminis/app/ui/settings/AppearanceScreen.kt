@@ -46,6 +46,7 @@ import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.ScreenLockPortrait
 import androidx.compose.material.icons.outlined.StopCircle
+import androidx.compose.material.icons.outlined.UnfoldLess
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
@@ -272,6 +273,11 @@ fun AppearanceScreen(
     var returnKeyBehavior by remember { mutableIntStateOf(prefs.getInt(KEY_RETURN_KEY_BEHAVIOR, 0)) }
     var keepScreenAwake by remember { mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_AWAKE, false)) }
     var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
+    // [T-port-fold-tools] Stored with the agent switches (chat.foldTools), not in the appearance prefs.
+    val agentPrefs = remember {
+        context.getSharedPreferences(com.openminis.app.tools.AgentToolSwitch.PREFS, android.content.Context.MODE_PRIVATE)
+    }
+    var foldTools by remember { mutableStateOf(agentPrefs.getBoolean(KEY_FOLD_COMPLETED_TOOLS, true)) }
     var confirmBeforeStopping by remember { mutableStateOf(prefs.getBoolean(KEY_CONFIRM_BEFORE_STOPPING, false)) }
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
@@ -459,6 +465,26 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     toolPreview = it
                     prefs.edit().putBoolean(KEY_TOOL_PREVIEW, it).apply()
+                },
+                showDivider = false,
+            )
+        }
+
+        // [T-port-fold-tools] -- Tool Calls --
+        // Fold a run of consecutive tool calls into one "Ran N tools" line.
+        // An open chat re-folds at once through its prefs listener.
+        SettingsSection(
+            header = stringResource(R.string.tool_fold_section),
+            footer = stringResource(R.string.tool_fold_setting_footer),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.Outlined.UnfoldLess,
+                iconColor = tileTeal,
+                title = stringResource(R.string.tool_fold_setting_title),
+                checked = foldTools,
+                onCheckedChange = {
+                    foldTools = it
+                    agentPrefs.edit().putBoolean(KEY_FOLD_COMPLETED_TOOLS, it).apply()
                 },
                 showDivider = false,
             )

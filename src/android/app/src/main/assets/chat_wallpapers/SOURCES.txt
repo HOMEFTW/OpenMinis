@@ -14,3 +14,12 @@ GPT和Claude设计参考：ZipZipPipe。
 本次为根据外观文字描述生成的新图，不是原图或参考图输入编辑。DeepSeek采用小个子Q版。
 DeepSeek词条标注原型授权为CC BY-NC-SA 4.0；相关二创遵循署名、非商用、相同方式共享要求。
 原参考图权利归各自创作者。
+
+2026-11-02 增补 Grok：
+同一用户指定对话中新生成的 grok-1080x2400.png，源目录：
+D:/Code/outputs/grok-background-20261102/
+应用内文件：chat_wallpaper_grok.webp，保留 1080×2400，WebP quality=88，仅压缩转换。
+造型参考：ZipZipPipe 的金色双马尾、蝙蝠翼、黑红裙装与巨斧。
+来源说明：https://github.com/shuaizenge/ai-girls/blob/HEAD/characters/grok/README.md
+原作者设计：https://www.pixiv.net/artworks/148186519
+该素材由上述对话以文字描述生成，不是原参考图文件，也未重新生图。

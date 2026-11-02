@@ -37,6 +37,25 @@ open class VoiceProvider(
     val baseURL: String,
     val apiKey: String? = null,
 ) {
+    var customUserAgent: String? = null
+
+    private val baseHttpClient: OkHttpClient by lazy {
+        Companion.httpClient.newBuilder().addInterceptor { chain ->
+            val request = chain.request()
+            val custom = customUserAgent?.trim()?.takeIf { it.isNotEmpty() }
+            val ua = custom ?: if (request.header("User-Agent") == null) {
+                com.openminis.app.provider.MinisUserAgent.DEFAULT
+            } else null
+            chain.proceed(if (ua == null) request else request.newBuilder().header("User-Agent", ua).build())
+        }.build()
+    }
+
+    // Speech follows the default route, as in stable Android 1.15.
+    val httpClient: OkHttpClient get() = com.openminis.app.network.NetworkHttp.client(
+        com.openminis.app.network.NetworkHttp.DEFAULT_TAG,
+        com.openminis.app.network.EndpointCertificates.client(baseHttpClient, baseURL),
+    )
+
     companion object {
         private const val TAG = "VoiceProvider"
 

@@ -122,6 +122,7 @@ object CodexModelsApi {
         clientVersion: String,
         context: Context? = null,
         forceRefresh: Boolean = false,
+        netTag: String? = null,
     ): Result = withContext(Dispatchers.IO) {
         val key = cacheKey(accountId, accessToken, clientVersion)
         // hasAccountId, never the id itself. It gates BOTH the
@@ -152,7 +153,7 @@ object CodexModelsApi {
         accountId?.takeIf { it.isNotBlank() }?.let { builder.header("Chatgpt-Account-Id", it) }
 
         val (status, body) = try {
-            client.newCall(builder.build()).execute().use { resp ->
+            com.openminis.app.network.NetworkHttp.client(netTag, client).newCall(builder.build()).execute().use { resp ->
                 resp.code to (resp.body?.string() ?: "")
             }
         } catch (e: Exception) {

@@ -13,9 +13,9 @@ import org.junit.Test
 class AgentJobRegistryRaceTest {
     @Before fun reset() = AgentJobRegistry.resetForTest()
 
-    private fun reserve(session: String? = null, then: AgentJobThen = AgentJobThen.None) = AgentJobRegistry.tryRegisterChild(
+    private fun reserve(session: String? = null, then: AgentJobThen = AgentJobThen.None, parent: String = "parent") = AgentJobRegistry.tryRegisterChild(
         title = "task", origin = AgentJobOrigin.TOOL,
-        target = AgentJobTarget.ChildOfCurrent("parent", "tool"), prompt = "do it",
+        target = AgentJobTarget.ChildOfCurrent(parent, "tool"), prompt = "do it",
         then = then, runSessionId = session,
     )
 
@@ -36,6 +36,34 @@ class AgentJobRegistryRaceTest {
         AgentJobRegistry.cancel(job.id, "stopped during setup")
         assertFalse(AgentJobRegistry.markRunning(job.id, "child"))
         assertEquals(AgentJobState.CANCELLED, AgentJobRegistry.job(job.id)?.state)
+    }
+
+    @Test fun `each of six parents can reserve three children without starving the others`() {
+        repeat(6) { p ->
+            val parent = "parent-$p"
+            repeat(3) { assertNotNull(reserve(parent = parent)) }
+            assertNull(reserve(parent = parent))
+            assertEquals(3, AgentJobRegistry.runningChildJobCount(parent))
+            assertFalse(AgentJobRegistry.canStartChildJob(parent))
+        }
+        assertEquals(18, AgentJobRegistry.runningChildJobCount)
+    }
+
+    @Test fun `a saturated parent and its full backlog do not block another parent's queue`() {
+        repeat(3) { assertNotNull(reserve()) }
+        repeat(AgentJobRegistry.MAX_QUEUED_DELEGATIONS) { i ->
+            assertTrue(AgentJobRegistry.enqueueDelegation(AgentJobRegistry.QueuedDelegation("parent", "{}", "a-$i")))
+        }
+        assertFalse(AgentJobRegistry.enqueueDelegation(AgentJobRegistry.QueuedDelegation("parent", "{}", "overflow")))
+        assertTrue(AgentJobRegistry.enqueueDelegation(AgentJobRegistry.QueuedDelegation("other", "{}", "b")))
+        val started = mutableListOf<String>()
+        AgentJobRegistry.registerQueuedStarter("parent") { started += it.toolUseId; reserve() != null }
+        AgentJobRegistry.registerQueuedStarter("other") { started += it.toolUseId; reserve(parent = "other") != null }
+        AgentJobRegistry.drainIfStalled()
+        assertEquals(listOf("b"), started)
+        assertEquals(10, AgentJobRegistry.queuedCount("parent"))
+        assertEquals(0, AgentJobRegistry.queuedCount("other"))
+        assertEquals(1, AgentJobRegistry.runningChildJobCount("other"))
     }
 
     @Test fun `batch stop drops queue before freed slot could start it`() {

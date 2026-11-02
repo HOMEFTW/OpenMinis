@@ -44,6 +44,8 @@ object ThinkingLevelCatalog {
         // rule at all. Normalize dots→hyphens first, then a single prefix match
         // covers 4.6 / 4.7 / 4.8 and future 4.x (mirrors iOS normalizedHasPrefix).
         Rule({ normalizedHasPrefix(it, "claude-opus-4") }, ThinkingLevel.MAX),
+        Rule({ normalizedHasPrefix(it, "claude-opus-5") }, ThinkingLevel.MAX),
+        Rule({ normalizedHasPrefix(it, "claude-sonnet-5-5") }, ThinkingLevel.MAX),
     )
 
     /** Prefix match that treats "." and "-" interchangeably in the version

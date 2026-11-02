@@ -13,9 +13,11 @@ internal data class OpenAIModelLimits(val context: Int?, val output: Int?) {
             val top = model.optJSONObject("top_provider")
             return OpenAIModelLimits(
                 context = first(model.opt("context_length"), model.opt("context_window"),
+                    model.opt("contextWindow"),
                     model.opt("max_context_length"), model.opt("max_model_len"),
                     top?.opt("context_length"), limit?.opt("context"), limits?.opt("context_length")),
                 output = first(model.opt("max_output_tokens"), model.opt("max_completion_tokens"),
+                    model.opt("maxOutputTokens"),
                     top?.opt("max_completion_tokens"), limit?.opt("output"), limits?.opt("max_output_tokens"),
                     model.opt("max_tokens")),
             )

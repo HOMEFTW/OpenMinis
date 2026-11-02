@@ -21,6 +21,7 @@ class UnavailableFieldTest {
     ) : ConfigField {
         override val displayName = "Live Updates (dynamic island)"
         override val description = "Show agent progress in the Live Updates chip."
+        override val readable = com.openminis.app.config.readable.ConfigReadable(com.openminis.app.config.readable.ConfigValueFormatter.Bool())
         override val valueSchema = ConfigSchema.Bool
         override val risk = ConfigRisk.NORMAL
         override val revertable = true

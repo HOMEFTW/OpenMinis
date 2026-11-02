@@ -38,8 +38,8 @@ class Build34CorrectionAttemptsTest {
         assertEquals(listOf(CorrectionFailureKind.RATE_LIMIT, CorrectionFailureKind.HTTP), diagnostics.failures.map { it.kind })
     }
 
-    @Test fun defaultPolicyDoesNotOverrideAuthenticationFailureButAlwaysTriesAtMostThreeModels() = runBlocking {
-        for ((policy, limit) in listOf(FallbackStrategy.default to 1, FallbackStrategy.always to 3)) {
+    @Test fun authenticationFailureUsesFallbackAndTriesAtMostThreeModels() = runBlocking {
+        for ((policy, limit) in listOf(FallbackStrategy.default to 3, FallbackStrategy.always to 3)) {
             val diagnostics = CorrectionDiagnostics()
             var calls = 0
             val error = runCatching {
@@ -87,8 +87,8 @@ class Build34CorrectionAttemptsTest {
                 tryCorrectionModels(entries, FallbackStrategy.always) { throw LLMError.Cancelled() }
         }
         val engine = VoiceCorrectionEngine(emptyList(), strategy, null, { emptyList() }, { false })
-        val suggestion = withContext(diagnostics) { engine.correct("original", locale = "en") }
-        assertFalse(suggestion.hasChange)
+        val error = runCatching { withContext(diagnostics) { engine.correct("original", locale = "en") } }.exceptionOrNull()
+        assertTrue(error is CancellationException)
         assertTrue(diagnostics.cancelled)
         assertTrue(diagnostics.failures.isEmpty())
     }

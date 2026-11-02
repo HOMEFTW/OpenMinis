@@ -12,6 +12,56 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionStorageMaintenanceGateTest {
+    @Test fun vmEntryPreemptsAProvisionalTreeClaimWithoutThrowing() = runBlocking {
+        val gate = SessionStorageMaintenanceGate()
+        gate.withOrphanMaintenance { maintenance ->
+            val claim = maintenance.claimTreeIfUnreserved(setOf("root", "child"))!!
+            gate.reserveForViewModel("child").use {
+                assertFalse(claim.beginCommit(listOf("child", "root")))
+                assertNull(maintenance.claimTreeIfUnreserved(setOf("root", "child")))
+                gate.reserve(setOf("root", SessionStorageReferences.ALL_MEDIA)).close()
+            }
+            claim.close()
+            maintenance.claimTreeIfUnreserved(setOf("root", "child"))!!.close()
+        }
+        assertTrue(gate.reservedSessionIds().isEmpty())
+    }
+
+    @Test fun lateVmEntryReturnsImmediatelyAndItsReadSuspendsUntilCommittedCleanupEnds() = runBlocking {
+        val gate = SessionStorageMaintenanceGate()
+        gate.withOrphanMaintenance { maintenance ->
+            val claim = maintenance.claimTreeIfUnreserved(setOf("root"))!!
+            assertTrue(claim.beginCommit(listOf("root")))
+            gate.reserveForViewModel("root").use {
+                val read = async(start = CoroutineStart.UNDISPATCHED) {
+                    gate.withSessionActivity(setOf("root")) { "fresh database read" }
+                }
+                assertFalse(read.isCompleted)
+                claim.close()
+                assertEquals("fresh database read", withTimeout(2_000) { read.await() })
+                assertNull(maintenance.claimTreeIfUnreserved(setOf("root")))
+            }
+        }
+        assertTrue(gate.reservedSessionIds().isEmpty())
+    }
+
+    @Test fun treeClaimIsAtomicAndProtectsBothLayouts() = runBlocking {
+        val gate = SessionStorageMaintenanceGate()
+        gate.withOrphanMaintenance { maintenance ->
+            gate.reserve(setOf("child")).use {
+                assertNull(maintenance.claimTreeIfUnreserved(setOf("root", "child")))
+                gate.reserve(setOf("root")).close()
+            }
+            maintenance.claimTreeIfUnreserved(setOf("root", "child"))!!.use {
+                for (id in setOf("root", "child", SessionStorageReferences.ALL_WORKSPACES, SessionStorageReferences.ALL_MEDIA)) {
+                    assertThrows(StorageMaintenanceBusyException::class.java) { gate.reserve(setOf(id)) }
+                }
+                gate.reserve(setOf("unrelated")).close()
+            }
+        }
+        gate.reserve(setOf("root", "child", SessionStorageReferences.ALL_MEDIA)).close()
+    }
+
     @Test fun fallbackWriteSentinelsProtectBothLayoutsAndWaitForExistingClaims() = runBlocking {
         val gate = SessionStorageMaintenanceGate()
         val ids = setOf(SessionStorageReferences.ALL_WORKSPACES, SessionStorageReferences.ALL_MEDIA)

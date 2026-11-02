@@ -20,7 +20,7 @@ import com.openminis.app.ui.chat.toolIconResFor
  *  - [GENERATING] the model is streaming the visible reply
  *  - [IDLE]       service alive with nothing running (presence only)
  */
-internal enum class AgentPhase { COMPLETED, WAITING, TOOL, THINKING, GENERATING, QUEUED, IDLE }
+internal enum class AgentPhase { COMPLETED, WAITING, SCHEDULED_WAIT, TOOL, THINKING, GENERATING, QUEUED, IDLE }
 
 internal fun resolveAgentPhase(
     isCompleted: Boolean,
@@ -29,8 +29,10 @@ internal fun resolveAgentPhase(
     hasActiveSessions: Boolean,
     isWaitingForAnswer: Boolean = false,
     hasQueuedWork: Boolean = false,
+    isScheduledWaiting: Boolean = false,
 ): AgentPhase = when {
-    isWaitingForAnswer && hasActiveSessions -> AgentPhase.WAITING
+    isWaitingForAnswer -> AgentPhase.WAITING
+    !hasActiveSessions && isScheduledWaiting -> AgentPhase.SCHEDULED_WAIT
     !hasActiveSessions && hasQueuedWork -> AgentPhase.QUEUED
     isCompleted -> AgentPhase.COMPLETED
     !hasActiveSessions -> AgentPhase.IDLE
@@ -51,6 +53,7 @@ internal fun resolveAgentPhase(
 internal fun notificationSmallIconFor(phase: AgentPhase, toolName: String?, brandIcon: Int = R.drawable.ic_launcher_monochrome): Int = when (phase) {
     AgentPhase.COMPLETED -> R.drawable.ic_notification_completed
     AgentPhase.WAITING -> R.drawable.ic_tool_question
+    AgentPhase.SCHEDULED_WAIT -> android.R.drawable.ic_lock_idle_alarm
     AgentPhase.TOOL -> toolIconResFor(toolName)
     AgentPhase.THINKING -> R.drawable.ic_tool_psychology
     AgentPhase.GENERATING, AgentPhase.QUEUED, AgentPhase.IDLE -> brandIcon

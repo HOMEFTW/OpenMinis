@@ -1,6 +1,7 @@
 package com.openminis.app.config
 
 import android.content.Context
+import com.openminis.app.config.readable.*
 import com.openminis.app.config.collections.SubAgentConfigRules
 import com.openminis.app.config.collections.SubAgentsCollection
 import com.openminis.app.config.fields.ClosureField
@@ -45,12 +46,14 @@ internal object Build34ConfigFields {
 
         registry.register(ClosureField(
             path = "chat.speedTier", displayName = "Response speed", description = "standard / fast / ultrafast. Unsupported ultrafast models use fast. Applies from the next request.",
+            readable = ConfigReadable(ConfigValueFormatter.EnumLabels(mapOf("standard" to "Standard", "fast" to "Fast", "ultrafast" to "Ultrafast"))),
             valueSchema = ConfigSchema.StrEnum(listOf("standard", "fast", "ultrafast")),
             reader = { ConfigValue.Str(FastModePrefs.speedTier.value) },
             writer = { FastModePrefs.setSpeedTier(context, (it as ConfigValue.Str).value) },
         ))
         registry.register(ClosureField(
             path = "speech.volume", displayName = "Read-aloud volume", description = "0.0–2.0; 1.0 is normal and values above it use a session loudness boost.",
+            readable = ConfigReadable(ConfigValueFormatter.Number()),
             valueSchema = ConfigSchema.Double(0.0, 2.0),
             reader = { VoiceOutputState.init(context); ConfigValue.Double(VoiceOutputState.volume.value.toDouble()) },
             writer = {
@@ -62,6 +65,7 @@ internal object Build34ConfigFields {
         ))
         registry.register(ClosureField(
             path = "voice.panel.expanded", displayName = "Expand voice panel", description = "The same expanded state used by the voice input panel.",
+            readable = ConfigReadable(ConfigValueFormatter.Bool()),
             valueSchema = ConfigSchema.Bool,
             reader = { VoiceModePrefs.init(context); ConfigValue.Bool(VoiceModePrefs.expanded) },
             writer = { VoiceModePrefs.init(context); VoiceModePrefs.expanded = (it as ConfigValue.Bool).value },
@@ -69,6 +73,7 @@ internal object Build34ConfigFields {
         for (output in listOf(false, true)) {
             registry.register(ClosureField(
                 path = "voice.${if (output) "output" else "input"}.overrideEntryId",
+                readable = ConfigReadable(ConfigValueFormatter.Ref(ConfigRefKind.ModelEntry)),
                 displayName = if (output) "Voice output model override" else "Voice input model override",
                 description = "A configured model entry ID or system voice entry ID; null restores group routing.",
                 valueSchema = ConfigSchema.Optional(ConfigSchema.Str()),
@@ -86,6 +91,7 @@ internal object Build34ConfigFields {
         }
         registry.register(ClosureField(
             path = "backup.deviceName", displayName = "Backup device name", description = "The device name used in backup filenames. Empty restores the system name.",
+            readable = ConfigReadable(ConfigValueFormatter.Text()),
             valueSchema = ConfigSchema.Str(maxLength = DeviceIdentity.CUSTOM_NAME_MAX_LENGTH),
             reader = { ConfigValue.Str(DeviceIdentity.customName(context).orEmpty()) },
             writer = { DeviceIdentity.setCustomName(context, (it as ConfigValue.Str).value) },
@@ -93,12 +99,14 @@ internal object Build34ConfigFields {
 
         registry.register(ClosureField(
             path = "updates.channel", displayName = "Update channel", description = "stable or beta. Only controls offered releases; installation remains manual.",
+            readable = ConfigReadable(ConfigValueFormatter.EnumLabels(mapOf("stable" to "Stable", "beta" to "Beta"))),
             valueSchema = ConfigSchema.StrEnum(listOf("stable", "beta")),
             reader = { ConfigValue.Str(com.openminis.app.data.UpdatePreferences.channel(context)) },
             writer = { com.openminis.app.data.UpdatePreferences.setChannel(context, (it as ConfigValue.Str).value) },
         ))
         registry.register(ClosureField(
             path = "updates.autoCheck", displayName = "Automatic update checks", description = "At most once a day on stable, or every six hours on beta. Manual checking still works when disabled.",
+            readable = ConfigReadable(ConfigValueFormatter.Bool()),
             valueSchema = ConfigSchema.Bool,
             reader = { ConfigValue.Bool(com.openminis.app.data.UpdatePreferences.autoCheckEnabled(context)) },
             writer = { com.openminis.app.data.UpdatePreferences.setAutoCheckEnabled(context, (it as ConfigValue.Bool).value) },
@@ -116,6 +124,7 @@ internal object Build34ConfigFields {
         ))
         registry.register(ClosureField(
             path = "subagents.order", displayName = "Sub agent order", description = "Every roster ID once, with the built-in agent first.",
+            readable = ConfigReadable(ConfigValueFormatter.RefList(ConfigRefKind.SubAgent, ordered = true)),
             valueSchema = ConfigSchema.Array(ConfigSchema.Str()),
             reader = { ConfigValue.Arr(repo.subAgents.map { ConfigValue.Str(it.id) }) },
             writer = {

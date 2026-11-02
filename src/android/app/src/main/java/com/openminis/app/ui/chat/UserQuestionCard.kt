@@ -3,6 +3,8 @@ package com.openminis.app.ui.chat
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,6 +36,7 @@ internal fun UserQuestionCard(
     onSelect: (String, String, Boolean) -> Unit,
     onSubmit: () -> Unit,
     onCancel: () -> Unit,
+    onNavigate: (Int) -> Unit = { com.openminis.app.agent.jobs.UserQuestionRegistry.goTo(request.instanceId, it) },
 ) {
     val question = request.currentQuestion ?: return
     val selection = request.selections[question.id]
@@ -42,6 +46,12 @@ internal fun UserQuestionCard(
     // inside the card fought its parent at the edges, especially on long prompts.
     Column(
         modifier = Modifier.fillMaxWidth()
+            .pointerInput(request.instanceId) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    com.openminis.app.agent.jobs.UserQuestionRegistry.noteInteraction(request.instanceId)
+                }
+            }
             .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -51,7 +61,9 @@ internal fun UserQuestionCard(
                 request.title.ifBlank { stringResource(R.string.chat_question_title) },
                 style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f),
             )
-            Text(com.openminis.app.service.chipTimerText(remainingMs), style = MaterialTheme.typography.labelMedium)
+            Text(if (request.hasCountdown) com.openminis.app.service.chipTimerText(remainingMs)
+                else stringResource(if (request.deferred) R.string.stable115_question_deferred else R.string.stable115_question_unlimited),
+                style = MaterialTheme.typography.labelMedium)
         }
         Text(
             stringResource(R.string.chat_question_progress, request.currentIndex + 1, request.questions.size),
@@ -96,6 +108,11 @@ internal fun UserQuestionCard(
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(onClick = onCancel, enabled = enabled) { Text(stringResource(R.string.chat_question_cancel)) }
+            if (request.currentIndex > 0) {
+                TextButton(onClick = { onNavigate(request.currentIndex - 1) }, enabled = enabled) {
+                    Text(stringResource(R.string.stable115_question_previous))
+                }
+            }
             TextButton(enabled = enabled && !selection?.value.isNullOrBlank(), onClick = onSubmit) {
                 Text(stringResource(if (request.currentIndex == request.questions.lastIndex) R.string.chat_question_submit else R.string.chat_question_next))
             }
@@ -132,6 +149,7 @@ internal fun questionOptionLabel(question: UserQuestionPrompt, index: Int): Stri
 @Composable
 private fun userQuestionRemainingMs(request: PendingUserQuestion): Long {
     val remaining by produceState(request.remainingMs(android.os.SystemClock.elapsedRealtime()), request.instanceId, request.expiresAtElapsedMs) {
+        if (!request.hasCountdown) return@produceState
         while (value > 0L) {
             delay(1000L)
             value = request.remainingMs(android.os.SystemClock.elapsedRealtime())

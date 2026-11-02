@@ -35,6 +35,7 @@ object AnthropicModelsApi {
         // [T-provider-custom-user-agent] Per-provider UA override; null/blank
         // keeps the default UA. Threaded from ProviderRepository.refreshModels.
         customUserAgent: String? = null,
+        netTag: String? = null,
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         // Cache key: base URL included so the same API key across proxies doesn't
         // share cached model lists (vLLM vs api.anthropic.com can differ).
@@ -95,8 +96,9 @@ object AnthropicModelsApi {
             android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url} isOAuth=$isOAuth")
 
             val response: Response = try {
-                com.openminis.app.network.EndpointCertificates.configure(client.newBuilder(), url)
-                    .build().newCall(request).execute()
+                com.openminis.app.network.NetworkHttp.client(
+                    netTag, com.openminis.app.network.EndpointCertificates.client(client, url),
+                ).newCall(request).execute()
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
                 continue
@@ -156,11 +158,14 @@ object AnthropicModelsApi {
                 // catalogued yet (e.g. Opus 4.8). Both OAuth and API-key direct
                 // Anthropic instances flow through here.
                 val reasoning = if (AnthropicProvider.supportsThinking(id)) true else null
-                parsed.add(LLMModel(id, displayName, "Anthropic", supportsReasoning = reasoning))
+                val limits = com.openminis.app.provider.openai.OpenAIModelLimits.read(obj)
+                parsed.add(LLMModel(id, displayName, "Anthropic", supportsReasoning = reasoning,
+                    contextWindow = limits.context, maxOutputTokens = limits.output,
+                    limitsReportedByEndpoint = if (limits.context != null || limits.output != null) true else null))
             }
             android.util.Log.i("AnthropicModels", "Parsed ${parsed.size} models: ${parsed.map { it.id }.joinToString()}")
             if (parsed.isEmpty()) return fallback
-            ModelsDevApi.enrichModels(parsed)
+            ModelsDevApi.enrichModels(parsed, preserveProviderLimits = isCustomEndpoint)
         } catch (_: Exception) {
             return fallback
         }

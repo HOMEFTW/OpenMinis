@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Yetkilendirme</string>
+    <string name="mcp_form_auth_none">Yok</string>
+    <string name="mcp_signin_not_signed_in">Oturum açılmadı</string>
+    <string name="mcp_signin_sign_in">Oturum Aç</string>
+    <string name="mcp_signin_reset_confirm">Sıfırla</string>
+</resources>

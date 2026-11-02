@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-provider-quota] Provider balance and subscription usage, from upstream strings.xml. -->
+<resources>
+    <string name="quota_source">Pinagmulan</string>
+    <string name="quota_done">Tapos na</string>
+    <string name="quota_status_unknown">Hindi alam</string>
+    <string name="quota_status_low">Mababa</string>
+    <string name="quota_updated">Na-update</string>
+</resources>

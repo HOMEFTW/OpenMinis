@@ -162,11 +162,12 @@ data class AgentJobCompletion(
 object AgentJobRegistry {
     private const val TAG = "AgentJobRegistry"
 
-    /** Hard cap on concurrently running child-session jobs (design §4.3).
+    /** Hard cap on concurrently running child-session jobs PER PARENT.
      *  Helpers bypass SessionConcurrencyManager — a parent awaiting its helper
-     *  holds a slot there, so routing helpers through the same pool of 5 could
+     *  holds a slot there, so routing helpers through the same pool of 6 could
      *  deadlock every parent behind its own children (§4.4). */
     const val MAX_CONCURRENT_CHILD_JOBS = 3
+    const val MAX_CONCURRENT_CHILD_JOBS_PER_PARENT = MAX_CONCURRENT_CHILD_JOBS
 
     private val _jobs = MutableStateFlow<Map<String, AgentJob>>(emptyMap())
     val jobs: StateFlow<Map<String, AgentJob>> = _jobs.asStateFlow()
@@ -241,7 +242,7 @@ object AgentJobRegistry {
         runSessionId: String? = null,
         wasResumed: Boolean = false,
     ): AgentJob? {
-        if (!canStartChildJob) return null
+        if (!canStartChildJob(target.parentSessionId)) return null
         if (runSessionId != null && _jobs.value.values.any {
                 it.runSessionId == runSessionId && (it.isActive || it.id in completingJobs)
             }) return null
@@ -277,7 +278,14 @@ object AgentJobRegistry {
     val runningChildJobCount: Int
         get() = _jobs.value.values.count { it.target.isChildOfCurrent && it.isActive }
 
+    /** Legacy aggregate for diagnostics. Admission must supply a parent id. */
     val canStartChildJob: Boolean get() = runningChildJobCount < MAX_CONCURRENT_CHILD_JOBS
+
+    fun runningChildJobCount(parentSessionId: String): Int =
+        _jobs.value.values.count { it.target.parentSessionIdOrNull == parentSessionId && it.isActive }
+
+    fun canStartChildJob(parentSessionId: String): Boolean =
+        runningChildJobCount(parentSessionId) < MAX_CONCURRENT_CHILD_JOBS_PER_PARENT
 
     // ── Delegation queue  [T-sub-agents-queue] ──────────────────────────────
 
@@ -296,7 +304,7 @@ object AgentJobRegistry {
         val queuedAtMs: Long = System.currentTimeMillis(),
     )
 
-    /** Backlog bound. Past this a delegation is refused, and says so plainly. */
+    /** Backlog bound per parent. */
     const val MAX_QUEUED_DELEGATIONS = 10
 
     private val queuedDelegations = mutableListOf<QueuedDelegation>()
@@ -374,7 +382,7 @@ object AgentJobRegistry {
 
     fun enqueueDelegation(item: QueuedDelegation): Boolean = synchronized(queuedDelegations) {
         if (queuedDelegations.any { it.parentSessionId == item.parentSessionId && it.toolUseId == item.toolUseId }) return true
-        if (queuedDelegations.size >= MAX_QUEUED_DELEGATIONS) return false
+        if (queuedDelegations.count { it.parentSessionId == item.parentSessionId } >= MAX_QUEUED_DELEGATIONS) return false
         queuedDelegations.add(item)
         queueRevision.value++
         AppLogger.info(
@@ -419,9 +427,10 @@ object AgentJobRegistry {
     @Synchronized
     private fun drainQueuedDelegations() {
         while (true) {
-            if (!canStartChildJob) return
             val next = synchronized(queuedDelegations) {
-                queuedDelegations.removeFirstOrNull()?.also { queueRevision.value++ }
+                // A full parent must not hold another parent's free slots hostage.
+                val index = queuedDelegations.indexOfFirst { canStartChildJob(it.parentSessionId) }
+                if (index < 0) null else queuedDelegations.removeAt(index).also { queueRevision.value++ }
             } ?: return
             val starter = queuedStarters[next.parentSessionId]
             if (starter == null) {
@@ -491,8 +500,8 @@ object AgentJobRegistry {
      * returns immediately unless work is waiting AND a slot is free.
      */
     fun drainIfStalled() {
-        val waiting = synchronized(queuedDelegations) { queuedDelegations.isNotEmpty() }
-        if (!waiting || !canStartChildJob) return
+        val ready = synchronized(queuedDelegations) { queuedDelegations.any { canStartChildJob(it.parentSessionId) } }
+        if (!ready) return
         AppLogger.info(TAG, "QUEUE stalled with a free slot — draining")
         drainQueuedDelegations()
     }
@@ -752,27 +761,38 @@ object AgentJobRegistry {
     private fun runThen(job: AgentJob) {
         val then = job.then as? AgentJobThen.FollowUpParent ?: return
         val parent = job.target.parentSessionIdOrNull ?: return
+        val terminations = SubAgentTerminationStore.shared
         // [T-android-stop-sibling-subagent] The user stopped this batch. The
         // job still finishes and still records its result; what it must not do
         // is hand that result to the parent, which would start a new turn in a
         // conversation the user just stopped.
         if (isDelegationMuted(parent)) {
             AppLogger.info(TAG, "then.FollowUpParent ${job.id.take(8)} suppressed — parent ${parent.take(8)} stopped")
+            terminations.setDeliveryForJob(job.id, SubAgentTermination.Delivery.FAILED, "withheld: the user stopped the parent's agents")
             return
         }
         // [T-agent-wrapup-turn] Never hand the parent an empty result: say
         // what happened so it re-delegates instead of digging.
-        val result = job.resultText?.takeIf { it.isNotBlank() } ?: HelperRunner.emptyResultNote(job.state.wire)
+        val termination = terminations.terminalForJob(job.id)
+        val result = if (termination != null) {
+            SubAgentTerminationRules.helperResultText(job.resultText.orEmpty(), termination)
+        } else {
+            job.resultText?.takeIf { it.isNotBlank() } ?: HelperRunner.emptyResultNote(job.state.wire)
+        }
         val text = then.template?.takeIf { it.isNotEmpty() }?.replace("{{result}}", result)
             ?: completionCallback(job, result).xml
         val dispatcher = followUpDispatcher
         if (dispatcher == null) {
             AppLogger.warning(TAG, "then.FollowUpParent ${job.id.take(8)} dropped — no dispatcher installed")
+            terminations.setDeliveryForJob(job.id, SubAgentTermination.Delivery.FAILED, "no delivery path installed")
             return
         }
         AppLogger.info(TAG, "then.FollowUpParent ${job.id.take(8)} → parent ${parent.take(8)} state=${job.state.wire}")
         runCatching { dispatcher(parent, text, job.id) }
-            .onFailure { AppLogger.warning(TAG, "then.FollowUpParent ${job.id.take(8)} failed: ${it.message}") }
+            .onFailure {
+                AppLogger.warning(TAG, "then.FollowUpParent ${job.id.take(8)} failed: ${it.message}")
+                terminations.setDeliveryForJob(job.id, SubAgentTermination.Delivery.FAILED, it.message ?: "delivery threw")
+            }
     }
 
     /** The finished-envelope for [job] — iOS AgentJobRegistry.completionCallback. */

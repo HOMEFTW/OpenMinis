@@ -25,7 +25,18 @@ object FileEditTool {
         propertyOrdering = listOf("tool_title", "path", "old_string", "new_string", "replace_all"),
     )
 
-    fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
+    fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult = try {
+        FileToolIO.run(NAME, writes = true) { executeImpl(argsJson, sessionId, context) }
+    } catch (e: FileToolIO.TimedOut) {
+        ToolExecutionResult("Error: ${e.message}", false, toolTitle = NAME, timedOut = true)
+    } catch (e: FileToolIO.OutOfMemory) {
+        ToolExecutionResult("Error: ${e.message}", false, toolTitle = NAME)
+    } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        ToolExecutionResult("Error: File operation interrupted. A write may still complete; re-read the file before retrying.", false, toolTitle = NAME)
+    }
+
+    private fun executeImpl(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
         return try {
             val args = JSONObject(argsJson)
             val path = args.optString("path", "")
@@ -74,6 +85,13 @@ object FileEditTool {
                     return@withFile ToolExecutionResult("Error: File not found: $path", false, toolTitle = toolTitle)
                 }
 
+                val size = file.length()
+                if (size > FileToolIO.MAX_EDIT_BYTES) {
+                    return@withFile ToolExecutionResult(
+                        "Error: $path is $size bytes; file_edit handles files up to ${FileToolIO.MAX_EDIT_BYTES} bytes. Use the shell for larger files.",
+                        false, toolTitle = toolTitle,
+                    )
+                }
                 val content = file.readText()
 
                 var count = 0

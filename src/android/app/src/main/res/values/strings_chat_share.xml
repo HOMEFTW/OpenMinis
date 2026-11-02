@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-multi-select-share] Share Chat picker and export, from upstream strings.xml. -->
+<resources>
+    <string name="chat_share_share_chat">Share Chat…</string>
+    <string name="chat_share_select_messages">Select Messages</string>
+    <string name="chat_share_share_count">Share (%1$d)</string>
+    <string name="chat_share_select_all_below">Select All Below</string>
+    <string name="chat_share_deselect_all_below">Deselect All Below</string>
+    <string name="chat_share_select_below">Select Below</string>
+    <string name="chat_share_show_tools">Show Tools</string>
+    <string name="chat_share_hide_tools">Hide Tools</string>
+    <string name="chat_share_show_thinking">Show Thinking</string>
+    <string name="chat_share_hide_thinking">Hide Thinking</string>
+    <string name="chat_share_clear_selection">Clear Selection</string>
+    <string name="chat_share_creating">Creating…</string>
+    <string name="chat_share_error_nothing">Nothing to share in the selected messages.</string>
+    <string name="chat_share_error_image_too_large">Too long for one image. Share it as a PDF instead.</string>
+    <string name="chat_share_error_write_failed">Couldn\'t create the file.</string>
+    <string name="chat_share_long_image">Long Image</string>
+    <string name="chat_share_pdf">PDF</string>
+    <string name="chat_share_too_long_image">Too long to stitch into one image.</string>
+    <string name="chat_share_width_label">Width: %1$s</string>
+    <string name="chat_share_table_label">Table: %1$s</string>
+    <string name="chat_share_appearance_label">Appearance: %1$s</string>
+    <string name="chat_share_switched_to">Switched to %1$s</string>
+    <string name="chat_share_table_adaptive">Adaptive Width</string>
+    <string name="chat_share_table_default">Default Width</string>
+    <string name="chat_share_width_phone">Phone</string>
+    <string name="chat_share_width_tablet">Tablet</string>
+    <string name="chat_share_n_selected">%1$d Selected</string>
+    <string name="chat_share_select_all">Select All</string>
+    <string name="chat_share_deselect_all">Deselect All</string>
+</resources>

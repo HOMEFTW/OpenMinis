@@ -1,65 +1,39 @@
 package com.openminis.app.data
 
 import android.content.Context
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.channels.awaitClose
+import com.openminis.app.BuildConfig
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/** Compatibility API for the fork's settings, backup and foreground observer. */
 object UpdatePreferences {
-    private const val PREFS = "update_preferences"
-    private const val CHANNEL = "updates.channel"
-    private const val AUTO_CHECK = "updates.autoCheck"
     private val checkLock = Mutex()
-    private val _availableUpdate = MutableStateFlow<UpdateChecker.CheckResult.UpdateAvailable?>(null)
-    val availableUpdate = _availableUpdate.asStateFlow()
+    val availableUpdate = UpdateStateStore.availableUpdate
     data class Settings(val channel: String, val autoCheck: Boolean)
 
-    private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    fun channel(context: Context): String = prefs(context).getString(CHANNEL, "stable")?.takeIf { it == "beta" } ?: "stable"
-    fun autoCheckEnabled(context: Context): Boolean = prefs(context).getBoolean(AUTO_CHECK, true)
+    fun channel(context: Context): String { UpdateStateStore.init(context); return UpdateStateStore.channel.value.id }
+    fun autoCheckEnabled(context: Context): Boolean { UpdateStateStore.init(context); return UpdateStateStore.autoEnabled.value }
     fun snapshot(context: Context) = Settings(channel(context), autoCheckEnabled(context))
-    fun observe(context: Context) = callbackFlow {
-        val preferences = prefs(context)
-        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> trySend(snapshot(context)) }
-        preferences.registerOnSharedPreferenceChangeListener(listener)
-        trySend(snapshot(context))
-        awaitClose { preferences.unregisterOnSharedPreferenceChangeListener(listener) }
-    }.conflate()
-
+    fun observe(context: Context) = run {
+        UpdateStateStore.init(context)
+        combine(UpdateStateStore.channel, UpdateStateStore.autoEnabled) { channel, enabled -> Settings(channel.id, enabled) }
+    }
     fun setChannel(context: Context, value: String) {
         require(value == "stable" || value == "beta")
-        prefs(context).edit().putString(CHANNEL, value).apply()
-        _availableUpdate.value = null
+        UpdateStateStore.setChannel(context, UpdatePolicy.Channel.parse(value))
     }
+    fun setAutoCheckEnabled(context: Context, value: Boolean) = UpdateStateStore.setAutoEnabled(context, value)
+    internal fun shouldCheck(lastCheck: Long, now: Long, channel: String): Boolean =
+        lastCheck <= 0L || now < lastCheck || now - lastCheck >= UpdatePolicy.intervalMs(UpdatePolicy.Channel.parse(channel))
 
-    fun setAutoCheckEnabled(context: Context, value: Boolean) {
-        prefs(context).edit().putBoolean(AUTO_CHECK, value).apply()
-        if (!value) _availableUpdate.value = null
-    }
-
-    internal fun shouldCheck(lastCheck: Long, now: Long, channel: String): Boolean {
-        val interval = (if (channel == "beta") 6L else 24L) * 60 * 60 * 1000
-        return lastCheck <= 0L || now < lastCheck || now - lastCheck >= interval
-    }
-
-    /** Only offers an update; installing still requires the user's explicit tap. */
     suspend fun onForeground(context: Context, now: Long = System.currentTimeMillis()) = checkLock.withLock {
-        if (!autoCheckEnabled(context)) return@withLock
-        val selectedChannel = channel(context)
-        val key = "lastCheck.$selectedChannel"
-        val preferences = prefs(context)
-        if (!shouldCheck(preferences.getLong(key, 0L), now, selectedChannel)) return@withLock
-        preferences.edit().putLong(key, now).apply()
-        val result = UpdateChecker.check(includePrereleases = selectedChannel == "beta")
-        if (!autoCheckEnabled(context) || channel(context) != selectedChannel) return@withLock
-        when (result) {
-            is UpdateChecker.CheckResult.UpdateAvailable -> _availableUpdate.value = result
-            UpdateChecker.CheckResult.UpToDate -> _availableUpdate.value = null
-            else -> Unit
-        }
+        UpdateStateStore.init(context)
+        val decision = UpdatePolicy.autoDecision(
+            now, UpdateStateStore.throttleState(context), UpdateStateStore.channel.value, BuildConfig.VERSION_CODE,
+            BuildConfig.AUTO_UPDATE_CHECK, UpdateStateStore.autoEnabled.value, UpdateChecker.isChecking,
+        )
+        if (decision == UpdatePolicy.AutoDecision.CHECK || decision == UpdatePolicy.AutoDecision.INVALIDATE_AND_CHECK)
+            UpdateChecker.check(context, reason = "auto-foreground")
     }
 }

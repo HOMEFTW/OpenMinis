@@ -6,7 +6,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 
 /** The engine's verdict on one transcript. */
 data class CorrectionSuggestion(
@@ -62,34 +63,18 @@ class VoiceCorrectionEngine(
         // using the conversation context and rare-term digest alone.
         val candidates = retrieveCandidates(text, locale)
 
-        // The strategy's HTTP call is a BLOCKING OkHttp request inside
-        // withContext(Dispatchers.IO), and a blocking call has no suspension
-        // point for cancellation to land on — so wrapping it in
-        // withTimeoutOrNull alone does NOT bound it. Measured on device: a
-        // 5000ms budget still returned after 9461ms.
-        //
-        // Running it in its own async and awaiting THAT under the timeout gives
-        // the timer a real suspension point (the await), so the budget is
-        // honoured from the caller's perspective. The orphaned request is
-        // cancelled and its result discarded; it cannot come back and mutate
-        // anything because the suggestion is built purely from the return value.
+        // Each model call has its own budget; the bounded fallback chain owns it.
         val outcome = try {
-            coroutineScope {
-                val work = async(Dispatchers.IO) {
-                    strategy.correct(text, candidates, context, locale)
-                }
-                val result = withTimeoutOrNull(VoiceCorrectionConfig.CORRECTION_BUDGET_MS) {
-                    work.await()
-                }
-                if (result == null) work.cancel()
-                result
-            } ?: return timedOut(transcript, started)
-        } catch (t: Throwable) {
-            Log.w(TAG, "correction failed", t)
+            withContext(Dispatchers.IO) { strategy.correct(text, candidates, context, locale) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // Keep response bodies and credentials out of UI diagnostics and logs.
+            Log.w(TAG, "correction failed: ${error.javaClass.simpleName}")
             return CorrectionSuggestion(
                 transcript, transcript, false, "none",
                 (System.currentTimeMillis() - started).toInt(),
-                "llm_error:${t.javaClass.simpleName}",
+                "llm_error:${error.javaClass.simpleName}",
             )
         }
 
@@ -129,11 +114,6 @@ class VoiceCorrectionEngine(
             appliedPairs = pairs,
         )
     }
-
-    private fun timedOut(transcript: String, started: Long) = CorrectionSuggestion(
-        transcript, transcript, false, "none",
-        (System.currentTimeMillis() - started).toInt(), "llm_timeout",
-    )
 
     /**
      * Stage 1 + 2: phonetic keys → per-source lookup (concurrent) → fusion.

@@ -171,6 +171,7 @@ class TerminalSession(private val context: Context) {
                 // and the system timezone changed since.
                 envMap["TZ"] = PRootKernel.posixTz()
                 for ((k, v) in PRootKernel.customEnvironment) envMap[k] = v
+                envMap.putAll(com.openminis.app.network.NetworkShellEnvironment.proxyVariables())
                 ExecutionCoordinator.envVarRepository?.allAsDict()?.forEach { (k, v) -> envMap[k] = v }
 
                 // [T-android-seccomp-selfheal / GH#186] Applied last so nothing
@@ -477,6 +478,7 @@ class TerminalSession(private val context: Context) {
         // hardlinks to symlinks so apk install of binutils/gcc works.
         cmd.add("--link2symlink")
         cmd.add("--fake-netlink")
+        cmd.addAll(com.openminis.app.network.ShellTransparentNet.prootArgs(rootfsManager.prootBinary))
         cmd.add("-r"); cmd.add(rootfsManager.rootfsDir.absolutePath)
         cmd.add("-b"); cmd.add("/dev")
         cmd.add("-b"); cmd.add("/proc")
@@ -492,7 +494,7 @@ class TerminalSession(private val context: Context) {
         cmd.addAll(SessionMounts.toProotArgs(SessionMounts.forContext(context, sessionId).mounts))
 
         val handlers = NativeOffloadServer.registeredHandlers
-        if (handlers.isNotEmpty()) {
+        if (handlers.isNotEmpty() && NativeOffloadServer.awaitListening()) {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
 

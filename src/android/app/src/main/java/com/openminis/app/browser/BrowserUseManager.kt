@@ -171,6 +171,8 @@ class BrowserUseManager(
     private var currentProfile: UserAgentProfile = profile
 
     /** Callback for window.open / target="_blank" — TabPool hooks this. */
+    var viewportOverride: () -> Pair<Int, Int>? = { null }
+
     var onNewWindow: ((Message) -> Unit)? = null
 
     /** Callback for window.close — TabPool hooks this. */
@@ -407,6 +409,10 @@ class BrowserUseManager(
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebViewClient() {
         webView.webViewClient = object : WebViewClient() {
+            override fun onReceivedHttpAuthRequest(view: android.webkit.WebView?, handler: android.webkit.HttpAuthHandler?, host: String?, realm: String?) {
+                if (handler != null && com.openminis.app.network.WebViewNetworkProxy.answerAuth(handler, host, realm, view?.url)) return
+                super.onReceivedHttpAuthRequest(view, handler, host, realm)
+            }
             override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                 rendererFailed = true
                 scriptWaiters.toList().forEach { it.completeExceptionally(WebViewWedgedException("browser tab renderer process died")) }
@@ -760,7 +766,7 @@ class BrowserUseManager(
             BrowserAction.FIND_ELEMENTS -> return findElements(input.selector)
             BrowserAction.HOVER -> hover(input.selector)
             BrowserAction.GET_READABLE -> return getReadable()
-            BrowserAction.SET_USER_AGENT -> return setUserAgent(input.userAgent)
+            BrowserAction.SET_USER_AGENT -> return setUserAgent(input.userAgent, input.userAgentRaw)
             BrowserAction.SET_VIEWPORT ->
                 return BrowserActionResult.error("set_viewport must be routed through BrowserTabPool")
             BrowserAction.GET_BACKBONE -> return getBackbone(input.maxDepth)
@@ -1471,8 +1477,14 @@ class BrowserUseManager(
         applyShrinkToFit(cssWidth)
     }
 
-    private suspend fun setUserAgent(profile: UserAgentProfile?): BrowserActionResult {
-        val newProfile = profile ?: UserAgentProfile.MOBILE_CHROME
+    private suspend fun setUserAgent(profile: UserAgentProfile?, raw: String?): BrowserActionResult {
+        if (profile == null || profile == UserAgentProfile.CUSTOM) {
+            return BrowserActionResult.error(
+                "set_user_agent needs user_agent desktop_chrome or mobile_chrome (aliases: desktop, mobile); " +
+                    "got ${raw?.let { "'$it'" } ?: "nothing"}",
+            )
+        }
+        val newProfile = profile
         currentProfile = newProfile
         val ua = newProfile.userAgentString
         // Every WebView method must be called on the main thread, but the
@@ -1482,18 +1494,21 @@ class BrowserUseManager(
         // crash with "A WebView method was called on thread 'worker-N'".
         withContext(Dispatchers.Main) {
             ensureUsable()
-
             if (ua != null) {
                 webView.settings.userAgentString = ua
             }
-            applyViewport()
+            val (vw, vh) = viewportOverride() ?: newProfile.viewportSize
+            applyViewport(vw, vh)
             val oldUrl = _currentURL.value
             if (oldUrl.isNotEmpty()) {
                 webView.reload()
             }
         }
-        val vp = newProfile.viewportSize
-        return BrowserActionResult(text = "Switched to ${newProfile.value} (${vp.first}x${vp.second})")
+        val vp = viewportOverride() ?: newProfile.viewportSize
+        return BrowserActionResult(
+            text = "Switched this tab to ${newProfile.value} (${vp.first}x${vp.second}). Other tabs and the default " +
+                "in Browser Settings are unchanged; a tab opened or rebuilt later uses the default.",
+        )
     }
 
     // -- User Navigation --

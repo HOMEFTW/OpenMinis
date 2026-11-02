@@ -81,4 +81,13 @@ class ScheduledDeliveryQueue(
     fun finish(executionId: String) {
         save(_deliveries.value.filterNot { it.executionId == executionId })
     }
+
+    /** Durable cancellation prevents a queued fire from reviving after user Stop. */
+    @Synchronized
+    fun cancelCreatedBy(sessionIds: Set<String>) {
+        val next = _deliveries.value.map { delivery ->
+            if (delivery.task.creatorSessionId in sessionIds) delivery.copy(superseded = true) else delivery
+        }
+        if (next != _deliveries.value) save(next)
+    }
 }

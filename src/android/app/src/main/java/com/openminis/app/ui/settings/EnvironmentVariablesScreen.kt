@@ -18,7 +18,10 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -136,14 +139,17 @@ fun EnvironmentVariablesScreen(
                     // value on one line and the optional note on a second.
                     // SettingsRow only has one subtitle slot, so concatenate
                     // with a newline; both render in the same secondary style.
-                    val subtitleText = if (entry.note.isNotEmpty()) {
-                        "$displayValue\n${entry.note}"
-                    } else {
-                        displayValue
+                    val subtitleText = buildString {
+                        if (!entry.enabled) append(stringResource(R.string.env_var_status_disabled))
+                        if (isNotEmpty()) append('\n')
+                        append(displayValue)
+                        if (entry.note.isNotEmpty()) append('\n').append(entry.note)
                     }
                     SettingsRow(
                         title = entry.key,
                         subtitle = subtitleText,
+                        titleColor = if (entry.enabled) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                         showChevron = false,
                         showDivider = index < entries.size - 1,
                         onClick = { editEntryId = entry.id },
@@ -168,6 +174,15 @@ fun EnvironmentVariablesScreen(
                                     Icon(
                                         Icons.Default.ContentCopy,
                                         contentDescription = stringResource(R.string.common_copy),
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                                IconButton(onClick = { envVarRepository.setEnabled(entry.id, !entry.enabled) }) {
+                                    Icon(
+                                        if (entry.enabled) Icons.Outlined.Block else Icons.Outlined.CheckCircle,
+                                        contentDescription = stringResource(
+                                            if (entry.enabled) R.string.env_var_action_disable else R.string.env_var_action_enable
+                                        ),
                                         modifier = Modifier.size(20.dp),
                                     )
                                 }
@@ -246,6 +261,7 @@ private fun EnvVarFormSheet(
         mutableStateOf(editEntry?.let { envVarRepository.getValue(it.key) } ?: prefillValue)
     }
     var noteText by remember { mutableStateOf(editEntry?.note ?: prefillNote) }
+    var enabled by remember { mutableStateOf(editEntry?.enabled ?: true) }
 
     val isEditing = editEntry != null
     val normalizedKey = keyText.trim().uppercase()
@@ -327,6 +343,23 @@ private fun EnvVarFormSheet(
                 singleLine = true,
             )
 
+            if (isEditing) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(stringResource(R.string.env_var_enabled_toggle), style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            stringResource(R.string.env_var_enabled_footer),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
@@ -337,7 +370,8 @@ private fun EnvVarFormSheet(
                 MinisTextButton(
                     onClick = {
                         val success = if (isEditing) {
-                            envVarRepository.update(editEntry!!.id, keyText, valueText, noteText)
+                            envVarRepository.update(editEntry!!.id, keyText, valueText, noteText) &&
+                                (enabled == editEntry.enabled || envVarRepository.setEnabled(editEntry.id, enabled))
                         } else {
                             envVarRepository.add(keyText, valueText, noteText)
                         }

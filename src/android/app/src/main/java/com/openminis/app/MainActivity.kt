@@ -606,6 +606,7 @@ class MainActivity : ComponentActivity() {
                 // agent triggers a change. Mirrors iOS MinisApp.swift
                 // root-level `.sheet(item: gate.pending)`.
                 com.openminis.app.ui.settings.ConfigConfirmDialogHost()
+                com.openminis.app.ui.settings.NetworkAlertBannerHost(navController)
             }
         }
     }

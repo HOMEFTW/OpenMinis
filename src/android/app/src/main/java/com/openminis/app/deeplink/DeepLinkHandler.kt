@@ -174,6 +174,13 @@ object DeepLinkHandler {
                 else DeepLinkAction.OpenSettingsScreen(Routes.MODEL_GROUPS)
             "usage", "usage-stats", "usage_stats" ->
                 DeepLinkAction.OpenSettingsScreen(Routes.USAGE_STATS)
+            "network" -> DeepLinkAction.OpenSettingsScreen(Routes.NETWORK)
+            "tailscale" -> DeepLinkAction.OpenSettingsScreen(Routes.NETWORK_TAILSCALE)
+            "proxy", "proxies" -> {
+                arg?.let { com.openminis.app.network.NetworkHub.pendingProxyEditor.value = it }
+                DeepLinkAction.OpenSettingsScreen(Routes.NETWORK_PROXIES)
+            }
+            "dns", "container-dns", "container_dns" -> DeepLinkAction.OpenSettingsScreen(Routes.CONTAINER_DNS)
             "skills" -> DeepLinkAction.OpenSettingsScreen(Routes.SKILLS)
             "memory" -> DeepLinkAction.OpenSettingsScreen(Routes.MEMORY)
             // [T-p2-agent-settings] Settings › Agents; scheduled tasks list.

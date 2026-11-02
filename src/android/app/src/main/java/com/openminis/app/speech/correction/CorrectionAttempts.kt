@@ -39,7 +39,7 @@ internal fun correctionFailure(model: String, error: Exception): CorrectionFailu
         error is CorrectionError.EmptyResponse -> CorrectionFailureKind.EMPTY
         error is LLMError.InvalidApiKey || status == 401 || status == 403 -> CorrectionFailureKind.AUTH
         error is LLMError.RateLimited || status == 429 -> CorrectionFailureKind.RATE_LIMIT
-        chain.any { it is SocketTimeoutException } -> CorrectionFailureKind.TIMEOUT
+        error is CorrectionError.ModelTimedOut || chain.any { it is SocketTimeoutException } -> CorrectionFailureKind.TIMEOUT
         LLMError.isCertificateFailure(error) -> CorrectionFailureKind.CERTIFICATE
         chain.any { it is UnknownHostException } -> CorrectionFailureKind.DNS
         error is LLMError.NetworkError || chain.any { it is IOException } -> CorrectionFailureKind.NETWORK
@@ -62,29 +62,11 @@ internal fun correctionModelOrder(group: ModelGroup, available: List<ModelEntry>
 internal suspend fun <T> tryCorrectionModels(
     entries: List<ModelEntry>, policy: FallbackStrategy, attempt: suspend (ModelEntry) -> T,
 ): T {
-    val diagnostics = currentCoroutineContext()[CorrectionDiagnostics]
-    val failures = mutableListOf<CorrectionFailure>()
-    for (entry in entries.distinctBy { it.id }.take(3)) {
-        currentCoroutineContext().ensureActive()
-        if (diagnostics?.isCurrent?.invoke() == false) {
-            diagnostics.cancelled = true
-            throw CancellationException("Correction superseded")
-        }
-        try {
-            return attempt(entry)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: LLMError.Cancelled) {
-            diagnostics?.cancelled = true
-            throw CancellationException("Correction cancelled")
-        } catch (error: Exception) {
-            failures += correctionFailure(entry.model.displayName, error)
-            diagnostics?.failures = failures.toList()
-            val fallback = policy == FallbackStrategy.always || error is LLMError.RateLimited ||
-                failures.last().status == 429 || error is LLMError && error.isHttpServerError
-            if (!fallback) break
-        }
+    return try {
+        CorrectionFallback.run(entries.map { CorrectionModel(it, "test", policy) }) { attempt(it.entry) }.first
+    } catch (error: CorrectionError.AllModelsFailed) {
+        throw CorrectionError.ModelsFailed(error.attempts.map {
+            correctionFailure(it.model.entry.model.displayName, it.error as? Exception ?: Exception())
+        })
     }
-    if (failures.isEmpty()) throw CorrectionError.NoModelAvailable
-    throw CorrectionError.ModelsFailed(failures)
 }

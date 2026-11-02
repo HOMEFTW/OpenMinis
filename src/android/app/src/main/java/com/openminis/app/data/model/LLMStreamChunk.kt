@@ -10,6 +10,9 @@ sealed class LLMStreamChunk {
         val stopReason: String?,
         /** Remove this turn's streamed tool previews when the provider rejects truncated calls. */
         val discardToolCalls: Boolean = false,
+        /** Provider policy category and explanation accompanying a refusal stop. */
+        val refusalCategory: String? = null,
+        val refusalExplanation: String? = null,
     ) : LLMStreamChunk()
 
     /** Thinking/reasoning streaming event */

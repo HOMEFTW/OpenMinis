@@ -22,7 +22,7 @@ object VoiceCorrectionConfig {
     const val RETRIEVAL_BUDGET_MS = 80L
 
     /**
-     * Hung-request ceiling for the LLM call, NOT a latency target.
+     * Per-model-call timeout. Each fallback model receives its own budget.
      *
      * History, because this number has been wrong twice:
      *  - The design originally specified 800ms. On a real device with a real

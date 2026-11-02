@@ -371,6 +371,9 @@ interface LLMProvider {
     fun clampThinkingLevel(level: ThinkingLevel): ThinkingLevel {
         return model.clampThinkingLevel(level)
     }
+
+    /** Whether the outbound history contains past reasoning_content for context accounting. */
+    fun echoesReasoningContent(thinkingLevel: ThinkingLevel): Boolean = false
 }
 
 /**

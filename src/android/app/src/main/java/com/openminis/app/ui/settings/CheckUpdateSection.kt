@@ -156,7 +156,7 @@ fun CheckUpdateSection() {
                     statusMessage = null
                     showReleasesLink = false
                     scope.launch {
-                        when (val r = UpdateChecker.check(includePrereleases = com.openminis.app.data.UpdatePreferences.channel(context) == "beta")) {
+                        when (val r = UpdateChecker.check(context)) {
                             is UpdateChecker.CheckResult.UpdateAvailable -> {
                                 update = r
                                 statusMessage = null
@@ -236,10 +236,13 @@ fun CheckUpdateSection() {
                         context = context,
                         url = u.apkUrl,
                         versionName = u.versionName,
+                        versionCode = u.versionCode,
+                        expectedSha256 = u.sha256,
                     ) { p -> downloadProgress = p }
                     when (result) {
                         is UpdateChecker.DownloadResult.Success -> {
                             downloadProgress = null
+                            com.openminis.app.data.UpdateStateStore.markDownloaded(context, u.versionCode)
                             if (UpdateChecker.canInstall(context)) {
                                 val ok = UpdateChecker.installApk(context, result.file)
                                 if (ok) {
@@ -259,6 +262,10 @@ fun CheckUpdateSection() {
                 }
             },
             onOpenSettings = { UpdateChecker.openInstallPermissionSettings(context) },
+            onSkip = {
+                com.openminis.app.data.UpdateStateStore.skip(context, u.versionCode)
+                update = null
+            },
             onDismiss = {
                 if (downloadProgress == null) {
                     update = null
@@ -278,6 +285,7 @@ private fun UpdateDialog(
     needsInstallPerm: Boolean,
     onDownload: () -> Unit,
     onOpenSettings: () -> Unit,
+    onSkip: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -288,8 +296,8 @@ private fun UpdateDialog(
                 Text(
                     stringResource(
                         R.string.check_update_available_subtitle,
-                        BuildConfig.VERSION_NAME,
-                        update.versionName,
+                        com.openminis.app.data.UpdatePolicy.displayVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE),
+                        com.openminis.app.data.UpdatePolicy.displayVersion(update.versionName, update.versionCode),
                     ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -373,6 +381,9 @@ private fun UpdateDialog(
             }
         },
         dismissButton = {
+            if (!needsInstallPerm) MinisTextButton(onClick = onSkip, enabled = downloadProgress == null) {
+                Text(stringResource(R.string.check_update_skip_version))
+            }
             MinisTextButton(onClick = onDismiss, enabled = downloadProgress == null) {
                 Text(stringResource(R.string.cancel))
             }

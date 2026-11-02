@@ -64,6 +64,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -95,6 +96,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -143,8 +145,11 @@ import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.settings.autoExpandThinkingEnabled
+import com.openminis.app.ui.settings.KEY_AUTO_EXPAND_THINKING
+import com.openminis.app.ui.settings.getAppearancePrefs
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
+import com.openminis.app.ui.util.expandToggleClickable
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -203,7 +208,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -275,6 +279,10 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.ui.components.DecorativeSpinner
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import androidx.compose.ui.draw.drawWithCache
 
 @Composable
 internal fun AssistantHeader() {
@@ -480,7 +488,13 @@ internal fun InlineErrorBanner(error: String, onRetry: (() -> Unit)? = null) {
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = stringResource(FailureAdvice.classify(error).messageRes) + "\n" + error,
+            // [T-in-chat-search] matches painted in place; the unit is the
+            // error after the advice line.
+            text = stringResource(FailureAdvice.classify(error).messageRes).let { advice ->
+                com.openminis.app.ui.chat.search.rememberChatSearchHighlighted(
+                    advice + "\n" + error, com.openminis.app.ui.chat.search.ChatSearchUnits.ERROR, offset = advice.length + 1,
+                )
+            },
             color = Color(0xFFFF3B30),
             fontSize = 12.sp,
             lineHeight = 16.sp,
@@ -618,6 +632,8 @@ internal fun ToolCallPill(
     // streaming or when there's no preceding user turn to re-run from).
     onRerunFromHere: (() -> Unit)? = null,
     onCopyDetails: (() -> Unit)? = null,
+    // [T-in-chat-search] Opens Search in Chat (iOS: the tool capsule menu).
+    onSearchInChat: (() -> Unit)? = null,
 ) {
     // T-android-jank-profile: this log was firing on every ToolCallPill
     // recomposition (every streaming token while a tool call is live),
@@ -724,7 +740,7 @@ internal fun ToolCallPill(
                 )
                 .combinedClickable(
                     onClick = { onOpenDetail(block.id) },
-                    onLongClick = if (onRerunFromHere != null || onCopyDetails != null) {
+                    onLongClick = if (onRerunFromHere != null || onCopyDetails != null || onSearchInChat != null) {
                         { showToolMenu = true }
                     } else null,
                 )
@@ -759,7 +775,8 @@ internal fun ToolCallPill(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = controlSummary ?: block.toolTitle.ifEmpty { block.toolName },
+                    // [T-in-chat-search] matches painted in place
+                    text = com.openminis.app.ui.chat.search.rememberChatSearchHighlighted(controlSummary ?: block.toolTitle.ifEmpty { block.toolName }, com.openminis.app.ui.chat.search.ChatSearchUnits.BODY),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -829,6 +846,13 @@ internal fun ToolCallPill(
                     leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
                 )
             }
+            if (onSearchInChat != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.chat_search_in_chat)) },
+                    onClick = { showToolMenu = false; onSearchInChat() },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                )
+            }
         }
       }
         // T251: removed inline Retry affordance next to cancelled/failed pills —
@@ -867,11 +891,32 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     val context = LocalContext.current
     var autoExpandThinking by remember { mutableStateOf(autoExpandThinkingEnabled(context)) }
     var expanded by remember(block.id) { mutableStateOf(autoExpandThinking && isLast && isStreaming) }
-    var userTouched by remember(block.id) { mutableStateOf(false) }
+    // [T-android-thinking-collapse-latch] What the user last chose, or null if
+    // they have not touched THIS block. Deliberately tri-state rather than the
+    // old `userTouched: Boolean`.
+    //
+    // The bug that flag caused: the block auto-expands while streaming, the
+    // user taps once to collapse it and again to re-open and keep reading —
+    // and `userTouched` is now latched true forever, so the stream-end
+    // auto-collapse below never fires and the block stays open for the rest of
+    // the conversation. Reported as "thinking blocks don't collapse again once
+    // you've expanded them".
+    //
+    // "Never fight the user" is still the rule; the flag simply could not tell
+    // WHICH way the user had pushed. A user who collapsed a block means "keep
+    // it shut" and auto-collapse must not reopen it (it never would) — but a
+    // user who EXPANDED it was asking to read it *while it streamed*, which is
+    // the same thing the auto-expand does, and there is nothing to defend once
+    // the stream ends. So only an explicit collapse suppresses the auto-
+    // collapse; an explicit expand lets it run.
+    var userIntent by remember(block.id) { mutableStateOf<Boolean?>(null) }
+    // [T-thinking-autoexpand-toggle-longpress] Long-press the header for an
+    // "Expand Thinking While Streaming" toggle (port of iOS b556ea8f8).
+    var showThinkingMenu by remember { mutableStateOf(false) }
     LaunchedEffect(block.id, isStreaming) {
         // One-shot auto-collapse when streaming for this block ends, but only
         // if the user hasn't taken control of its state yet.
-        if (!isStreaming && !userTouched) expanded = false
+        if (!isStreaming && userIntent != false) expanded = false
     }
     val thinkingBlue = Color(0xFF007AFF)
     val charCount = block.content.length
@@ -884,13 +929,17 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     // block froze the UI (and a per-token recomposition re-measured all 200k
     // each tick). Two tiers guard this:
     //  • > HARD_CAP: the inline scroller can't render it at all — show a
-    //    "View full content" entry that opens a native TextView dialog
-    //    (Android TextView handles large text far better than Compose Text).
+    //    "View full content" entry that opens the chunked full-thinking
+    //    viewer ([#467] ThinkingFullDialog; it replaced a TextView dialog).
     //  • otherwise: render only the last WINDOW chars (tail) — capping layout
     //    cost to O(WINDOW) regardless of total length.
     val thinkingWindowSize = 8000
     val thinkingHardCap = 100_000
     val overHardCap = charCount > thinkingHardCap
+    // [#467] The full-thinking viewer opens only once the block has stopped
+    // streaming: while tokens arrive the text keeps changing and chunking it
+    // on every one would cost what the tail window saves.
+    val canOpenFull = !isStreaming
     var showFullContent by remember(block.id) { mutableStateOf(false) }
 
     Column(
@@ -902,30 +951,50 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             .clip(RoundedCornerShape(12.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
+        Box {
+            DropdownMenu(expanded = showThinkingMenu, onDismissRequest = { showThinkingMenu = false }) {
+                val on = autoExpandThinkingEnabled(context)
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.appearance_auto_expand_thinking_title)) },
+                    trailingIcon = { if (on) Icon(Icons.Default.Check, contentDescription = null) },
+                    onClick = {
+                        showThinkingMenu = false
+                        getAppearancePrefs(context).edit().putBoolean(KEY_AUTO_EXPAND_THINKING, !on).apply()
+                        // Applied to the block that is streaming right now so
+                        // the change is visible; a block the user already
+                        // opened or closed by hand is left as it is, the rule
+                        // the auto-expand / auto-collapse follow. Finished
+                        // blocks are untouched.
+                        if (isStreaming && isLast && userIntent == null && !overHardCap) expanded = !on
+                    },
+                )
+            }
+        }
         // Header row — only the header reacts to taps. Mirrors iOS, where
         // .onTapGesture is on the header HStack, not the whole VStack. With
         // clickable on the outer Column, a release after dragging in the
         // inner scroller registered as a tap and toggled `expanded`.
+        // [ISS-017] No ripple on this expand header; see expandToggleClickable.
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = {
-                    userTouched = true
+                .expandToggleClickable(onLongClick = { showThinkingMenu = true }) {
+                    // [T-android-thinking-collapse-latch] Record the direction,
+                    // not merely that a tap happened. `overHardCap` opens the
+                    // native viewer instead of toggling, so it expresses no
+                    // expand/collapse intent and must not touch this.
+                    if (!overHardCap) userIntent = !expanded
                     // [T-thinking-render-perf-android] Over the hard cap the
                     // inline scroller is bypassed entirely; tapping the header
                     // opens the native full-content viewer instead of toggling
                     // the (never-shown) inline expansion.
-                    if (overHardCap) showFullContent = true
-                    else expanded = !expanded
-                }, onLongClick = {
-                    val prefs = com.openminis.app.ui.settings.getAppearancePrefs(context)
-                    val next = !prefs.getBoolean(com.openminis.app.ui.settings.KEY_AUTO_EXPAND_THINKING, true)
-                    prefs.edit().putBoolean(com.openminis.app.ui.settings.KEY_AUTO_EXPAND_THINKING, next).apply()
-                    autoExpandThinking = next
-                    if (isStreaming && isLast && !overHardCap) { userTouched = true; expanded = next }
-                    android.widget.Toast.makeText(context, if (next) R.string.thinking_stream_expand_enabled else R.string.thinking_stream_expand_disabled, android.widget.Toast.LENGTH_SHORT).show()
-                }),
+                    if (overHardCap) {
+                        if (canOpenFull) showFullContent = true
+                    } else {
+                        expanded = !expanded
+                    }
+                },
         ) {
             if (isStreaming && block.toolStatus != ToolBlockStatus.SUCCESS) {
                 // iOS: ProgressView().controlSize(.mini) while streaming
@@ -945,7 +1014,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                 Spacer(modifier = Modifier.width(6.dp))
             }
             Text(
-                text = "Deep Thinking",
+                text = stringResource(R.string.chat_thinking_block_title),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = thinkingBlue,
@@ -964,8 +1033,8 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             if (overHardCap) {
                 // [T-thinking-render-perf-android] No expand/collapse chevron —
                 // the content is too large for the inline Compose scroller.
-                // Offer the native full-content viewer instead.
-                Text(
+                // Offer the full-content viewer instead, once streaming ends.
+                if (canOpenFull) Text(
                     text = stringResource(R.string.thinking_view_full),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
@@ -1011,12 +1080,16 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             // touch on Compose's smaller pause-threshold scroller, so we
             // honor the user's drag the way the outer chat list does.
             var userScrolledAway by remember(block.id) { mutableStateOf(false) }
+            // [FIX-261025-02] A finger drag only: `isScrollInProgress` is also
+            // true during the auto-follow's own scrollTo, which could read as
+            // "the user took control" in the frame before the new bottom lands.
+            val userDragging by scrollState.interactionSource.collectIsDraggedAsState()
             LaunchedEffect(scrollState, block.id) {
                 snapshotFlow {
                     Triple(
                         scrollState.value,
                         scrollState.maxValue,
-                        scrollState.isScrollInProgress,
+                        userDragging,
                     )
                 }.collect { (v, max, dragging) ->
                     // A nonzero gap from the bottom while the user is actively
@@ -1030,20 +1103,27 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     }
                 }
             }
-            // Auto-follow: on every content growth, scroll to the new bottom.
-            // `snapshotFlow { block.content.length }` is recomposition-cheap
-            // and only ticks when the block's text actually grew.
+            // Auto-follow: whenever the laid-out content grows, scroll to the
+            // new bottom.
+            // [FIX-261025-02] This used to watch `block.content.length`, but
+            // the effect keeps the `block` it captured at launch (its keys do
+            // not change per token) and AssistantBlock is immutable, so the
+            // flow emitted once and the scroller stayed at the top once the
+            // block hit its 300dp cap (reported as "thinking does not scroll
+            // to the latest"). It also scrolled to the PREVIOUS maxValue,
+            // before the new text was laid out. `maxValue` changes after
+            // layout, so following it fixes both.
             LaunchedEffect(scrollState, block.id, isStreaming) {
                 if (!isStreaming) return@LaunchedEffect
-                snapshotFlow { block.content.length }
-                    .collect {
+                snapshotFlow { scrollState.maxValue }
+                    .collect { max ->
                         if (userScrolledAway) return@collect
                         // scrollTo (not animateScrollTo) — animating fights
                         // back-to-back token ticks; iOS uses a 0.15s linear
                         // animation, but Compose's animateScrollTo cancels
                         // any in-flight scroll, so streaming bursts get
                         // jankier than a direct snap.
-                        scrollState.scrollTo(scrollState.maxValue)
+                        scrollState.scrollTo(max)
                     }
             }
             Column(
@@ -1053,16 +1133,36 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     .verticalScroll(scrollState),
             ) {
                 if (isTruncated) {
-                    Text(
-                        text = stringResource(
-                            R.string.thinking_truncated_hint,
-                            displayContent.length / 1000,
-                            charCount / 1000,
-                        ),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = stringResource(
+                                R.string.thinking_truncated_hint,
+                                displayContent.length / 1000,
+                                charCount / 1000,
+                            ),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+                            // [T-thinking-hint-align] Vertical padding only. The iOS
+                            // original insets BOTH the hint and the thinking text by
+                            // 12pt; here the text below has no horizontal inset, so a
+                            // 12dp one on the hint alone left it indented past the
+                            // text's left edge.
+                            modifier = Modifier.padding(vertical = 4.dp).weight(1f, fill = false),
+                        )
+                        // [#467] The cut-off start is otherwise out of reach.
+                        if (canOpenFull) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = stringResource(R.string.thinking_show_full),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = thinkingBlue,
+                                modifier = Modifier
+                                    .clickable { showFullContent = true }
+                                    .padding(vertical = 4.dp),
+                            )
+                        }
+                    }
                 }
                 Text(
                     text = displayContent,
@@ -1073,11 +1173,10 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             }
         }
 
-        // [T-thinking-render-perf-android] Hard-cap full-content viewer. A
-        // native TextView (selectable, scrollable) renders arbitrarily large
-        // thinking text without the Compose `Text` measure freeze.
-        if (overHardCap && showFullContent) {
-            ThinkingFullContentDialog(
+        // [#467] Full-thinking viewer, from the hint row or (over the hard
+        // cap) the header. Only reachable once streaming has ended.
+        if (showFullContent && canOpenFull) {
+            ThinkingFullDialog(
                 content = block.content,
                 onDismiss = { showFullContent = false },
             )
@@ -1086,56 +1185,127 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
 }
 
 /**
- * [T-thinking-render-perf-android] Full-screen viewer for thinking content
- * that exceeds the inline hard cap. Wraps a native Android [android.widget.TextView]
- * (inside a scroller) — it lays out very large strings far more cheaply than
- * Compose `Text`, and stays selectable.
+ * [T-android-usage-capsule-time] Token usage for a finished assistant turn,
+ * plus the wall-clock time it finished — "ctx:57k in:2 out:408 cache:57k 22:30".
+ *
+ * Port of iOS `usageCapsule` / `usageSummary` (ChatMessageViews.swift:688,718):
+ * same field order, same k-abbreviation, same rule that ctx / cache /
+ * +cache appear only when non-zero. The time is the Android-side addition and
+ * is appended last, in the same monospaced style, so the line reads as one
+ * unit rather than a separate badge.
+ *
+ * Renders nothing without usage, which also covers a still-streaming turn and
+ * any user message.
  */
+/**
+ * [UI-261025-11] The time under a reply: 24-hour HH:mm today, with the date in
+ * front on any other day - the month and day this year, the year too before
+ * that (users asked which day a reply in a long chat came from). The date
+ * follows [locale]'s order and month names; the time stays 24-hour with
+ * Latin digits in every locale (a locale-formatted time could render 12-hour
+ * with AM/PM). Both are the device's time zone.
+ */
+internal fun formatReplyClock(
+    epochMs: Long,
+    nowMs: Long,
+    locale: java.util.Locale,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+): String {
+    val at = java.time.Instant.ofEpochMilli(epochMs).atZone(zone)
+    val now = java.time.Instant.ofEpochMilli(nowMs).atZone(zone)
+    val time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", java.util.Locale.US).format(at)
+    if (at.toLocalDate() == now.toLocalDate()) return time
+    val skeleton = if (at.year == now.year) "MMMd" else "yMMMd"
+    val pattern = android.text.format.DateFormat.getBestDateTimePattern(locale, skeleton)
+    return java.time.format.DateTimeFormatter.ofPattern(pattern, locale).format(at) + " " + time
+}
+
 @Composable
-private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
-    val textColor = MaterialTheme.colorScheme.onSurface
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                ) {
-                    Text(
-                        text = "Deep Thinking",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF007AFF),
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                    MinisTextButton(onClick = onDismiss) {
-                        Text(text = stringResource(android.R.string.ok))
-                    }
-                }
-                androidx.compose.ui.viewinterop.AndroidView(
-                    factory = { ctx ->
-                        android.widget.ScrollView(ctx).apply {
-                            addView(
-                                android.widget.TextView(ctx).apply {
-                                    textSize = 13f
-                                    setTextColor(textColor.toArgb())
-                                    setTextIsSelectable(true)
-                                    setPadding(36, 24, 36, 48)
-                                    text = content
-                                }
-                            )
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                )
-            }
+internal fun UsageCapsule(usage: ChatTokenUsage?, completedAt: Long?) {
+    if (usage == null) return
+    // Counts only. The time is a separate Text so it can be pushed to the far
+    // edge; concatenating it made the whole line read as one run of digits.
+    val summary = remember(usage) {
+        buildString {
+            if (usage.latestContextTokens > 0) append("ctx:${formatTokenCount(usage.latestContextTokens)} ")
+            append("in:${formatTokenCount(usage.inputTokens)}")
+            append(" out:${formatTokenCount(usage.outputTokens)}")
+            if (usage.cacheReadTokens > 0) append(" cache:${formatTokenCount(usage.cacheReadTokens)}")
+            if (usage.cacheCreationTokens > 0) append(" +cache:${formatTokenCount(usage.cacheCreationTokens)}")
         }
     }
+    // [UI-261025-11] Keyed on today's date too, so a chat left open past
+    // midnight moves yesterday's replies onto a dated label.
+    val today = java.time.LocalDate.now()
+    val clock = remember(completedAt, today) {
+        completedAt?.let { formatReplyClock(it, System.currentTimeMillis(), java.util.Locale.getDefault()) }
+    }
+    val ink = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .padding(top = 2.dp, bottom = 2.dp)
+            // Capsule: pill shape, 8dp / 3dp padding.
+            //
+            // [T-android-usage-capsule-tint] The fill is derived from the
+            // user-bubble colour but NOT `userBubble.copy(alpha = 0.6f)`, which
+            // is what a literal reading of the iOS line produces and what this
+            // used to do. iOS's `userBubble` is `tertiarySystemFill`, already a
+            // translucent grey in both appearances, so 60% of it lands soft.
+            // Android's dark value is `0xFF2F3A5C` — fully OPAQUE — so the same
+            // arithmetic produced a solid blue-grey slab that read as a filled
+            // component rather than an incidental footnote, and clashed with
+            // the surrounding chat.
+            //
+            // Taking the colour at a low alpha over the surface keeps it a
+            // tint in both themes: it settles onto whatever is behind it
+            // instead of asserting its own block of colour. 0.22 was still
+            // reading as a distinct chip against the light chat background;
+            // 0.10 leaves the shape legible without the capsule announcing
+            // itself, which is what a hidden-by-default easter egg wants.
+            .clip(RoundedCornerShape(50))
+            .background(ChatColors.userBubble.copy(alpha = 0.10f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        // iOS uses the `speedometer` SF Symbol; Speed is the same idea in
+        // Material's set.
+        Icon(
+            Icons.Default.Speed,
+            contentDescription = null,
+            tint = ink,
+            modifier = Modifier.size(11.dp),
+        )
+        Text(
+            text = summary,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = ink,
+            maxLines = 1,
+        )
+        clock?.let {
+            // Pushed to the trailing edge so the finish time reads as its own
+            // fact rather than another number in the counts.
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = it,
+                fontSize = 10.sp,
+                lineHeight = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ink,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * 1234 -> "1.2k", 57000 -> "57k". Mirrors iOS `formatTokenCount`: a whole
+ * multiple of 1000 drops the decimal, anything else keeps one place.
+ */
+private fun formatTokenCount(count: Int): String {
+    if (count < 1000) return count.toString()
+    val k = count / 1000.0
+    return if (k % 1.0 == 0.0) "${k.toInt()}k" else String.format(java.util.Locale.US, "%.1fk", k)
 }

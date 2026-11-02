@@ -1,8 +1,6 @@
 package com.openminis.app.speech
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.widget.Toast
@@ -144,8 +142,16 @@ class ReadAloudPlayer(context: Context) {
         VoiceOutputState.registerPlayer(this)
         worker = scope.launch {
             for (text in queue) {
-                runCatching { speakOne(text) }
-                    .onFailure { AppLogger.error(TAG, "utterance failed: $it") }
+                try {
+                    speakOne(text)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    AppLogger.error(TAG, "utterance failed: $error")
+                } finally {
+                    focus.releaseSoon(this@ReadAloudPlayer,
+                        if (pending.get() > 1) ReadAloudAudioFocus.SYNTH_WAIT_MS else ReadAloudAudioFocus.GRACE_MS)
+                }
                 // Queue drained → speech is over. Counter rather than
                 // Channel.isEmpty, which is experimental API.
                 if (pending.decrementAndGet() <= 0) {
@@ -278,6 +284,7 @@ class ReadAloudPlayer(context: Context) {
         playbackFinisher?.invoke()
         releasePlayer()
         system.stop()
+        focus.releaseNow(this)
         pending.set(0)
         _isSpeaking.value = false
         if (ownsCapsule()) {
@@ -314,6 +321,7 @@ class ReadAloudPlayer(context: Context) {
         playbackFinisher?.invoke()
         releasePlayer()
         system.stop()
+        focus.releaseNow(this)
         pending.set(0)
         _isSpeaking.value = false
         if (ownsCapsule()) {
@@ -483,10 +491,9 @@ class ReadAloudPlayer(context: Context) {
                 // Android had neither, and some OEM ROMs (ColorOS among them)
                 // will silently mute focus-less media playback. Focus denial is
                 // logged but non-fatal — muting is the exception, not the rule.
-                mp.setAudioAttributes(playbackAttributes)
+                mp.setAudioAttributes(ReadAloudAudioFocus.ATTRIBUTES)
                 val volume = VoiceOutputState.volume.value
                 mp.setVolume(volume.coerceAtMost(1f), volume.coerceAtMost(1f))
-                requestAudioFocus()
                 mp.setDataSource(file.absolutePath)
                 mp.setOnCompletionListener { finish() }
                 mp.setOnErrorListener { _, what, extra ->
@@ -505,6 +512,7 @@ class ReadAloudPlayer(context: Context) {
                 // the OUTER runCatching which skipped the utterance entirely.
                 // Now a ROM that rejects the speed change still plays at 1×;
                 // only the speed is lost, never the audio.
+                focus.acquire(this@ReadAloudPlayer, onFocusLost)
                 mp.start()
                 val speed = VoiceOutputState.speed.value
                 if (speed != 1.0f) {
@@ -522,33 +530,8 @@ class ReadAloudPlayer(context: Context) {
         }
     }
 
-    // -- audio focus [T-android-tts-silent-blackhole] --
-
-    private val audioManager =
-        appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
-    private val playbackAttributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_MEDIA)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        .build()
-
-    private var focusRequest: AudioFocusRequest? = null
-
-    private fun requestAudioFocus() {
-        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-            .setAudioAttributes(playbackAttributes)
-            .build()
-        focusRequest = req
-        val granted = audioManager.requestAudioFocus(req)
-        if (granted != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-            AppLogger.info(TAG, "audio focus not granted ($granted) — playing anyway")
-        }
-    }
-
-    private fun abandonAudioFocus() {
-        focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        focusRequest = null
-    }
+    private val focus = ReadAloudAudioFocus.shared(appContext)
+    private val onFocusLost: () -> Unit = { stop() }
 
     /**
      * Speak via the on-device engine and wait for it to finish, so the queue
@@ -576,6 +559,7 @@ class ReadAloudPlayer(context: Context) {
         if (ownsCapsule()) {
             VoiceOutputState.activeModelLabel.value = VoiceOutputState.systemVoiceLabel.value
         }
+        focus.acquire(this, onFocusLost)
         system.speak(text)
         // [T-android-tts-rom-compat] speak() may have been REJECTED by the
         // engine (missing language data on AOSP/OEM engines) — the manager
@@ -645,7 +629,6 @@ class ReadAloudPlayer(context: Context) {
             release()
         }
         player = null
-        abandonAudioFocus()
     }
 
     /**

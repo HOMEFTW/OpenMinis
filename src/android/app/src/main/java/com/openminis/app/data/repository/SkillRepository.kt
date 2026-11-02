@@ -5,6 +5,9 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.net.Uri
 import android.util.Log
+import com.openminis.app.forge.ForgeSkillsProvider
+import com.openminis.app.forge.ForgeSkillsService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -142,10 +145,14 @@ class SkillRepository(private val context: Context) {
         }
     }
 
-    private val httpClient = OkHttpClient.Builder()
+    private val baseHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+
+    // [FEAT-261021-16] Follows the default route in Settings > Network; the
+    // same client object when nothing is configured.
+    private val httpClient: OkHttpClient get() = com.openminis.app.network.NetworkHttp.client(com.openminis.app.network.NetworkHttp.DEFAULT_TAG, baseHttpClient)
 
     /**
      * Repository-owned scope for fire-and-forget background work that must
@@ -192,6 +199,29 @@ class SkillRepository(private val context: Context) {
     private val _skills = MutableStateFlow<List<Skill>>(emptyList())
     val skills: StateFlow<List<Skill>> = _skills.asStateFlow()
 
+    @Volatile private var forgeSkillsProvider: ForgeSkillsProvider? = null
+    val forgeSkillsService by lazy { ForgeSkillsService(context, this) }
+
+    /** Forge owns its own files and enablement; no user skill rows are imported or replaced. */
+    fun setForgeSkillsProvider(provider: ForgeSkillsProvider) {
+        forgeSkillsProvider = provider
+    }
+
+    /** Await on the agent send-prepare path, before building its system prompt. */
+    suspend fun prepareForgeSkills() {
+        isolateForgeFailure("prepare") { forgeSkillsService.initialize() }
+    }
+
+    /** A broken optional Forge package must not prevent ordinary skills or chat from working. */
+    private inline fun <T> isolateForgeFailure(operation: String, block: () -> T): T? = try {
+        block()
+    } catch (cancel: CancellationException) {
+        throw cancel
+    } catch (failure: Exception) {
+        Log.e(TAG, "Forge skill $operation failed; continuing without this Forge operation", failure)
+        null
+    }
+
     private val db: SQLiteDatabase by lazy {
         SkillDbHelper(context).writableDatabase
     }
@@ -232,6 +262,10 @@ class SkillRepository(private val context: Context) {
             Log.e(TAG, "installBundledSkills failed — continuing: ${it.message}", it)
         }
         startReloadWorker()
+        // The delegate is available after restart even if the Forge panel has never opened.
+        // Its constructor does no disk work; the repository scope warms assets off the UI thread.
+        isolateForgeFailure("install") { forgeSkillsService.install() }
+        backgroundScope.launch { prepareForgeSkills() }
     }
 
     // -- CRUD --
@@ -314,6 +348,7 @@ class SkillRepository(private val context: Context) {
 
     fun clearSessionOverrides(sessionId: String) {
         db.execSQL("DELETE FROM session_skill_overrides WHERE session_id=?", arrayOf(sessionId))
+        isolateForgeFailure("clear session overrides") { forgeSkillsProvider?.clearSessionOverrides(sessionId) }
     }
 
     /**
@@ -332,6 +367,7 @@ class SkillRepository(private val context: Context) {
             "UPDATE OR REPLACE session_skill_overrides SET session_id=? WHERE session_id=?",
             arrayOf<Any>(toReal, fromDraft),
         )
+        isolateForgeFailure("rename session overrides") { forgeSkillsProvider?.renameSessionOverrides(fromDraft, toReal) }
     }
 
     // -- Prompt Fragment --
@@ -343,8 +379,12 @@ class SkillRepository(private val context: Context) {
      * Returns null when the session has no enabled skills.
      */
     fun skillPromptFragment(sessionId: String): String? {
+        // Synchronous fallback prevents silently omitting enabled skills if a caller skipped prepare.
+        val forgeFragment = isolateForgeFailure("prompt") {
+            (forgeSkillsProvider ?: forgeSkillsService.install()).promptFragment(sessionId)
+        }
         val enabled = _skills.value.filter { isEnabledForSession(it.id, sessionId) }
-        if (enabled.isEmpty()) return null
+        if (enabled.isEmpty()) return forgeFragment
 
         val total = enabled.size
         val selected: List<Skill>
@@ -409,6 +449,7 @@ class SkillRepository(private val context: Context) {
                 // [T-prompt-search-neutral] Names no search tool (iOS parity).
                 append(". List or search /var/minis/skills/ to find the rest.")
             }
+            if (forgeFragment != null) append("\n\n").append(forgeFragment)
         }
     }
 

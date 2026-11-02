@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="skill_copy_source_url">Kopírovat zdrojovou URL</string>
+    <string name="skill_source_url_copied">Zdrojová URL zkopírována</string>
+    <string name="session_duplicate_suffix">Kopie</string>
+</resources>

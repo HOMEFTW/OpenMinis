@@ -5,6 +5,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BackupProviderMergeTest {
+    @Test fun `provider report counts credentials and model changes once without counting unchanged groups`() {
+        val original = ProviderConfig(instances = mutableListOf(provider("p")),
+            modelEntries = mutableListOf(entry("e")), modelGroups = mutableListOf(group("g", "Group", "e")))
+        val backup = original.copy(modelEntries = mutableListOf(entry("e", 0.8)))
+        val merged = BackupProviderMerge.merge(original, backup)
+        assertEquals(BackupProviderMerge.RestoreCounts(0, 1, 0), BackupProviderMerge.counts(merged, listOf("p"), listOf("p")))
+        val same = BackupProviderMerge.merge(original, original)
+        assertEquals(BackupProviderMerge.RestoreCounts(0, 0, 1), BackupProviderMerge.counts(same, listOf("p"), emptyList()))
+        assertEquals(BackupProviderMerge.RestoreCounts(0, 1, 0), BackupProviderMerge.counts(same, listOf("p"), listOf("p")))
+    }
     private fun provider(id: String, label: String = id) = ProviderInstance(
         id, label, ProviderType.openAI, ProviderCredential.apiKey, createdAt = 1,
     )

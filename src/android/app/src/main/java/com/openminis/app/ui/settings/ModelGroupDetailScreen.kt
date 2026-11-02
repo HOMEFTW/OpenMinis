@@ -2,6 +2,7 @@ package com.openminis.app.ui.settings
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -122,6 +123,8 @@ fun ModelGroupDetailScreen(
     // Local copy of member IDs for live reorder
     var memberIds by remember(group.memberEntryIds) { mutableStateOf(group.memberEntryIds.toList()) }
     var entryToRemove by remember { mutableStateOf<String?>(null) }
+    // [T-quota-group-member-pill] Provider whose quota sheet is open.
+    var quotaSheetInstanceId by remember { mutableStateOf<String?>(null) }
 
     val lazyListState = rememberLazyListState()
     val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
@@ -335,7 +338,23 @@ fun ModelGroupDetailScreen(
                         ReorderableItem(reorderState, key = entryId) { _ ->
                             ListItem(
                                 modifier = Modifier.alpha(if (providerDisabled || notListed) 0.4f else 1f),
-                                headlineContent = { Text(entry.model.displayName) },
+                                headlineContent = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Text(entry.model.displayName, modifier = Modifier.weight(1f, fill = false))
+                                        // [T-quota-group-member-pill] The model's (or its
+                                        // account's) quota; this page has no other way to
+                                        // the provider's quota. Tap opens the quota sheet.
+                                        if (instance != null && !providerDisabled) {
+                                            com.openminis.app.ui.quota.ModelQuotaMemberPill(
+                                                instanceId = entry.providerInstanceId,
+                                                modelId = entry.model.id,
+                                            ) { quotaSheetInstanceId = entry.providerInstanceId }
+                                        }
+                                    }
+                                },
                                 supportingContent = {
                                     if (providerDisabled || notListed) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -599,6 +618,10 @@ fun ModelGroupDetailScreen(
                 Spacer(Modifier.height(20.dp))
             }
         }
+    }
+
+    quotaSheetInstanceId?.let { id ->
+        com.openminis.app.ui.quota.QuotaDetailSheet(instanceId = id, onDismiss = { quotaSheetInstanceId = null }, halfHeight = false)
     }
 
     // Confirm remove model from group

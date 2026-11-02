@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-multi-select-share] Share Chat picker and export, from upstream strings.xml. -->
+<resources>
+    <string name="chat_share_share_chat">分享会话…</string>
+    <string name="chat_share_select_messages">选择消息</string>
+    <string name="chat_share_share_count">分享（%1$d）</string>
+    <string name="chat_share_select_all_below">选择以下全部</string>
+    <string name="chat_share_deselect_all_below">取消选择以下全部</string>
+    <string name="chat_share_select_below">选择以下</string>
+    <string name="chat_share_show_tools">显示工具</string>
+    <string name="chat_share_hide_tools">隐藏工具</string>
+    <string name="chat_share_show_thinking">显示思考</string>
+    <string name="chat_share_hide_thinking">隐藏思考</string>
+    <string name="chat_share_clear_selection">取消选择</string>
+    <string name="chat_share_creating">正在生成…</string>
+    <string name="chat_share_error_nothing">所选消息中没有可分享的内容。</string>
+    <string name="chat_share_error_image_too_large">内容太长，无法生成一张图片，请改用 PDF 分享。</string>
+    <string name="chat_share_error_write_failed">无法生成文件。</string>
+    <string name="chat_share_long_image">长图</string>
+    <string name="chat_share_pdf">PDF</string>
+    <string name="chat_share_too_long_image">内容太长，无法拼接为长图</string>
+    <string name="chat_share_width_label">宽度：%1$s</string>
+    <string name="chat_share_table_label">表格：%1$s</string>
+    <string name="chat_share_appearance_label">外观：%1$s</string>
+    <string name="chat_share_switched_to">已切换为 %1$s</string>
+    <string name="chat_share_table_adaptive">自适应宽度</string>
+    <string name="chat_share_table_default">默认宽度</string>
+    <string name="chat_share_width_phone">手机</string>
+    <string name="chat_share_width_tablet">平板</string>
+    <string name="chat_share_n_selected">已选择 %1$d 项</string>
+    <string name="chat_share_select_all">全选</string>
+    <string name="chat_share_deselect_all">取消全选</string>
+</resources>

@@ -57,6 +57,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -89,6 +91,7 @@ import com.openminis.app.agent.jobs.AgentJobRegistry
 import com.openminis.app.agent.jobs.HelperRunner
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.DisplayBitmapLimits
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -391,25 +394,35 @@ internal fun helperControlPayload(block: AssistantBlock): String? {
  */
 @Composable
 internal fun helperControlSummary(block: AssistantBlock): String? {
-    val call = remember(block.toolArgs, block.content) {
-        HelperRunner.classifyCall(block.toolArgs.ifEmpty { null }, block.content.ifEmpty { null })
+    val res = androidx.compose.ui.platform.LocalContext.current.resources
+    return remember(block.toolArgs, block.content, res) {
+        helperControlSummaryText(block) { id, count ->
+            if (count == null) res.getString(id) else res.getString(id, count)
+        }
     }
+}
+
+/**
+ * [T-in-chat-search] The body of [helperControlSummary] without Compose, so
+ * "Search in Chat" searches the capsule line the pill draws, word for word.
+ * [string] resolves a resource id, with the count when the string takes one.
+ */
+internal fun helperControlSummaryText(block: AssistantBlock, string: (id: Int, count: Int?) -> String): String? {
+    val call = HelperRunner.classifyCall(block.toolArgs.ifEmpty { null }, block.content.ifEmpty { null })
     if (call == HelperRunner.SubAgentCall.DELEGATE) return null
-    val count = remember(call, block.content) {
-        HelperRunner.controlCount(call, block.content.ifEmpty { null })
-    }
+    val count = HelperRunner.controlCount(call, block.content.ifEmpty { null })
     return when (call) {
         // The count is what makes the line worth reading — "checked 3" says
         // something "checked sub agents" does not.
         HelperRunner.SubAgentCall.STATUS ->
-            if (count != null) stringResource(R.string.agent_control_checked_n, count)
-            else stringResource(R.string.agent_control_checked)
+            if (count != null) string(R.string.agent_control_checked_n, count)
+            else string(R.string.agent_control_checked, null)
         HelperRunner.SubAgentCall.RESUME ->
-            if (count != null) stringResource(R.string.agent_control_resumed_n, count)
-            else stringResource(R.string.agent_control_resumed)
-        HelperRunner.SubAgentCall.STEER -> stringResource(R.string.agent_control_steered)
-        HelperRunner.SubAgentCall.CANCEL -> stringResource(R.string.agent_control_stopped)
-        else -> stringResource(R.string.agent_control_generic)
+            if (count != null) string(R.string.agent_control_resumed_n, count)
+            else string(R.string.agent_control_resumed, null)
+        HelperRunner.SubAgentCall.STEER -> string(R.string.agent_control_steered, null)
+        HelperRunner.SubAgentCall.CANCEL -> string(R.string.agent_control_stopped, null)
+        else -> string(R.string.agent_control_generic, null)
     }
 }
 
@@ -953,23 +966,69 @@ internal fun HelperDetailContent(block: AssistantBlock) {
     val info = remember(block.content, block.toolStatus, block.toolTitle) { parseHelperBlock(block) }
     val accent = helperAccent()
     var latestImagePath by remember(info.childSessionId) { mutableStateOf<String?>(null) }
+    // [T-subagent-detail-rich] What the child's session shows of the run (null
+    // until read, and when there is no child), the run's clock, and "now" for
+    // the time-left chip. Port of iOS HelperDetailCard.loadChildFacts.
+    var digest by remember(info.childSessionId) { mutableStateOf<SubAgentRunDigest?>(null) }
+    var clock by remember(info.childSessionId) { mutableStateOf(SubAgentRunClock()) }
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    // Keyed on isRunning too: the run ending restarts this once, so the final
+    // figures (chips, timeline) are read after the last tool call settled.
     LaunchedEffect(info.childSessionId, info.isRunning) {
-        val cid = info.childSessionId ?: return@LaunchedEffect
         while (true) {
+            nowMs = System.currentTimeMillis()
+            clock = SubAgentRunClock.read(info.childSessionId, block)
+            val cid = info.childSessionId ?: break
             // [T-android-vm-store-child-tag-survives-evict] A delegate's child is a
             // sub agent: re-acquire it in the CHILD pool so an evicted child does
             // not come back as NORMAL and push a user chat out of the cache.
             val vm = runCatching {
                 helperViewModelFor(context, cid, ChatViewModelStore.PoolKind.CHILD)
             }.getOrNull()
-            latestImagePath = vm?.messages?.value?.asReversed()?.asSequence()
-                ?.filter { it.role == "assistant" }
-                ?.flatMap { it.toolBlocks.asReversed().asSequence() }
-                ?.mapNotNull { it.imageFilePath?.takeIf { p -> p.isNotEmpty() && java.io.File(p).exists() } }
-                ?.firstOrNull()
+            // While the child's turn streams, its in-flight tool blocks and text
+            // live ONLY in the streaming side-channel; `messages` is rewritten at
+            // turn end. Reading it alone left the running card with no tool
+            // calls and no latest output (device, 2026-10-06). Same merged view
+            // the runner's childLiveMessages uses.
+            // On a cold process the child's session loads asynchronously: read it
+            // only once it is in, or a finished run (read once, then the loop
+            // stops) would keep the empty list for good.
+            vm?.sessionContentLoaded?.first { it }
+            val msgs = vm?.let { v ->
+                val canonical = v.messages.value
+                val stream = v.streamingById.value
+                if (stream.isEmpty()) canonical else mergeStreamingOverlay(canonical, stream)
+            }.orEmpty()
+            latestImagePath = msgs.asReversed().asSequence()
+                .filter { it.role == "assistant" }
+                .flatMap { it.toolBlocks.asReversed().asSequence() }
+                .mapNotNull { it.imageFilePath?.takeIf { p -> p.isNotEmpty() && java.io.File(p).exists() } }
+                .firstOrNull()
+            if (vm != null) {
+                val stats = runCatching { vm.loadSessionTokenStats() }.getOrNull()
+                val read = SubAgentRunDigest.from(
+                    msgs,
+                    turns = stats?.loopCount ?: 0,
+                    tokensIn = stats?.input ?: 0L,
+                    tokensOut = stats?.output ?: 0L,
+                )
+                if (read != digest) digest = read
+            }
             if (!info.isRunning) break
-            delay(5_000L)
+            delay(3_000L)
         }
+    }
+    // [T-subagent-detail-rich] The delegation's own arguments (null for a
+    // payload without a task) and the minutes it was granted.
+    val taskArgs = remember(block.toolArgs) { SubAgentTaskArgs.parse(block.toolArgs.ifEmpty { null }) }
+    val budgetMinutes = remember(block.content, taskArgs) {
+        val recorded = runCatching { JSONObject(block.content) }.getOrNull()
+            ?.takeIf { it.has("budget_minutes") }?.optInt("budget_minutes")
+        SubAgentTimeBudget.minutes(
+            recorded = recorded, requested = taskArgs?.maxMinutes, hasArgs = taskArgs != null,
+            defaultMinutes = com.openminis.app.agent.jobs.HelperRunner.DEFAULT_MINUTES,
+            maxMinutes = com.openminis.app.agent.jobs.HelperRunner.MAX_MINUTES,
+        )
     }
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp).padding(top = 12.dp, bottom = 16.dp),
@@ -1014,6 +1073,36 @@ internal fun HelperDetailContent(block: AssistantBlock) {
                 if (f.escalation) add(Triple(stringResource(R.string.agent_detail_escalation), stringResource(R.string.agent_detail_escalation_value), false))
                 if (f.background) add(Triple(stringResource(R.string.agent_detail_delivery), stringResource(R.string.agent_detail_delivery_value), false))
             }
+            // [T-subagent-detail-rich] When it ran, as far as the process
+            // remembers (the registry is in memory; after a restart only the
+            // elapsed time in the title bar is left), and the budget it had.
+            clock.startedAtMs?.let {
+                add(Triple(stringResource(R.string.subagent_detail_started), subAgentClockLabel(it), true))
+            }
+            if (!info.isRunning) clock.finishedAtMs?.let {
+                add(Triple(stringResource(R.string.subagent_detail_finished), subAgentClockLabel(it), true))
+            }
+            budgetMinutes?.let {
+                add(Triple(stringResource(R.string.subagent_detail_time_budget), stringResource(R.string.subagent_detail_minutes, it), false))
+            }
+            // How the result comes back and whether it reports on the way, as
+            // the delegation asked. Background is the runner's default.
+            if (taskArgs != null) {
+                if (f?.background != true) {
+                    add(Triple(
+                        stringResource(R.string.agent_detail_delivery),
+                        stringResource(if (taskArgs.wait == true) R.string.subagent_detail_delivery_wait else R.string.subagent_detail_delivery_background),
+                        false,
+                    ))
+                }
+                taskArgs.progressReport?.takeIf { it != "none" }?.let { level ->
+                    add(Triple(
+                        stringResource(R.string.agent_detail_interaction_progress),
+                        stringResource(if (level == "frequent") R.string.subagent_detail_progress_frequent else R.string.subagent_detail_progress_moderate),
+                        false,
+                    ))
+                }
+            }
             // [T-android-agent-detail-rows] Two facts iOS shows and Android did
             // not. Read straight off the block's payload rather than widened
             // into HelperBlockInfo: they are detail-sheet-only, and the parse
@@ -1034,12 +1123,16 @@ internal fun HelperDetailContent(block: AssistantBlock) {
                 // line, so its shape matters more than its tail.
                 add(Triple(stringResource(R.string.agent_detail_job), job.take(8), true))
             }
+            // [T-subagent-detail-rich] The chips and the timeline already show
+            // tools / turns / tokens from the child's session; the payload's
+            // own line is the fallback for a run whose session could not be read.
+            val chipsCoverIt = digest?.isEmpty == false
             info.runSummary?.split(" · ")?.forEach { part ->
                 val t = part.trim()
                 when {
-                    t.startsWith("tools ") -> add(Triple(stringResource(R.string.agent_detail_tools), t.removePrefix("tools "), true))
-                    t.startsWith("turns ") -> add(Triple(stringResource(R.string.agent_detail_turns), t.removePrefix("turns "), true))
-                    t.startsWith("tokens ") -> add(Triple(stringResource(R.string.agent_detail_tokens), t.removePrefix("tokens "), true))
+                    t.startsWith("tools ") -> if (!chipsCoverIt) add(Triple(stringResource(R.string.agent_detail_tools), t.removePrefix("tools "), true))
+                    t.startsWith("turns ") -> if (!chipsCoverIt) add(Triple(stringResource(R.string.agent_detail_turns), t.removePrefix("turns "), true))
+                    t.startsWith("tokens ") -> if (!chipsCoverIt) add(Triple(stringResource(R.string.agent_detail_tokens), t.removePrefix("tokens "), true))
                     t.isNotEmpty() -> add(Triple(stringResource(R.string.agent_detail_summary), t, false))
                 }
             }
@@ -1094,6 +1187,16 @@ internal fun HelperDetailContent(block: AssistantBlock) {
                 }
             }),
         )
+        // [T-subagent-detail-rich] How much it has done, at a glance.
+        val remainingMs = clock.startedAtMs?.takeIf { info.isRunning }?.let { started ->
+            budgetMinutes?.let { SubAgentTimeBudget.remainingMs(it, started, nowMs) }
+        }
+        digest?.let { d ->
+            if (!d.isEmpty || remainingMs != null) {
+                SubAgentStatChips(d, remainingMs, budgetMinutes = if (info.isRunning) budgetMinutes else null)
+            }
+        }
+        taskArgs?.let { SubAgentTaskCard(it) }
         // 2. current tool (running only)
         (info.phase as? HelperPhase.Running)?.let { p ->
             if (p.tool != null || p.activity.isNotEmpty()) {
@@ -1108,6 +1211,8 @@ internal fun HelperDetailContent(block: AssistantBlock) {
                 }
             }
         }
+        // [T-subagent-detail-rich] Its recent tool calls, newest first.
+        digest?.takeIf { it.total > 0 }?.let { SubAgentToolTimelineCard(it) }
         // 3. latest screenshot
         latestImagePath?.let { path ->
             val bmp = remember(path) { DisplayBitmapLimits.decodeFileBounded(path) }
@@ -1137,6 +1242,11 @@ internal fun HelperDetailContent(block: AssistantBlock) {
         }
         // 4. result / last message — always shown once finished
         val isFinished = f != null
+        // [T-subagent-detail-rich] While it runs the block carries a progress
+        // line, not a message; what the sub agent last wrote is in its session.
+        if (!isFinished && info.result.isNullOrEmpty()) {
+            digest?.latestText?.let { SubAgentLatestOutputCard(it) }
+        }
         if (isFinished || !info.result.isNullOrEmpty()) {
             AgentDetailCard(
                 title = stringResource(if (isFinished) R.string.agent_detail_result else R.string.agent_detail_last_message),
@@ -1146,6 +1256,11 @@ internal fun HelperDetailContent(block: AssistantBlock) {
                 if (!r.isNullOrEmpty()) StreamingMarkdownText(content = r, isStreaming = false)
                 else Text(stringResource(R.string.agent_detail_no_deliverable), fontSize = 13.sp, color = ChatColors.secondaryText)
             }
+        }
+        // [T-subagent-detail-rich] Steer or stop, only while there is a run to act on.
+        val cid = info.childSessionId
+        if (info.isRunning && cid != null) {
+            SubAgentActionsCard(childSessionId = cid, canSteer = clock.jobIsLive)
         }
     }
 }
@@ -1258,7 +1373,13 @@ internal fun AgentCallbackCard(callback: AgentCallback, onTap: () -> Unit, modif
             Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(14.dp))
         }
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(headline, fontSize = 14.sp, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold, color = ChatColors.primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // [T-in-chat-search] Only the title part is a unit (iOS callbackHeadline).
+            Text(
+                com.openminis.app.ui.chat.search.rememberChatSearchHighlighted(
+                    headline, com.openminis.app.ui.chat.search.ChatSearchUnits.TITLE, offset = headline.length - callback.title.length,
+                ),
+                fontSize = 14.sp, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold, color = ChatColors.primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
             Text(subline, fontSize = 12.sp, lineHeight = 15.sp, color = ChatColors.secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = ChatColors.tertiaryText, modifier = Modifier.size(16.dp))
@@ -1455,12 +1576,27 @@ internal fun HelperTranscript(
         val merged = if (streaming.isEmpty()) messages else mergeStreamingOverlay(messages, streaming)
         buildFlatChatItems(merged)
     }
+    var revealedUsage by rememberSaveable(vm.currentSessionId) { mutableStateOf(arrayListOf<String>()) }
+    val toggleUsage: (String) -> Unit = { id ->
+        revealedUsage = ArrayList(if (id in revealedUsage) revealedUsage - id else revealedUsage + id)
+    }
+    val tapTargets = remember(messages, items) { usageTapTargets(messages, items) }
+    CompositionLocalProvider(
+        LocalMarkdownBlankTapHandler provides toggleUsage,
+        LocalUsageTapBandRegistry provides remember(vm) { UsageTapBandRegistry() },
+    ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         reverseLayout = true,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     ) {
         items(items.asReversed(), key = { it.key }, contentType = { it.contentType }) { item ->
+            val tapTarget = tapTargets[item.key]
+            UsageTapBandRowScope(
+                messageId = tapTarget?.messageId.orEmpty(),
+                inFinalTextBlock = tapTarget != null,
+                isLastRow = tapTarget?.isLastRow == true,
+            ) {
             when (item) {
                 is FlatChatItem.UserBubble -> UserMessageBubble(message = item.message, precededByUser = item.precededByUser, onRetry = null, onEdit = null, onDeleteFromHere = null)
                 is FlatChatItem.AgentCallbackCard -> AgentCallbackCard(item.callback, onTap = { onOpenCallback(item.callback) })
@@ -1468,7 +1604,9 @@ internal fun HelperTranscript(
                     marker = item.marker,
                     hostSessionId = vm.currentSessionId,
                 )
-                is FlatChatItem.CompletedTools -> CompletedToolGroup(item.count, item.expanded, onToggle = {})
+                // [T-port-fold-tools] This read-only transcript is never
+                // folded (no ToolFoldController), so no group row reaches it.
+                is FlatChatItem.AssistantToolGroup -> Unit
                 is FlatChatItem.AssistantHeader -> AssistantHeader()
                 is FlatChatItem.AssistantText -> StreamingMarkdownText(content = item.block.content, isStreaming = item.isStreaming)
                 is FlatChatItem.AssistantMarkdownBlock -> StreamingMarkdownText(content = item.rawText, isStreaming = item.isStreaming)
@@ -1487,11 +1625,20 @@ internal fun HelperTranscript(
                     if (HelperRunner.isSubAgentToolName(item.block.toolName)) HelperToolBlock(item.block, onOpenDetail = { onOpenDetail(item.block.id) })
                     else ToolCallPill(item.block, allToolBlocks = item.allToolBlocks, onOpenDetail = onOpenDetail)
                 is FlatChatItem.AssistantInfo -> FallbackInfoBlock(item.block)
+                is FlatChatItem.AssistantUsage -> {
+                    val id = item.messageId.substringBefore('#')
+                    val shown = id in revealedUsage
+                    UsageCapsuleRow(shown, onToggle = { toggleUsage(id) }) {
+                        if (shown) UsageCapsule(item.usage, item.completedAt)
+                    }
+                }
                 is FlatChatItem.AssistantTyping -> TypingIndicator()
                 is FlatChatItem.AssistantError -> InlineErrorBanner(item.error)
                 is FlatChatItem.AssistantLegacyContent -> StreamingMarkdownText(content = item.content, isStreaming = item.isStreaming)
             }
+            }
         }
+    }
     }
 }
 

@@ -230,7 +230,10 @@ class RcloneRemoteStore(private val context: Context) {
             },
         )
         // Remove the previous credential only AFTER its new name is saved.
-        if (originalName != edited.name) secrets.edit().remove(originalName).apply()
+        if (originalName != edited.name) {
+            secrets.edit().remove(originalName).apply()
+            com.openminis.app.backup.BackupHistory.get(context).renameDestination(originalName, edited.name)
+        }
         AppLogger.info(TAG, "[Rclone] remote updated: ${edited.name} (${edited.backend})")
     }
 

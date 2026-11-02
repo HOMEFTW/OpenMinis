@@ -902,6 +902,7 @@ fun ChatSplitScaffoldRoute(
                 onSessionClick = onSessionSelected,
                 onNewChat = onSessionSelected,
                 onSettingsClick = { navController.safeNavigate(Routes.SETTINGS) },
+                onNetworkPageClick = { navController.safeNavigate(it) },
                 onAddProviderClick = { navController.safeNavigate(Routes.ADD_PROVIDER) },
                 onSelectModelsClick = { navController.safeNavigate(Routes.ONBOARDING_MODELS) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },

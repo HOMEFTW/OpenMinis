@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="skill_copy_source_url">复制来源 URL</string>
+    <string name="skill_source_url_copied">已复制来源 URL</string>
+    <string name="session_duplicate_suffix">副本</string>
+</resources>

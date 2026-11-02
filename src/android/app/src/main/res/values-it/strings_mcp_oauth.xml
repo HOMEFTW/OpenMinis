@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Autorizzazione</string>
+    <string name="mcp_form_auth_none">Nessuno</string>
+    <string name="mcp_form_auth_browser">Accedi con il browser</string>
+    <string name="mcp_signin_intro">Minis troverà automaticamente la pagina di accesso di questo servizio. Non serve alcun Client ID.</string>
+    <string name="mcp_signin_signed_in">Accesso effettuato</string>
+    <string name="mcp_signin_expired">Accesso scaduto</string>
+    <string name="mcp_signin_not_signed_in">Accesso non effettuato</string>
+    <string name="mcp_signin_sign_in">Accedi</string>
+    <string name="mcp_signin_sign_in_again">Accedi di nuovo</string>
+    <string name="mcp_signin_reset_confirm">Reimposta</string>
+    <string name="mcp_signin_manual_fallback">Questo servizio non supporta la registrazione automatica. Inserisci il suo Client ID qui sotto.</string>
+    <string name="mcp_signin_not_completed">L\'accesso non è stato completato. Puoi riprovare.</string>
+    <string name="mcp_dcr_not_protected">Questo server non ha richiesto un\'autorizzazione, quindi non c\'è nulla da connettere.</string>
+    <string name="mcp_dcr_bad_server_url">L\'URL del server non è valido.</string>
+    <string name="mcp_dcr_no_auth_server">Il server non ha indicato un server di autorizzazione.</string>
+    <string name="mcp_dcr_bad_auth_server_url">L\'URL del server di autorizzazione non è valido.</string>
+    <string name="mcp_dcr_metadata_incomplete">I metadati del server di autorizzazione sono incompleti.</string>
+    <string name="mcp_dcr_metadata_unreadable">Impossibile leggere i metadati del server di autorizzazione.</string>
+    <string name="mcp_dcr_no_pkce">Questo server di autorizzazione non supporta PKCE (S256), che è obbligatorio.</string>
+    <string name="mcp_dcr_bad_registration_endpoint">L\'endpoint di registrazione non è valido.</string>
+    <string name="mcp_dcr_registration_unreadable">Impossibile leggere la risposta di registrazione.</string>
+</resources>

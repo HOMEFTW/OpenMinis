@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="oauth_wait_notif_channel">Sign-in</string>
+    <string name="oauth_wait_notif_title">Waiting for sign-in…</string>
+    <string name="oauth_wait_notif_text">Finish signing in in the browser, then return to Minis.</string>
+</resources>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-multi-select-share] Share Chat picker and export, from upstream strings.xml. -->
+<resources>
+    <string name="chat_share_share_chat">Csevegés megosztása…</string>
+    <string name="chat_share_select_messages">Üzenetek kijelölése</string>
+    <string name="chat_share_share_count">Megosztás (%1$d)</string>
+    <string name="chat_share_select_all_below">Összes alatta lévő kijelölése</string>
+    <string name="chat_share_deselect_all_below">Az összes alatta lévő kijelölésének megszüntetése</string>
+    <string name="chat_share_select_below">Alatta lévők kijelölése</string>
+    <string name="chat_share_show_tools">Eszközök megjelenítése</string>
+    <string name="chat_share_hide_tools">Eszközök elrejtése</string>
+    <string name="chat_share_show_thinking">Gondolkodás megjelenítése</string>
+    <string name="chat_share_hide_thinking">Gondolkodás elrejtése</string>
+    <string name="chat_share_clear_selection">Kijelölés törlése</string>
+    <string name="chat_share_creating">Létrehozás…</string>
+    <string name="chat_share_error_nothing">A kijelölt üzenetekben nincs megosztható tartalom.</string>
+    <string name="chat_share_error_image_too_large">Túl hosszú egyetlen képhez. Oszd meg inkább PDF-ként.</string>
+    <string name="chat_share_error_write_failed">Nem sikerült létrehozni a fájlt.</string>
+    <string name="chat_share_long_image">Hosszú kép</string>
+    <string name="chat_share_pdf">PDF</string>
+    <string name="chat_share_too_long_image">Túl hosszú ahhoz, hogy egyetlen képpé fűzzük össze.</string>
+    <string name="chat_share_width_label">Szélesség: %1$s</string>
+    <string name="chat_share_table_label">Táblázat: %1$s</string>
+    <string name="chat_share_appearance_label">Megjelenés: %1$s</string>
+    <string name="chat_share_switched_to">Átváltva erre: %1$s</string>
+    <string name="chat_share_table_adaptive">Adaptív szélesség</string>
+    <string name="chat_share_table_default">Alapértelmezett szélesség</string>
+    <string name="chat_share_width_phone">Telefon</string>
+    <string name="chat_share_width_tablet">Táblagép</string>
+    <string name="chat_share_n_selected">%1$d kijelölve</string>
+    <string name="chat_share_select_all">Összes kijelölése</string>
+    <string name="chat_share_deselect_all">Kijelölés megszüntetése</string>
+</resources>

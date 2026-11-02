@@ -229,7 +229,11 @@ internal object KatexWebViewPool {
             addJavascriptInterface(JsBridge { w, h, err ->
                 if (webView === sourceView) pending?.complete(Triple(w, h, err))
             }, "AndroidBridge")
-            webViewClient = object : WebViewClient() {
+        webViewClient = object : WebViewClient() {
+            override fun onReceivedHttpAuthRequest(view: android.webkit.WebView?, handler: android.webkit.HttpAuthHandler?, host: String?, realm: String?) {
+                if (handler != null && com.openminis.app.network.WebViewNetworkProxy.answerAuth(handler, host, realm, view?.url)) return
+                super.onReceivedHttpAuthRequest(view, handler, host, realm)
+            }
                 override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                     if (webView === view) {
                         webView = null

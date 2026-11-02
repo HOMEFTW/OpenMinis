@@ -506,12 +506,14 @@ object MarkdownParser {
                 }
             }
 
-            // $ … $ — inline math (with currency-skip heuristic).
-            if (chars[i] == '$' && i + 1 < n && chars[i + 1] != '$' && chars[i + 1] != ' ') {
+            // $ … $ — inline math. ${NAME} and $NAME are shell variables, not openers.
+            if (chars[i] == '$' && i + 1 < n && chars[i + 1] != '$' && chars[i + 1] != ' ' &&
+                !opensVariable(chars, i)
+            ) {
                 val end = findSingleDollar(chars, i + 1, codeMask)
                 if (end != null) {
                     val latex = chars.substring(i + 1, end)
-                    if (looksLikeMath(latex)) {
+                    if (looksLikeMath(latex) && !isTablePipeArtifact(latex)) {
                         spans.add(MathSpan(makePlaceholder(spans.size), latex, false))
                         out.append(spans.last().placeholder)
                         i = end + 1
@@ -704,13 +706,86 @@ object MarkdownParser {
         var i = from
         while (i < n) {
             if (chars[i] == '\\' && i + 1 < n) { i += 2; continue }
-            if (chars[i] == '$' && (i == 0 || chars[i - 1] != ' ') &&
-                (codeMask == null || !codeMask[i])
-            ) return i
+            val plainDollar = chars[i] == '$' && (codeMask == null || !codeMask[i])
+            if (plainDollar && startsAmountOrVariable(chars, i)) return null
+            if (plainDollar && (i == 0 || chars[i - 1] != ' ')) return i
+            if (plainDollar && from < chars.length && isAsciiDigit(chars[from])) return null
             if (chars[i] == '\n') return null
             i++
         }
         return null
+    }
+
+    private fun isAsciiDigit(c: Char): Boolean = c in '0'..'9'
+    private fun isAsciiUpper(c: Char): Boolean = c in 'A'..'Z'
+
+    private fun variableNameLength(chars: String, from: Int): Int {
+        val n = chars.length
+        fun upper(index: Int) = index < n && isAsciiUpper(chars[index])
+        fun part(index: Int) = index < n && (isAsciiUpper(chars[index]) || isAsciiDigit(chars[index]))
+        if (!upper(from)) return 0
+        var len = 1
+        while (part(from + len)) len++
+        if (len < 2) return 0
+        while (from + len < n && chars[from + len] == '_' && upper(from + len + 1)) {
+            len += 2
+            while (part(from + len)) len++
+        }
+        val continued = from + len < n && chars[from + len] in 'a'..'z'
+        val subscripted = from + len < n && chars[from + len] == '_'
+        return if (continued || subscripted) 0 else len
+    }
+
+    private fun isBracedVariable(chars: String, from: Int): Boolean {
+        val n = chars.length
+        if (from >= n || chars[from] != '{') return false
+        var name = 0
+        while (from + 1 + name < n) {
+            val c = chars[from + 1 + name]
+            if (!(c in 'a'..'z' || isAsciiUpper(c) || isAsciiDigit(c) || c == '_')) break
+            name++
+        }
+        if (name == 0 || isAsciiDigit(chars[from + 1])) return false
+        if (from + 1 + name >= n || chars[from + 1 + name] != '}') return false
+        val after = from + 2 + name
+        return !(after < n && (chars[after] == '^' || chars[after] == '_'))
+    }
+
+    private fun startsAmountOrVariable(chars: String, at: Int): Boolean {
+        if (at + 1 < chars.length && isAsciiDigit(chars[at + 1])) return true
+        return isBracedVariable(chars, at + 1) || variableNameLength(chars, at + 1) > 0
+    }
+
+    private fun opensVariable(chars: String, at: Int): Boolean {
+        val n = chars.length
+        if (isBracedVariable(chars, at + 1)) return true
+        val len = variableNameLength(chars, at + 1)
+        if (len == 0) return false
+        val after = at + 1 + len
+        if (after >= n) return true
+        val c = chars[after]
+        if (c == '\n' || c == '\r') return true
+        if (c in "/:;,.\"')]") return true
+        if (c == ' ' || c == '\t') {
+            var k = after
+            while (k < n && (chars[k] == ' ' || chars[k] == '\t')) k++
+            if (k >= n) return true
+            return chars[k].isLetterOrDigit() || chars[k] == '\n' || chars[k] == '\r'
+        }
+        return false
+    }
+
+    private fun isTablePipeArtifact(content: String): Boolean {
+        var bare = 0
+        for (idx in content.indices) {
+            if (content[idx] != '|') continue
+            if (idx > 0 && content[idx - 1] == '\\') continue
+            bare++
+            val prevIsSpace = idx > 0 && content[idx - 1].isWhitespace()
+            val nextIsSpace = idx + 1 < content.length && content[idx + 1].isWhitespace()
+            if (prevIsSpace || nextIsSpace) return true
+        }
+        return bare % 2 == 1
     }
 
     /**

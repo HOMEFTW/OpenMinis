@@ -58,8 +58,15 @@ class AnthropicProvider(
      * leave this null so the build-configured value is read only for OAuth.
      */
     internal val oauthIdentifierPrompt: String? = null,
-) : LLMProvider {
+) : LLMProvider, com.openminis.app.network.NetworkTagged {
     override val name = "Anthropic"
+
+    /**
+     * [T-quota-claude-subscription] The instance this provider serves, set by
+     * ProviderFactory for OAuth (Claude subscription) instances only. Every
+     * reply's `anthropic-ratelimit-unified-*` headers feed its quota.
+     */
+    var quotaInstanceId: String? = null
     override val defaultMaxOutputTokens: Int get() = 64_000
 
     /**
@@ -94,7 +101,10 @@ class AnthropicProvider(
         // Network-transition eviction must reach provider connections.
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .build()
-    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, basePath)
+    override var netTag: String? = null
+    private val client get() = com.openminis.app.network.NetworkHttp.client(
+        netTag, com.openminis.app.network.EndpointCertificates.client(baseClient, basePath),
+    )
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>,
@@ -112,6 +122,7 @@ class AnthropicProvider(
         val callCancellation = cancelOnCancellation { call.cancel() }
         try {
             call.execute().use { response ->
+                if (isOAuth) com.openminis.app.quota.QuotaObservationSink.recordAnthropicResponse(quotaInstanceId, response.headers)
                 val responseBody = response.body?.string() ?: ""
                 if (!response.isSuccessful) throw mapHttpError(response.code, responseBody)
                 parseResponse(JSONObject(responseBody))
@@ -184,6 +195,8 @@ class AnthropicProvider(
             throw e
         }
         val durationMs = System.currentTimeMillis() - startTime
+        // [T-quota-claude-subscription] Errors included: a 429 still reports usage.
+        if (isOAuth) com.openminis.app.quota.QuotaObservationSink.recordAnthropicResponse(quotaInstanceId, response.headers)
 
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
@@ -428,15 +441,16 @@ class AnthropicProvider(
                     }
                 }
             }
-        } else if (modelAcceptsExplicitThinkingDisabled(model.id)) {
-            // Claude 4.6-4.x models think by DEFAULT when the
-            // request carries no thinking field at all — "off" must be sent
-            // explicitly, or small-maxTokens calls burn the whole budget on
-            // thinking_tokens and return zero text (iOS ea86dd8a observed:
-            // max_tokens=256 → stop_reason=max_tokens, thinking_tokens=256/256,
-            // empty body). Legacy (<=4.5) models default to no thinking, so
-            // absence is fine there. Claude 5+ rejects the disabled literal.
-            body.put("thinking", JSONObject().put("type", "disabled"))
+        } else {
+            when (offThinking(model.id)) {
+                OffThinking.OMIT -> Unit
+                OffThinking.DISABLED -> body.put("thinking", JSONObject().put("type", "disabled"))
+                OffThinking.BETWEEN_TOOLS -> body.put("thinking", JSONObject().put("type", "between_tools"))
+                OffThinking.LOW_EFFORT -> {
+                    body.put("thinking", JSONObject().put("type", "adaptive").put("display", "summarized"))
+                    body.put("output_config", JSONObject().put("effort", "low"))
+                }
+            }
         }
 
         // System prompt blocks — mirrors iOS AnthropicProvider.resolveSystemPrompt.
@@ -819,6 +833,8 @@ class AnthropicProvider(
         }
     }
 
+    enum class OffThinking { OMIT, DISABLED, BETWEEN_TOOLS, LOW_EFFORT }
+
     companion object {
         /**
          * Parse the `-<major>-<minor>` (or `/<major>.<minor>`) version out of a Claude id.
@@ -834,9 +850,11 @@ class AnthropicProvider(
          */
         private fun parseClaudeVersion(modelId: String): Pair<Int, Int>? {
             val lower = modelId.lowercase()
-            if (!lower.contains("claude")) return null
-            val regex = Regex("""[-/]?(\d+)(?:[-.](\d+))?(?:$|[^0-9])""")
-            val match = regex.find(lower) ?: return null
+            val claudeAt = lower.indexOf("claude")
+            if (claudeAt < 0) return null
+            val afterClaude = lower.substring(claudeAt + "claude".length)
+            val regex = Regex("""[-/]?(\d+)(?:[-.](\d{1,2}))?(?:$|[^0-9])""")
+            val match = regex.find(afterClaude) ?: return null
             val major = match.groupValues[1].toIntOrNull() ?: return null
             val minor = match.groupValues[2].toIntOrNull() ?: 0
             return major to minor
@@ -863,8 +881,18 @@ class AnthropicProvider(
         }
 
         fun modelAcceptsExplicitThinkingDisabled(modelId: String): Boolean {
-            val (major, minor) = parseClaudeVersion(modelId) ?: return false
-            return major == 4 && minor >= 6
+            return offThinking(modelId) == OffThinking.DISABLED
+        }
+
+        fun offThinking(modelId: String): OffThinking {
+            val (major, minor) = parseClaudeVersion(modelId) ?: return OffThinking.OMIT
+            if (major < 4 || (major == 4 && minor < 6)) return OffThinking.OMIT
+            if (major == 4) return OffThinking.DISABLED
+            if (major == 5 && modelId.lowercase().contains("sonnet")) {
+                if (minor == 0) return OffThinking.DISABLED
+                if (minor == 5) return OffThinking.BETWEEN_TOOLS
+            }
+            return OffThinking.LOW_EFFORT
         }
 
         internal fun streamError(type: String, message: String): LLMError = when (type) {
@@ -1068,19 +1096,8 @@ class AnthropicProvider(
         return LLMResponse(text, stopReason, usage)
     }
 
-    private fun parseUsage(json: JSONObject): LLMUsage {
-        val inputTokens = json.optInt("input_tokens", 0)
-        val cacheCreationTokens = json.optInt("cache_creation_input_tokens").takeIf { it > 0 }
-        val cacheReadTokens = json.optInt("cache_read_input_tokens").takeIf { it > 0 }
-        return LLMUsage(
-            inputTokens = inputTokens,
-            outputTokens = json.optInt("output_tokens", 0),
-            cacheCreationInputTokens = cacheCreationTokens,
-            cacheReadInputTokens = cacheReadTokens,
-            latestContextTokens = (inputTokens.toLong() + (cacheCreationTokens ?: 0) + (cacheReadTokens ?: 0))
-                .coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(),
-        )
-    }
+    private fun parseUsage(json: JSONObject): LLMUsage =
+        com.openminis.app.provider.parseMessagesUsage(json)
 
     private fun mapHttpError(statusCode: Int, body: String): LLMError {
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()

@@ -24,7 +24,7 @@ class DeepSeekProvider(
     baseURL: String? = null,
     private val customUserAgent: String? = null,
     private val responseTimeoutSeconds: Int? = null,
-) : LLMProvider {
+) : LLMProvider, com.openminis.app.network.NetworkTagged {
     override val name = "DeepSeek"
     override val defaultMaxOutputTokens = 256_000
     private val endpoint = messagesEndpoint(baseURL)
@@ -36,7 +36,10 @@ class DeepSeekProvider(
         .followRedirects(false).followSslRedirects(false)
         .connectionPool(NetworkMonitor.sharedLLMConnectionPool)
         .build()
-    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, endpoint)
+    override var netTag: String? = null
+    private val client get() = com.openminis.app.network.NetworkHttp.client(
+        netTag, com.openminis.app.network.EndpointCertificates.client(baseClient, endpoint),
+    )
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>, systemPrompt: String?, maxTokens: Int, temperature: Double?,
@@ -48,7 +51,7 @@ class DeepSeekProvider(
         streamMessageClamped(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel).collect {
             when (it) {
                 is LLMStreamChunk.Text -> text.append(it.text)
-                is LLMStreamChunk.Usage -> usage = it.usage
+                is LLMStreamChunk.Usage -> usage = com.openminis.app.usage.UsageChunkMerger.merge(usage, it.usage)
                 is LLMStreamChunk.Finished -> reason = it.stopReason
                 else -> Unit
             }

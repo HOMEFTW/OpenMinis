@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="thinking_show_full">显示完整思考</string>
+    <string name="thinking_full_title">完整思考</string>
+    <string name="thinking_full_copy">全部复制</string>
+</resources>

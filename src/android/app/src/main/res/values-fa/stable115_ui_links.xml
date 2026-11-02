@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="skill_copy_source_url">کپی URL منبع</string>
+    <string name="skill_source_url_copied">\u200FURL منبع کپی شد</string>
+    <string name="session_duplicate_suffix">کپی</string>
+</resources>

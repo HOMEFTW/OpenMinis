@@ -412,6 +412,8 @@ data class BackupEnvVarMeta(
      */
     @Serializable(with = Iso8601MillisSerializer::class)
     val createdAt: Long = 0,
+    /** Missing on older packages means enabled. */
+    val enabled: Boolean = true,
 )
 
 /**

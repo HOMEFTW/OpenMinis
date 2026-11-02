@@ -58,6 +58,7 @@ sealed class VoiceProviderException(message: String) : Exception(message) {
     class Unsupported(detail: String) : VoiceProviderException("Unsupported: $detail")
     class Http(val code: Int, val body: ByteArray?) :
         VoiceProviderException(httpMessage(code, body))
+    class Service(detail: String) : VoiceProviderException(detail)
     class Parse(detail: String) : VoiceProviderException("Parse failed: $detail")
     class Auth : VoiceProviderException("Authentication failed, please check the API key")
     class NoAudioData : VoiceProviderException("No audio data")

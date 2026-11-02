@@ -7,6 +7,9 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * [T-android-backup-history] Persistent record of backup runs. The Android peer
@@ -32,7 +35,11 @@ import java.util.UUID
  * the user still cares about, and an idle month leaves nothing stale behind.
  * Same 30-day window as iOS.
  */
-class BackupHistory private constructor(private val context: Context) {
+class BackupHistory internal constructor(
+    private val dir: File,
+    private val writer: Executor = WRITER,
+    private val sanitize: (List<LogEntry>) -> List<LogEntry> = ::cleanLog,
+) {
 
     /**
      * Terminal state of a run.
@@ -52,6 +59,7 @@ class BackupHistory private constructor(private val context: Context) {
         val message: String,
         /** Rendered as a problem (destination failure, skipped file). */
         val isProblem: Boolean = false,
+        val isTransient: Boolean = false,
     )
 
     /** Per-destination delivery outcome — the thing the old UI never showed. */
@@ -109,27 +117,41 @@ class BackupHistory private constructor(private val context: Context) {
     // MARK: - Storage
 
     private val storeFile: File
-        get() = File(context.filesDir, "backup-history").apply { mkdirs() }
-            .let { File(it, "records.json") }
+        get() = File(dir, "records.json")
 
     private val storage by lazy { BackupHistoryStorage(storeFile) }
 
     @Volatile
     private var cache: List<Record>? = null
+    private var version = 0L
+    private var writtenVersion = 0L
+    private val writeQueued = AtomicBoolean(false)
+    private val writeLock = Any()
+    @Volatile internal var writeHook: (() -> Unit)? = null
 
     /** Newest first. Expired records are dropped (and rewritten) on first read. */
     @Synchronized
     fun records(): List<Record> {
         cache?.let { return it }
-        val loaded = runCatching {
-            storage.read()
-                ?.let { JSON.decodeFromString(RECORD_LIST, it) }
-        }.getOrNull() ?: emptyList()
+        val raw = runCatching { storage.read() }.getOrNull()
+        val loaded = raw?.let { text ->
+            runCatching { JSON.decodeFromString(RECORD_LIST, text) }.getOrElse {
+                val aside = File(dir, "records.json.corrupt-${System.currentTimeMillis()}")
+                val moved = storeFile.renameTo(aside)
+                AppLogger.error(TAG, "[Backup] history does not decode; preserved=${moved} file=${aside.name}")
+                emptyList()
+            }
+        }.orEmpty()
         val cutoff = System.currentTimeMillis() - RETENTION_MS
         val kept = loaded.filter { it.startedAt >= cutoff }
-            .map { it.copy(log = cleanLog(it.log)) }
+            .map { record ->
+                runCatching { record.copy(log = sanitize(record.log)) }.getOrElse { record }
+            }
             .sortedByDescending { it.startedAt }
-        if (kept != loaded) persist(kept)
+        if (kept != loaded) {
+            if (raw != null && kept.any { r -> loaded.firstOrNull { it.id == r.id }?.log != r.log }) keepBackup(raw)
+            persist(kept)
+        }
         cache = kept
         return kept
     }
@@ -137,12 +159,36 @@ class BackupHistory private constructor(private val context: Context) {
     @Synchronized
     private fun persist(list: List<Record>) {
         cache = list
-        runCatching {
-            val bytes = JSON.encodeToString(RECORD_LIST, list).toByteArray(Charsets.UTF_8)
-            storage.write { it.write(bytes) }
+        version++
+        if (writeQueued.compareAndSet(false, true)) {
+            runCatching { writer.execute { writeLatest() } }.onFailure {
+                writeQueued.set(false)
+                AppLogger.error(TAG, "[Backup] history write not scheduled: ${it.javaClass.simpleName}")
+            }
         }
-            .onFailure { AppLogger.error(TAG, "[Backup] history write failed: ${it.message}") }
     }
+
+    /** Serialization and atomic replacement run outside the cache monitor. */
+    private fun writeLatest() = synchronized(writeLock) {
+        writeQueued.set(false)
+        val (snapshot, revision) = synchronized(this) { cache to version }
+        if (snapshot == null || revision <= writtenVersion) return@synchronized
+        runCatching {
+            writeHook?.invoke()
+            val bytes = JSON.encodeToString(RECORD_LIST, snapshot).toByteArray(Charsets.UTF_8)
+            storage.write { it.write(bytes) }
+            writtenVersion = revision
+        }.onFailure { AppLogger.error(TAG, "[Backup] history write failed: ${it.javaClass.simpleName}") }
+    }
+
+    private fun keepBackup(raw: String) {
+        runCatching { writer.execute {
+            runCatching { BackupHistoryStorage(File(dir, "records.json.bak")).write { it.write(raw.toByteArray(Charsets.UTF_8)) } }
+                .onFailure { AppLogger.error(TAG, "[Backup] history original could not be preserved: ${it.javaClass.simpleName}") }
+        } }.onFailure { AppLogger.error(TAG, "[Backup] history backup not scheduled: ${it.javaClass.simpleName}") }
+    }
+
+    internal fun flushWrites() = writeLatest()
 
     // MARK: - Mutation
 
@@ -151,7 +197,7 @@ class BackupHistory private constructor(private val context: Context) {
     fun upsert(record: Record) {
         val cur = records().toMutableList()
         val i = cur.indexOfFirst { it.id == record.id }
-        val cleaned = record.copy(log = cleanLog(record.log))
+        val cleaned = runCatching { record.copy(log = sanitize(record.log)) }.getOrElse { record }
         if (i >= 0) cur[i] = cleaned else cur.add(0, cleaned)
         persist(cur.sortedByDescending { it.startedAt })
     }
@@ -159,6 +205,16 @@ class BackupHistory private constructor(private val context: Context) {
     @Synchronized
     fun remove(id: String) {
         persist(records().filterNot { it.id == id })
+    }
+
+    /** Preserve a destination's history links when its saved name changes. */
+    @Synchronized
+    fun renameDestination(from: String, to: String) {
+        val current = records()
+        if (current.none { record -> record.destinations.any { it.name == from } }) return
+        persist(current.map { record -> record.copy(destinations = record.destinations.map {
+            if (it.name == from) it.copy(name = to) else it
+        }) })
     }
 
     @Synchronized
@@ -206,11 +262,11 @@ class BackupHistory private constructor(private val context: Context) {
         // These were emitted by BackupExporter / BackupRunController as
         // transient status. Keep problems and durable delivery/save outcomes,
         // including on histories created before progress stopped being logged.
-        internal fun cleanLog(log: List<LogEntry>): List<LogEntry> = log.filterNot {
+        internal fun cleanLog(log: List<LogEntry>): List<LogEntry> = BackupLogRules.sanitize(log.filterNot {
             !it.isProblem && (
-                it.message in EXPORT_PROGRESS || DELIVERY_PROGRESS.matches(it.message)
+                it.isTransient || it.message in EXPORT_PROGRESS || DELIVERY_PROGRESS.matches(it.message)
             )
-        }
+        })
 
         private val EXPORT_PROGRESS = setOf(
             "Starting…", "Exporting chats…", "Exporting shared files…", "Exporting skills…",
@@ -222,13 +278,16 @@ class BackupHistory private constructor(private val context: Context) {
 
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
         private val RECORD_LIST = ListSerializer(Record.serializer())
+        private val WRITER: Executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "BackupHistoryWriter").apply { isDaemon = true }
+        }
 
         @Volatile
         private var instance: BackupHistory? = null
 
         fun get(context: Context): BackupHistory =
             instance ?: synchronized(this) {
-                instance ?: BackupHistory(context.applicationContext)
+                instance ?: BackupHistory(File(context.applicationContext.filesDir, "backup-history"))
                     .also { it.reconcileInterrupted(); instance = it }
             }
     }

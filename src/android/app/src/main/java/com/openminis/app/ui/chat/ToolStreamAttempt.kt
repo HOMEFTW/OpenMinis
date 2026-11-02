@@ -51,7 +51,8 @@ internal fun replaceFallbackBanner(blocks: MutableList<AssistantBlock>, banner: 
 }
 
 internal fun toolTurnMustDiscardCalls(finishReason: String?, providerDiscard: Boolean): Boolean =
-    providerDiscard || finishReason.isNullOrBlank() || finishReason in setOf("length", "max_tokens", "max_output_tokens")
+    providerDiscard || finishReason.isNullOrBlank() || com.openminis.app.provider.StopReasons.isRefusal(finishReason) ||
+        finishReason in setOf("length", "max_tokens", "max_output_tokens")
 
 /** JSONObject.NULL differs between Android and the desktop org.json implementation. */
 internal fun org.json.JSONObject.optionalNonBlankString(key: String): String? =

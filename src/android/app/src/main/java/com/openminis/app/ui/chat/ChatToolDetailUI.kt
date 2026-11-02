@@ -547,7 +547,7 @@ internal fun ToolDetailSheet(
                                             .padding(bottom = hudReservePadding),
                                     ) {
                                         Text(
-                                            text = "$ $command",
+                                            text = "$ ${remember(command) { ToolTextTail.capLongLines(command) }}",
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold,
                                             fontFamily = FontFamily.Monospace,
@@ -559,14 +559,20 @@ internal fun ToolDetailSheet(
                                             // tap them to open the in-app web preview (matches iOS
                                             // TerminalCanvasView.addURLLinks → MinisOpenURLBroker).
                                             val urlClick = LocalMarkdownUrlClickHandler.current
+                                            // [T-android-tool-text-line-cap] One huge line here
+                                            // froze the main thread the same way it did in the
+                                            // preview tile, and this sheet is one tap away from
+                                            // it. Only the display is cut; Copy above still
+                                            // copies block.content whole.
                                             val linkified = remember(block.content, urlClick) {
+                                                val shown = ToolTextTail.capLongLines(block.content)
                                                 if (urlClick != null) {
                                                     com.openminis.app.ui.util.linkifyUrls(
-                                                        text = block.content,
+                                                        text = shown,
                                                         onClick = urlClick,
                                                         linkColor = Color(0xFF7CC4FF), // light blue on dark terminal bg
                                                     )
-                                                } else androidx.compose.ui.text.AnnotatedString(block.content)
+                                                } else androidx.compose.ui.text.AnnotatedString(shown)
                                             }
                                             Text(
                                                 text = linkified,

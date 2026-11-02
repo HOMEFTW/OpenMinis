@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="thinking_show_full">Show full thinking</string>
+    <string name="thinking_full_title">Full Thinking</string>
+    <string name="thinking_full_copy">Copy All</string>
+</resources>

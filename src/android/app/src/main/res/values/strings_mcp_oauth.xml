@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Authorization</string>
+    <string name="mcp_form_auth_none">None</string>
+    <string name="mcp_form_auth_browser">Sign in with browser</string>
+    <string name="mcp_form_auth_manual">OAuth (Client ID + Secret)</string>
+    <string name="mcp_signin_intro">Minis will find this service\'s sign-in page automatically. No Client ID needed.</string>
+    <string name="mcp_signin_signed_in">Signed in</string>
+    <string name="mcp_signin_expired">Sign-in expired</string>
+    <string name="mcp_signin_not_signed_in">Not signed in</string>
+    <string name="mcp_signin_sign_in">Sign In</string>
+    <string name="mcp_signin_sign_in_again">Sign In Again</string>
+    <string name="mcp_signin_reset">Reset Sign-In…</string>
+    <string name="mcp_signin_reset_title">Reset the sign-in for this service?</string>
+    <string name="mcp_signin_reset_message">You are signed out and Minis forgets its registration with the service. The next sign-in registers again.</string>
+    <string name="mcp_signin_reset_confirm">Reset</string>
+    <string name="mcp_signin_phase_discovering">Finding the sign-in page…</string>
+    <string name="mcp_signin_phase_registering_again">The service no longer knew this app. Registering again…</string>
+    <string name="mcp_signin_phase_waiting">Waiting for you to sign in in the browser…</string>
+    <string name="mcp_signin_phase_finishing">Finishing sign-in…</string>
+    <string name="mcp_signin_manual_fallback">This service does not support automatic registration. Enter its Client ID below.</string>
+    <string name="mcp_signin_not_completed">Sign-in was not completed. You can try again.</string>
+    <string name="mcp_signin_denied">Access was not granted. You can try again.</string>
+    <string name="mcp_signin_timed_out">Sign-in timed out. You can try again.</string>
+    <string name="mcp_signin_registration_rejected">The service did not accept this app\'s registration. Try again later, or enter a Client ID yourself.</string>
+    <string name="mcp_signin_grant_rejected">The service did not accept the sign-in. Please sign in again.</string>
+    <string name="mcp_signin_client_rejected">The service did not accept this Client ID.</string>
+    <string name="mcp_signin_reset_done">Signed out. The next sign-in registers this app again.</string>
+    <string name="mcp_signin_need_name_url">Enter a server name and URL first.</string>
+    <string name="mcp_dcr_not_protected">This server did not ask for authorization, so there is nothing to connect.</string>
+    <string name="mcp_dcr_bad_server_url">The server URL is not valid.</string>
+    <string name="mcp_dcr_no_auth_server">The server did not name an authorization server.</string>
+    <string name="mcp_dcr_bad_auth_server_url">The authorization server URL is not valid.</string>
+    <string name="mcp_dcr_metadata_incomplete">The authorization server\'s metadata is incomplete.</string>
+    <string name="mcp_dcr_metadata_unreadable">Could not read the authorization server\'s metadata.</string>
+    <string name="mcp_dcr_no_pkce">This authorization server does not support PKCE (S256), which is required.</string>
+    <string name="mcp_dcr_bad_registration_endpoint">The registration endpoint is not valid.</string>
+    <string name="mcp_dcr_registration_refused">The authorization server refused the registration (HTTP %1$d).</string>
+    <string name="mcp_dcr_registration_unreadable">The registration response could not be read.</string>
+    <string name="mcp_dcr_http_status">%1$s returned HTTP %2$d.</string>
+    <string name="mcp_dcr_unreadable">%1$s returned data that could not be read.</string>
+</resources>

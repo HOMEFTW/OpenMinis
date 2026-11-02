@@ -77,7 +77,9 @@ class FileToolReliabilityTest {
                     .get(2, TimeUnit.SECONDS).success)
                 assertFalse(writer.isDone)
                 assertEquals("oldA", file.readText())
-                assertTrue(edit("A").success)
+                // File tools now run on an IO worker. Simulate the lock owner's edit
+                // here; submitting a tool while owning its lock would wait on itself.
+                FileMutationCoordinator.withFile(file) { file.writeText("newA") }
             }
             assertTrue(writer.get(2, TimeUnit.SECONDS).success)
             assertEquals("newA-append", file.readText())
@@ -95,17 +97,23 @@ class FileToolReliabilityTest {
     @Test fun `interrupted lock waiter performs no mutation and later writes succeed`() {
         val file = File(directory, "parallel.txt").apply { writeText("original") }
         var result: ToolExecutionResult? = null
+        var interruptPreserved = false
         lateinit var worker: Thread
         FileMutationCoordinator.withFile(file) {
-            worker = Thread { result = write("$mount/parallel.txt", "-cancelled") }.apply { start() }
+            worker = Thread {
+                result = write("$mount/parallel.txt", "-cancelled")
+                interruptPreserved = Thread.currentThread().isInterrupted
+            }.apply { start() }
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-            while (worker.state != Thread.State.WAITING && worker.isAlive && System.nanoTime() < deadline) Thread.yield()
-            assertEquals(Thread.State.WAITING, worker.state)
+            val waiting = setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING)
+            while (worker.state !in waiting && worker.isAlive && System.nanoTime() < deadline) Thread.yield()
+            assertTrue("caller waits for its IO worker without mutating", worker.state in waiting)
             worker.interrupt()
             worker.join(2000)
             assertFalse(worker.isAlive)
         }
         assertEquals(false, result?.success)
+        assertTrue(interruptPreserved)
         assertEquals("original", file.readText())
         assertTrue(write("$mount/parallel.txt", "-ok").success)
         assertEquals("original-ok", file.readText())

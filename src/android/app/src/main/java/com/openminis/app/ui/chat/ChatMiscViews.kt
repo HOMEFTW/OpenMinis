@@ -581,7 +581,8 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
                     modifier = Modifier.size(10.dp),
                 )
                 Text(
-                    text = block.content,
+                    // [T-in-chat-search] matches painted in place
+                    text = com.openminis.app.ui.chat.search.rememberChatSearchHighlighted(block.content, com.openminis.app.ui.chat.search.ChatSearchUnits.BODY),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium,
                     color = fg,

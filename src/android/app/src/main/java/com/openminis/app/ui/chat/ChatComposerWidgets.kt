@@ -564,7 +564,7 @@ private fun ToolPreviewThumbnail(
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
     val matchingQuestion = pendingQuestion?.takeIf { it.id == block.id }
     val structuredPreview = block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME ||
-        block.toolName in setOf("request_user_input", "ask_user", "ask_question")
+        block.toolName in setOf("request_user_input", "ask_user", "ask_question", "user_ask")
     val oversizedStructuredPreview = structuredPreview && (
         block.content.length > ToolPreviewText.MAX_SCAN_CHARS || block.toolArgs.length > ToolPreviewText.MAX_SCAN_CHARS ||
             block.toolTitle.length > ToolPreviewText.MAX_LINE_CHARS ||
@@ -698,7 +698,7 @@ private fun ToolPreviewThumbnail(
                 Text(ToolPreviewText.tail(summary, 5), fontSize = 5.5.sp, lineHeight = 6.5.sp, maxLines = 5, color = toolAccent.copy(alpha = 0.85f))
             }
         } else when (block.toolName) {
-            "request_user_input", "ask_user", "ask_question" -> {
+            "request_user_input", "ask_user", "ask_question", "user_ask" -> {
                 val preview = pendingQuestion?.takeIf { it.id == block.id } ?: remember(block.toolArgs, block.content) {
                     runCatching {
                         val parsed = com.openminis.app.agent.jobs.UserQuestionTool.parse(block.id, block.toolArgs)

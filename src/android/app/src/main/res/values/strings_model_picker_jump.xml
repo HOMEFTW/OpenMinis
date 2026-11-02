@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [FEAT-261025-02] Model picker jump to the current selection. -->
+<resources>
+    <string name="model_picker_jump_current">Show current model</string>
+</resources>

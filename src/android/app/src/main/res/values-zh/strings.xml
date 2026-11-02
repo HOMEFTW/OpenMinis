@@ -2173,9 +2173,6 @@
     <string name="helper_steer_message">补充指令</string>
     <string name="helper_steer_failed">该子代理已无法接收新指令。</string>
     <string name="helper_steer_send">发送指令</string>
-    <string name="chat_completed_tools">已完成 %1$d 项工具调用</string>
-    <string name="chat_tools_collapse">收起工具</string>
-    <string name="chat_tools_expand">展开工具</string>
     <string name="chat_question_title">需要你的回答</string>
     <string name="chat_question_other">填写其他回答</string>
     <string name="chat_question_submit">提交回答</string>
@@ -2217,7 +2214,7 @@
     <string name="chat_wallpaper_transparency_value">背景透明度 · %1$d%%</string>
     <string name="chat_wallpaper_visible">0% · 完全显示</string>
     <string name="chat_wallpaper_transparent">100% · 完全透明</string>
-    <string name="chat_wallpaper_default_hint">未单独调整的对话使用此默认透明度。背景随 DeepSeek、GPT、Claude 模型自动切换，其他模型使用纯色背景。也可在对话菜单中单独调整透明度或关闭背景。</string>
+    <string name="chat_wallpaper_default_hint">未单独调整的对话使用此默认透明度。背景随 DeepSeek、GPT、Claude、Grok 模型自动切换，其他模型使用纯色背景。也可在对话菜单中单独调整透明度或关闭背景。</string>
     <string name="chat_wallpaper_following_default">正在使用设置中的默认透明度。</string>
     <string name="chat_wallpaper_override">当前透明度仅适用于此对话。</string>
     <string name="chat_wallpaper_restore_default">恢复默认透明度</string>

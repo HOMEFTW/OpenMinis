@@ -3,7 +3,7 @@ package com.openminis.app.data
 import android.content.Context
 
 internal object TaskBudgetPrefs {
-    val options = listOf(10, 25, 50, 100, 200)
+    val options = listOf(10, 25, 50, 100, 200, 500)
     const val DEFAULT = 200
     fun validated(value: Int): Int = value.takeIf { it in options } ?: DEFAULT
     fun limit(context: Context): Int = validated(context.getSharedPreferences("task_budget", Context.MODE_PRIVATE).getInt("rounds", DEFAULT))

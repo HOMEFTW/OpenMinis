@@ -56,6 +56,10 @@ class ConfigPathSplitTest {
      * ModelsCollection.lookupIn rule).
      */
     private class FakeModels(private val ids: List<String>) : ConfigCollection {
+        override val readableSubjectFormat = "Model %@"
+        override fun entityLabel(id: String) = id.takeIf { it in ids }
+        override fun readableForAdd(payload: com.openminis.app.config.readable.RedactedConfigValue) = emptyList<com.openminis.app.config.readable.ReadableLine>()
+        override fun readableForRemove(id: String) = emptyList<com.openminis.app.config.readable.ReadableLine>()
         override val basePath = "models"
         override val displayName = "LLM models"
         override val description = "test"

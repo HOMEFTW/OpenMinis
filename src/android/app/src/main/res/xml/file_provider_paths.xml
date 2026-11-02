@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <files-path name="forge-attachments" path="forge/assets/" />
     <!-- Scope: app cache dir. Used by provider-config export (JSON files
          written to ${context.cacheDir}/shared/). -->
     <cache-path name="shared" path="shared/" />

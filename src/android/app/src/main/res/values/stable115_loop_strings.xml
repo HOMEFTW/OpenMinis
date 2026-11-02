@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_error_model_refused">The model declined to respond to this request. Try rephrasing, or switch to a different model.</string>
+    <string name="chat_error_model_refused_category">Blocked by the model provider\'s usage policy (category: %1$s). Continuing or rephrasing in this chat will likely be blocked again — switch to a different model, or start a new chat.</string>
+    <string name="chat_error_dsml_tool_call_leak">The model\'s tool call came back malformed (it ended up inside its reasoning), and 2 automatic retries failed too. Tap Resume to try again.</string>
+</resources>

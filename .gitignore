@@ -152,3 +152,4 @@ src/android/app/libs/rclone-sources.jar
 # Local Python test/interpreter caches are not source assets.
 __pycache__/
 *.py[cod]
+src/android/forge-ui/node_modules/

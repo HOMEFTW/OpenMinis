@@ -3,6 +3,9 @@ package com.openminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import com.openminis.app.data.storage.SessionStorageMaintenanceGate
+import java.io.Closeable
+import kotlinx.coroutines.launch
 
 /**
  * Process-level cache of ChatViewModels keyed by sessionId. Mirrors iOS
@@ -16,6 +19,29 @@ import androidx.lifecycle.ViewModelStoreOwner
 object ChatViewModelStore {
 
     private const val TAG = "ChatVMStore"
+    private var questionRecoveryInstalled = false
+
+    /** Install once: notification replies also work when no chat has been opened. */
+    fun installUserQuestionRecovery(context: android.content.Context) {
+        if (questionRecoveryInstalled) return
+        questionRecoveryInstalled = true
+        val app = context.applicationContext
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
+        scope.launch {
+            com.openminis.app.agent.jobs.UserQuestionRegistry.recoveredResults.collect { results ->
+                results.map { it.sessionId }.distinct().forEach { sid ->
+                    try {
+                        val vm = existing(sid) ?: com.openminis.app.debug.HeadlessChatRunner.viewModelFor(app, sid)
+                        vm.recoverUserQuestions()
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Cannot restore question session: ${e.javaClass.simpleName}")
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * One ViewModelStore per canonical sessionId. Each store contains at most
@@ -24,6 +50,8 @@ object ChatViewModelStore {
      * `onCleared`.
      */
     private val stores = LinkedHashMap<String, ViewModelStore>()
+    // A store is protected before its factory creates the VM, through its whole cache lifetime.
+    private val storageLeases = mutableMapOf<String, Closeable>()
 
     /**
      * [T-android-vm-store-leak] How many chat sessions keep a live
@@ -255,11 +283,13 @@ object ChatViewModelStore {
     /** Keep [sessionId]'s store from eviction while [block] prepares a send. */
     suspend fun <T> holdingForSend(sessionId: String, block: suspend () -> T): T {
         val key = resolveKey(sessionId)
+        val storageLease = SessionStorageMaintenanceGate.shared.reserveForViewModel(key)
         pendingSends.merge(key, 1, Int::plus)
         try {
             return block()
         } finally {
             pendingSends.computeIfPresent(key) { _, n -> if (n <= 1) null else n - 1 }
+            storageLease.close()
         }
     }
 
@@ -304,13 +334,19 @@ object ChatViewModelStore {
             // First sight of this session: this is the only moment its pool is
             // decided. putIfAbsent rather than put, so a later call with a
             // different `kind` cannot reclassify a live session.
-            poolKinds.putIfAbsent(key, kind)
-            Log.d(
-                TAG,
-                "allocate store for $key kind=${poolKinds[key]} " +
-                    "(total=${stores.size + 1}, pool=${poolSize(poolKinds[key]) + 1})",
-            )
-            ViewModelStore()
+            val lease = SessionStorageMaintenanceGate.shared.reserveForViewModel(key)
+            try {
+                poolKinds.putIfAbsent(key, kind)
+                Log.d(
+                    TAG,
+                    "allocate store for $key kind=${poolKinds[key]} " +
+                        "(total=${stores.size + 1}, pool=${poolSize(poolKinds[key]) + 1})",
+                )
+                ViewModelStore().also { storageLeases[key] = lease }
+            } catch (failure: Throwable) {
+                lease.close()
+                throw failure
+            }
         }
         stores[key] = store
         trimToCapacity(poolKinds[key] ?: PoolKind.NORMAL)
@@ -441,7 +477,8 @@ object ChatViewModelStore {
      * place a tag is forgotten for good.
      */
     private fun dropStoreKeepingChildTag(key: String) {
-        stores.remove(key)?.clear()
+        try { stores.remove(key)?.clear() }
+        finally { storageLeases.remove(key)?.close() }
         if (poolKinds[key] != PoolKind.CHILD) poolKinds.remove(key)
     }
 
@@ -460,10 +497,12 @@ object ChatViewModelStore {
         // [T-android-vm-store-child-tag-survives-evict] Forget the tag even
         // when the store was already evicted: a CHILD tag outlives eviction.
         poolKinds.remove(key)
-        stores.remove(key)?.let {
-            it.clear()
-            Log.d(TAG, "release store for $key (remaining=${stores.size})")
-        }
+        try {
+            stores.remove(key)?.let {
+                it.clear()
+                Log.d(TAG, "release store for $key (remaining=${stores.size})")
+            }
+        } finally { storageLeases.remove(key)?.close() }
     }
 
     /**
@@ -509,9 +548,13 @@ object ChatViewModelStore {
     @Synchronized
     fun rename(fromSessionId: String, toSessionId: String) {
         if (fromSessionId == toSessionId) return
+        // Reserve the canonical id before changing aliases or releasing the draft's lease.
+        val nextLease = if (fromSessionId in stores) SessionStorageMaintenanceGate.shared.reserveForViewModel(toSessionId) else null
         val store = stores.remove(fromSessionId)
         if (store != null) {
             stores[toSessionId] = store
+            storageLeases.put(toSessionId, requireNotNull(nextLease))?.close()
+            storageLeases.remove(fromSessionId)?.close()
         }
         // [T-android-vm-store-dual-pool] Carry pool membership across the
         // re-key. Without this a renamed session loses its tag and silently

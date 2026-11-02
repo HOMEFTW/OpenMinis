@@ -521,7 +521,9 @@ private fun LogRow(entry: BackupHistory.LogEntry, showDivider: Boolean) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                entry.message,
+                com.openminis.app.backup.BackupLogRules.omittedCount(entry)
+                    ?.let { stringResource(R.string.backup_history_log_omitted, it) }
+                    ?: entry.message,
                 style = MaterialTheme.typography.bodySmall,
                 color = if (entry.isProblem) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurface,

@@ -1,6 +1,7 @@
 package com.openminis.app.scheduled
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -12,9 +13,8 @@ import org.json.JSONArray
  * [ScheduledTask] rows. Same pattern as [com.openminis.app.offload.AlarmOffloadManager]
  * — small dataset, low write frequency, no Room migration cost.
  */
-class ScheduledTaskStore(private val context: Context) {
-
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+class ScheduledTaskStore internal constructor(private val prefs: SharedPreferences) {
+    constructor(context: Context) : this(context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE))
 
     fun all(): List<ScheduledTask> {
         val raw = prefs.getString(KEY_TASKS, null) ?: return emptyList()
@@ -55,6 +55,19 @@ class ScheduledTaskStore(private val context: Context) {
 
     fun clear(): Unit = synchronized(LOCK) {
         prefs.edit().remove(KEY_TASKS).apply()
+    }
+
+    /** One transaction closes future slots and invalidates already-claimed handoffs. */
+    internal fun stopCreatedBy(sessionIds: Set<String>): List<ScheduledTask> = synchronized(LOCK) {
+        val tasks = all()
+        val stopped = tasks.filter { it.creatorSessionId in sessionIds }.map {
+            it.copy(enabled = false, stopGeneration = it.stopGeneration + 1)
+        }
+        if (stopped.isNotEmpty()) {
+            val replacements = stopped.associateBy { it.id }
+            write(tasks.map { replacements[it.id] ?: it })
+        }
+        stopped
     }
 
     private fun write(tasks: List<ScheduledTask>) {

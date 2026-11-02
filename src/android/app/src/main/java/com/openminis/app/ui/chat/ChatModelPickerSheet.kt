@@ -135,6 +135,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import com.openminis.app.BuildConfig
@@ -188,6 +189,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
@@ -331,6 +333,9 @@ internal fun ModelPickerSheet(
      * and another from the picker would be worse than no button at all.
      */
     var quickTestEntry by remember { mutableStateOf<ModelEntry?>(null) }
+    // [T-quota-badge-ui] Provider whose quota sheet is open (header pill or a
+    // Model Group member pill).
+    var quotaSheetInstanceId by remember { mutableStateOf<String?>(null) }
 
     // [T-picker-search-debounce] Filter on the DEBOUNCED, normalized query,
     // not on every keystroke (iOS GH#271). `searchText` still drives the field
@@ -525,10 +530,51 @@ internal fun ModelPickerSheet(
             // deliberate finger drag free to close it.
             val pickerScrollGuard = rememberSheetScrollGuard()
 
+            // [FEAT-261025-02] Where the current selection sits in the list, as
+            // (item index, offset in the item): the selected group's row inside
+            // the one Model Groups card item, else the active model's row - or
+            // its provider's card while that is collapsed. Mirrors the item
+            // order emitted below. Null when the selection is not listed (a
+            // search that filters it out).
+            val pickerListState = rememberLazyListState()
+            val pickerScope = rememberCoroutineScope()
+            var selectedGroupRowTop by remember { mutableStateOf(0) }
+            var selectedGroupRowOnScreen by remember { mutableStateOf(false) }
+            val pickerJumpTarget: Pair<Int, Int>? = run {
+                var index = 0
+                if (filteredGroups.isNotEmpty()) {
+                    if (selectedGroupId != null) {
+                        return@run if (filteredGroups.any { it.id == selectedGroupId }) 0 to selectedGroupRowTop else null
+                    }
+                    index += if (searchText.isEmpty()) 2 else 1
+                }
+                if (selectedGroupId != null) return@run null
+                for ((instance, entries) in allInstancesWithEntries) {
+                    val collapsed = collapsedInstanceIds.contains(instance.id)
+                    val at = entries.indexOfFirst { it.id == activeEntryId }
+                    if (at >= 0) return@run (if (collapsed) index else index + 1 + at) to 0
+                    index += 1 + if (collapsed) 0 else entries.size
+                }
+                null
+            }
+            val showJumpButton by remember(pickerJumpTarget, selectedGroupRowOnScreen) {
+                derivedStateOf {
+                    val target = pickerJumpTarget ?: return@derivedStateOf false
+                    if (!pickerListState.canScrollForward && !pickerListState.canScrollBackward) return@derivedStateOf false
+                    val info = pickerListState.layoutInfo
+                    val item = info.visibleItemsInfo.firstOrNull { it.index == target.first } ?: return@derivedStateOf true
+                    if (selectedGroupId != null) return@derivedStateOf !selectedGroupRowOnScreen
+                    item.offset < info.viewportStartOffset || item.offset + item.size > info.viewportEndOffset
+                }
+            }
+
+            // The list keeps its indentation inside this Box, which only
+            // overlays the jump button on it.
+            Box(modifier = Modifier.fillMaxWidth().weight(1f, fill = false)) {
             LazyColumn(
+                state = pickerListState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f, fill = false)
                     .nestedScroll(pickerScrollGuard),
             ) {
                 // ── Model Groups (grouped section card with embedded header) ──
@@ -618,6 +664,15 @@ internal fun ModelPickerSheet(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .then(
+                                            // [FEAT-261025-02] Where the jump button
+                                            // scrolls to: this row's top in the
+                                            // card, and whether it is in view.
+                                            if (isSelected) Modifier.onGloballyPositioned { c ->
+                                                selectedGroupRowTop = c.positionInParent().y.toInt()
+                                                selectedGroupRowOnScreen = c.boundsInWindow().height >= c.size.height * 0.9f
+                                            } else Modifier
+                                        )
                                         .clip(groupShape)
                                         .clickable { onSelectGroup(group.id) }
                                         .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -847,6 +902,15 @@ internal fun ModelPickerSheet(
                                                 Column(modifier = Modifier.weight(1f)) {
                                                     ModelNameWithActiveBadge(entry.model.displayName, showActiveBadge = isActive)
                                                     com.openminis.app.ui.components.ModelAvailabilityHint(entry)
+                                                    // [T-quota-group-member-pill] Group rows have no
+                                                    // provider header: the model's (or its account's)
+                                                    // quota sits under the name.
+                                                    if (instance != null) {
+                                                        com.openminis.app.ui.quota.ModelQuotaMemberPill(
+                                                            instanceId = entry.providerInstanceId,
+                                                            modelId = entry.model.id,
+                                                        ) { quotaSheetInstanceId = entry.providerInstanceId }
+                                                    }
                                                     Row {
                                                         if (instance != null) {
                                                             Text(
@@ -937,20 +1001,32 @@ internal fun ModelPickerSheet(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     val providerName = instance.label.ifEmpty { instance.providerType.displayName }
-                                    Text(
-                                        providerName,
-                                        // Same rank as the "Model Groups"
-                                        // header above — see that comment.
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        // [T-android-picker-provider-edit] One
-                                        // line, so a long name cannot push the
-                                        // two buttons off the row.
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
+                                    Row(
                                         modifier = Modifier.weight(1f),
-                                    )
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Text(
+                                            providerName,
+                                            // Same rank as the "Model Groups"
+                                            // header above — see that comment.
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            // [T-android-picker-provider-edit] One
+                                            // line, so a long name cannot push the
+                                            // two buttons off the row.
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        // [T-provider-quota P2] The account's balance /
+                                        // quota right after the name. Empty without
+                                        // data; a tap opens the quota sheet.
+                                        com.openminis.app.ui.quota.QuotaSectionHeaderBadge(instance.id) {
+                                            quotaSheetInstanceId = instance.id
+                                        }
+                                    }
                                     // [T-android-picker-provider-edit] Edit
                                     // button left of the chevron, as on iOS
                                     // (698cc65c6): its own tap target, so it
@@ -1068,6 +1144,7 @@ internal fun ModelPickerSheet(
                                                     style = MaterialTheme.typography.bodyMedium,
                                                 )
                                                 com.openminis.app.ui.components.ModelAvailabilityHint(displayEntry)
+                                                com.openminis.app.ui.quota.ModelQuotaHintView(displayEntry.providerInstanceId, displayEntry.model.id)
                                                 com.openminis.app.ui.components.modalityBadges(displayEntry.model).forEach { badge ->
                                                     com.openminis.app.ui.components.ModalityBadge(badge)
                                                 }
@@ -1199,6 +1276,9 @@ internal fun ModelPickerSheet(
                                                     showActiveBadge = selectedGroupId != null && activeEntryId == entry.id,
                                                 )
                                                 com.openminis.app.ui.components.ModelAvailabilityHint(entry)
+                                                // [T-provider-quota P2] Only a warning on a pool
+                                                // bound to THIS model; the account is on the header.
+                                                com.openminis.app.ui.quota.ModelQuotaHintView(entry.providerInstanceId, entry.model.id)
                                                 // [T-android-provider-voice] Modality
                                                 // chips (iOS entryRow badges). FlowRow so
                                                 // an overflow wraps whole chips to the
@@ -1291,6 +1371,28 @@ internal fun ModelPickerSheet(
                     }
                 }
             }
+                // [FEAT-261025-02] Jump to what this chat uses, for a list too
+                // long to find it by eye (field request: many Model Groups).
+                // Shown only while the list can scroll and the target is off
+                // screen.
+                val jumpTarget = pickerJumpTarget
+                if (jumpTarget != null && showJumpButton) {
+                    androidx.compose.material3.SmallFloatingActionButton(
+                        onClick = { pickerScope.launch { pickerListState.animateScrollToItem(jumpTarget.first, jumpTarget.second) } },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 20.dp, bottom = 12.dp),
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ) {
+                        Icon(
+                            Icons.Default.MyLocation,
+                            contentDescription = stringResource(R.string.model_picker_jump_current),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -1298,6 +1400,13 @@ internal fun ModelPickerSheet(
     // switching models rebuilds the sheet's state rather than reusing a run
     // from the previously tested model — the same identity trap iOS documents
     // at UnifiedModelPicker.swift:524.
+    // [T-quota-badge-ui] Read-only quota details, on top of the picker.
+    quotaSheetInstanceId?.let { id ->
+        key(id) {
+            com.openminis.app.ui.quota.QuotaDetailSheet(instanceId = id, onDismiss = { quotaSheetInstanceId = null })
+        }
+    }
+
     quickTestEntry?.let { entry ->
         key(entry.id) {
             com.openminis.app.ui.components.QuickTestSheet(

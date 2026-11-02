@@ -40,7 +40,7 @@ internal fun WallpaperPreview(wallpaper: ChatWallpaper, transparency: Int, modif
     Box(modifier.clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.background)) {
         ChatWallpaperLayer(wallpaper, transparency, Modifier.matchParentSize())
         Text(
-            when (wallpaper) { ChatWallpaper.DEEPSEEK -> "DeepSeek"; ChatWallpaper.GPT -> "GPT"; ChatWallpaper.CLAUDE -> "Claude" },
+            when (wallpaper) { ChatWallpaper.DEEPSEEK -> "DeepSeek"; ChatWallpaper.GPT -> "GPT"; ChatWallpaper.CLAUDE -> "Claude"; ChatWallpaper.GROK -> "Grok" },
             Modifier.align(Alignment.TopCenter).padding(10.dp),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onBackground,

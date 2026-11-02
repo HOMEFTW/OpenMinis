@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-multi-select-share] Share Chat picker and export, from upstream strings.xml. -->
+<resources>
+    <string name="chat_share_share_chat">Chat delen…</string>
+    <string name="chat_share_select_messages">Berichten selecteren</string>
+    <string name="chat_share_share_count">Delen (%1$d)</string>
+    <string name="chat_share_select_all_below">Alles hieronder selecteren</string>
+    <string name="chat_share_deselect_all_below">Alles hieronder deselecteren</string>
+    <string name="chat_share_select_below">Hieronder selecteren</string>
+    <string name="chat_share_show_tools">Tools tonen</string>
+    <string name="chat_share_hide_tools">Tools verbergen</string>
+    <string name="chat_share_show_thinking">Denken tonen</string>
+    <string name="chat_share_hide_thinking">Denken verbergen</string>
+    <string name="chat_share_clear_selection">Selectie wissen</string>
+    <string name="chat_share_creating">Aanmaken…</string>
+    <string name="chat_share_error_nothing">Niets te delen in de geselecteerde berichten.</string>
+    <string name="chat_share_error_image_too_large">Te lang voor één afbeelding. Deel het in plaats daarvan als pdf.</string>
+    <string name="chat_share_error_write_failed">Kan het bestand niet aanmaken.</string>
+    <string name="chat_share_long_image">Lange afbeelding</string>
+    <string name="chat_share_pdf">PDF</string>
+    <string name="chat_share_too_long_image">Te lang om tot één afbeelding samen te voegen.</string>
+    <string name="chat_share_width_label">Breedte: %1$s</string>
+    <string name="chat_share_table_label">Tabel: %1$s</string>
+    <string name="chat_share_appearance_label">Weergave: %1$s</string>
+    <string name="chat_share_switched_to">Overgeschakeld naar %1$s</string>
+    <string name="chat_share_table_adaptive">Aanpasbare breedte</string>
+    <string name="chat_share_table_default">Standaardbreedte</string>
+    <string name="chat_share_width_phone">Telefoon</string>
+    <string name="chat_share_width_tablet">Tablet</string>
+    <string name="chat_share_n_selected">%1$d geselecteerd</string>
+    <string name="chat_share_select_all">Alles selecteren</string>
+    <string name="chat_share_deselect_all">Alles deselecteren</string>
+</resources>

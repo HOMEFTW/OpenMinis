@@ -86,4 +86,46 @@ class Build34UsageStatsTest {
         assertEquals(11, trend.size)
         assertEquals(usageTotal(rows), trend.fold(UsageTokens()) { a, b -> a + b.tokens })
     }
+    @Test fun copiedConversationsAreNotCountedAgainAndUnknownCacheIsNotZeroPercent() {
+        val rows = usageSamples(listOf(
+            record(usage = """{"inputTokens":100,"outputTokens":20,"copied":true}"""),
+            record(usage = """{"inputTokens":100,"outputTokens":20}"""),
+        ), null)
+        assertEquals(1, rows.size)
+        assertEquals(120L, usageTotal(rows).total)
+        assertNull(usageTotal(rows).cacheHitRate)
+        val knownZero = usageSamples(listOf(record(usage = """{"inputTokens":100,"cacheReported":true,"cacheReadTokens":0}""")), null)
+        assertEquals(0.0, usageTotal(knownZero).cacheHitRate!!, 0.0)
+    }
+
+    @Test fun mixedCacheReportingDoesNotDiluteKnownHitRate() {
+        val rows = usageSamples(listOf(
+            record(instance = "known", usage = """{"inputTokens":50,"cacheReadTokens":50,"cacheReported":true}"""),
+            record(instance = "unknown", usage = """{"inputTokens":900,"cacheReported":false}"""),
+        ), null)
+        assertEquals(1000L, usageTotal(rows).total)
+        assertEquals(50.0, usageTotal(rows).cacheHitRate!!, 0.0)
+    }
+
+    @Test fun legacyCacheSupportIsInferredOnlyWithinTheSameCohort() {
+        val rows = usageSamples(listOf(
+            record(usage = """{"inputTokens":50,"cacheReadTokens":50}"""),
+            record(usage = """{"inputTokens":100}"""),
+            record(usage = """{"inputTokens":500,"cacheReported":false}"""),
+        ), null)
+        assertEquals(700L, usageTotal(rows).total)
+        assertEquals(25.0, usageTotal(rows).cacheHitRate!!, 0.0)
+    }
+
+    @Test fun trendUsesTheSameCacheEligibilityAsTheSelectedRangeTotal() {
+        val rows = usageSamples(listOf(
+            record(at = time("2026-10-18T10:00:00"), usage = """{"inputTokens":50,"cacheReadTokens":50}"""),
+            record(at = time("2026-10-19T10:00:00"), usage = """{"inputTokens":100}"""),
+            record(at = time("2026-10-19T10:00:00"), instance = "unknown", usage = """{"inputTokens":500,"cacheReported":false}"""),
+        ), null)
+        val buckets = usageTrend(rows, time("2026-10-19T12:00:00"), 7, hk)
+        assertEquals(usageTotal(rows), buckets.fold(UsageTokens()) { total, bucket -> total + bucket.tokens })
+        assertEquals(0.0, buckets.last().tokens.cacheHitRate!!, 0.0)
+    }
+
 }

@@ -187,6 +187,20 @@ class DebugRPCHandler(private val context: Context) {
                 }
                 handleShizukuExec(params)
             }
+            // [T-multi-select-share] Share Chat picker / export, served by the
+            // ChatScreen showing the session (iOS parity, DEBUG only).
+            "debug.chatShare.openPicker" -> {
+                if (!BuildConfig.DEBUG) {
+                    throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
+                }
+                com.openminis.app.ui.chat.share.ChatShareDebugRpc.openPicker(params)
+            }
+            "debug.chatExport.render" -> {
+                if (!BuildConfig.DEBUG) {
+                    throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
+                }
+                com.openminis.app.ui.chat.share.ChatShareDebugRpc.render(params)
+            }
             "debug.modelUse.exec" -> {
                 if (!BuildConfig.DEBUG) {
                     throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
@@ -1073,7 +1087,7 @@ class DebugRPCHandler(private val context: Context) {
     // ── Update checker (T33) — exposed only via DebugRPC so the e2e flow can
     // be exercised before the production UI entry point lands.
     private suspend fun handleUpdateCheck(): JSONObject {
-        return when (val r = com.openminis.app.data.UpdateChecker.check()) {
+        return when (val r = com.openminis.app.data.UpdateChecker.check(context)) {
             is com.openminis.app.data.UpdateChecker.CheckResult.UpdateAvailable -> JSONObject()
                 .put("status", "update_available")
                 .put("tag_name", r.tagName)

@@ -150,6 +150,7 @@ class MinisApp : Application(), ImageLoaderFactory {
     lateinit var chatRepository: ChatRepository
         private set
     val sessionMessenger by lazy { com.openminis.app.service.SessionMessenger(this) }
+    val forgeHost by lazy { com.openminis.app.forge.ForgeHost(this) }
     val chatWallpaperRepository by lazy {
         com.openminis.app.data.repository.ChatWallpaperRepository(
             getSharedPreferences("chat_wallpaper_preferences", android.content.Context.MODE_PRIVATE),
@@ -185,6 +186,24 @@ class MinisApp : Application(), ImageLoaderFactory {
     private var foregroundActivityCount: Int = 0
 
     fun isAppForeground(): Boolean = foregroundActivityCount > 0
+
+    /**
+     * [UI-261023-07] A turn that ended marks its chat unread
+     * (SessionUnreadStore), as iOS endBackgroundProcessing does. Not for a
+     * sub agent's chat (its result goes into the parent), and not while the
+     * chat still has sub agents working: the parent's turn that collects the
+     * last of them ends here again and marks it then, so a fan-out raises the
+     * dot once.
+     */
+    private fun markUnreadOnCompletion(sessionId: String) {
+        if (com.openminis.app.service.SessionUnreadStore.isViewing(sessionId)) return
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            val session = runCatching { chatRepository.getSession(sessionId) }.getOrNull() ?: return@launch
+            if (session.isChild) return@launch
+            if (com.openminis.app.agent.jobs.AgentJobRegistry.hasAgentWork(sessionId)) return@launch
+            com.openminis.app.service.SessionUnreadStore.markUnread(sessionId)
+        }
+    }
 
     /**
      * T-bg-overlay phase 2: live "is the app foreground?" stream so the
@@ -461,6 +480,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
         database = AppDatabase.getInstance(this)
         chatRepository = ChatRepository(database.chatDao())
+        com.openminis.app.agent.jobs.SubAgentTerminationStore.install(filesDir)
         // [T-p2-agent-series] How a background agent's completion reaches its
         // parent: submit the <agent_callback> as a PROGRAMMATIC prompt on the
         // parent's ViewModel (queued behind a running loop, never interrupting).
@@ -475,6 +495,13 @@ class MinisApp : Application(), ImageLoaderFactory {
                 runCatching {
                     if (chatRepository.getSession(parentId) == null) {
                         com.openminis.app.logging.AppLogger.warning("AgentJobRegistry", "followUp ${jobId.take(8)} dropped — parent ${parentId.take(8)} no longer exists")
+                        com.openminis.app.ui.chat.ChatViewModel.noteSubAgentDelivery(jobId,
+                            com.openminis.app.agent.jobs.SubAgentTermination.Delivery.FAILED, "parent session no longer exists")
+                        return@launch
+                    }
+                    if (com.openminis.app.agent.jobs.AgentJobRegistry.isDelegationMuted(parentId)) {
+                        com.openminis.app.ui.chat.ChatViewModel.noteSubAgentDelivery(jobId,
+                            com.openminis.app.agent.jobs.SubAgentTermination.Delivery.FAILED, "withheld: the user stopped the parent's agents")
                         return@launch
                     }
                     val r = com.openminis.app.debug.HeadlessChatRunner.prompt(
@@ -483,11 +510,25 @@ class MinisApp : Application(), ImageLoaderFactory {
                         programmatic = true,
                     )
                     com.openminis.app.logging.AppLogger.info("AgentJobRegistry", "followUp ${jobId.take(8)} → parent ${parentId.take(8)} outcome=${r.status}")
-                }.onFailure { com.openminis.app.logging.AppLogger.warning("AgentJobRegistry", "followUp ${jobId.take(8)} failed: ${it.message}") }
+                    val delivery = when (r.status) {
+                        "Running", "Completed" -> com.openminis.app.agent.jobs.SubAgentTermination.Delivery.DELIVERED
+                        "Queued" -> com.openminis.app.agent.jobs.SubAgentTermination.Delivery.QUEUED
+                        else -> com.openminis.app.agent.jobs.SubAgentTermination.Delivery.FAILED
+                    }
+                    com.openminis.app.ui.chat.ChatViewModel.noteSubAgentDelivery(jobId, delivery,
+                        if (delivery == com.openminis.app.agent.jobs.SubAgentTermination.Delivery.FAILED) r.responseText ?: r.status else null)
+                }.onFailure {
+                    com.openminis.app.ui.chat.ChatViewModel.noteSubAgentDelivery(jobId,
+                        com.openminis.app.agent.jobs.SubAgentTermination.Delivery.FAILED, it.message ?: "delivery threw")
+                    com.openminis.app.logging.AppLogger.warning("AgentJobRegistry", "followUp ${jobId.take(8)} failed: ${it.message}")
+                }
             }
         }
         com.openminis.app.agent.jobs.AgentCallbackLabels.install(this)
         providerRepository = ProviderRepository(this)
+        // [T-provider-quota] Upstream balance / quota cache; refreshes only while
+        // the app is in the foreground.
+        com.openminis.app.quota.QuotaStore.start(this, providerRepository)
         envVarRepository = EnvVarRepository(this)
         // [T-android-safemode-lateinit-crash-147] SkillRepository parses
         // third-party content (skills imported from external hubs), which
@@ -502,8 +543,12 @@ class MinisApp : Application(), ImageLoaderFactory {
         androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : androidx.lifecycle.DefaultLifecycleObserver {
                 override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                    com.openminis.app.network.NetworkHub.onForeground()
                     skillRepository.requestReload("foreground")
                     updateScope.launch { com.openminis.app.data.UpdatePreferences.onForeground(this@MinisApp) }
+                }
+                override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                    com.openminis.app.network.NetworkHub.onBackground()
                 }
             }
         )
@@ -581,6 +626,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // ConnectivityManager callback so shells inside the sandbox see fresh
         // DNS servers after Wi-Fi ↔ cellular swaps or VPN toggles.
         networkMonitor.start(this)
+        com.openminis.app.network.NetworkHub.init(this)
 
         // Register global /var/minis/{memory,skills,shared} bind mounts up-front
         // so direct file I/O tools (file_read) resolve these paths even before
@@ -651,7 +697,17 @@ class MinisApp : Application(), ImageLoaderFactory {
         // (writes a 17-byte exit-0 stub at /usr/local/bin/minis-sessions-cli
         // so PATH lookup succeeds; PRoot intercepts the execve before
         // the stub runs and routes to this handler).
-        NativeOffloadServer.register("minis-sessions-cli", SessionsOffloadHandler(chatRepository))
+        NativeOffloadServer.register(
+            "minis-sessions-cli",
+            SessionsOffloadHandler(
+                chatRepository,
+                // [T-sessions-cli-update] `update --title-auto` = the list's Regenerate Title.
+                titleRegenerator = { id ->
+                    com.openminis.app.ui.sessions.SessionTitleRegenerator(chatRepository, providerRepository, this)
+                        .regenerate(id, origin = "cli")
+                },
+            ),
+        )
         // [T-android-scheduled-tasks-full] minis-scheduled — create/list/run
         // timed AI tasks (new chat / follow-up / re-run), mirroring the in-app
         // Scheduled Tasks editor and the iOS Shortcuts intent set.
@@ -679,10 +735,22 @@ class MinisApp : Application(), ImageLoaderFactory {
             )
         }
 
-        NativeOffloadServer.start(RootfsManager.getInstance(this).rootfsDir)
+        // [T-native-offload-bind] start() retries a taken socket in the background.
+        // An optional native service must also never fail Application.onCreate.
+        try {
+            NativeOffloadServer.start(RootfsManager.getInstance(this).rootfsDir)
+        } catch (t: Throwable) {
+            Log.e("MinisApp", "native offload server failed to start; continuing without it", t)
+        }
 
         // Initialize session activity tracker for foreground service management
         SessionActivityTracker.init(this)
+        com.openminis.app.ui.chat.ChatViewModelStore.installUserQuestionRecovery(this)
+        updateScope.launch {
+            runCatching { com.openminis.app.data.session.OrphanChildSweeper.sweep(this@MinisApp, chatRepository) }
+                .onSuccess { Log.i("MinisApp", "Orphan child sweep completed") }
+                .onFailure { Log.w("MinisApp", "Orphan child sweep failed: ${it.javaClass.simpleName}") }
+        }
 
         // [T-android-session-paused-badge] Per-session badge-state queue
         // displayed in the session-list cell corner. Init early so the
@@ -717,8 +785,9 @@ class MinisApp : Application(), ImageLoaderFactory {
             backgroundSettings = backgroundSettingsRepository,
             isAppForeground = ::isAppForeground,
         )
-        SessionActivityTracker.setCompletionListener { sessionId, isError ->
-            backgroundTaskNotifier.notifyTaskCompleted(sessionId, isError)
+        SessionActivityTracker.setCompletionListener { sessionId, outcome ->
+            backgroundTaskNotifier.notifyTaskCompleted(sessionId, outcome)
+            markUnreadOnCompletion(sessionId)
         }
 
         // [T-android-config-confirm-timeout] Wire the config-confirm background
@@ -965,6 +1034,14 @@ class MinisApp : Application(), ImageLoaderFactory {
      */
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
+            .callFactory {
+                val base = okhttp3.OkHttpClient()
+                okhttp3.Call.Factory { request ->
+                    com.openminis.app.network.NetworkHttp.client(
+                        com.openminis.app.network.NetworkHttp.DEFAULT_TAG, base,
+                    ).newCall(request)
+                }
+            }
             .components {
                 add(MinisImageFetcher.Factory())
                 add(MinisImageFetcher.UriFactory())

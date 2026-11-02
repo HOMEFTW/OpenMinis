@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 2,
+  "version": "0.3.2",
+  "compatibility": {
+    "codex": [
+      "26.1027.3384.0",
+      "26.1023.6123.0",
+      "26.1016.8622.0",
+      "26.1021.2667.0"
+    ],
+    "forge": [
+      ">=0.3.0 <0.4.0"
+    ]
+  },
+  "permissions": [
+    "panels",
+    "settings",
+    "conversation.read",
+    "sidebar"
+  ],
+  "capabilities": [
+    {
+      "name": "panels",
+      "version": 1
+    },
+    {
+      "name": "settings",
+      "version": 1
+    },
+    {
+      "name": "ui",
+      "version": 1
+    }
+  ],
+  "changelog": [
+    {
+      "version": "0.3.2",
+      "date": "2026-11-01",
+      "items": [
+        "适配 Codex 26.1027.3384.0，保持 Forge API 2；修复主页面入口需要先进入设置的问题。"
+      ]
+    },
+    {
+      "version": "0.3.1",
+      "date": "2026-10-28",
+      "items": [
+        "适配 Codex 26.1023.6123.0，保持 Forge API 2。"
+      ]
+    },
+    {
+      "version": "0.3.0",
+      "date": "2026-10-27",
+      "items": [
+        "升级至 Codex Forge 0.3.0 / Forge API 2。"
+      ]
+    },
+    {
+      "version": "0.2.0",
+      "date": "2026-10-24",
+      "items": [
+        "新增分组节点（可折叠、网格行列）与画布描述/颜色，列表显示缩略预览；模型可通过 set_metadata、set_group_members 编辑。"
+      ]
+    }
+  ],
+  "id": "forge.canvas",
+  "name": "无限画布",
+  "description": "支持节点、连线、图片、撤销重做、删除与模型协同编辑。",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "无限画布",
+        "builtinPage": "canvas"
+      }
+    ],
+    "sidebar": [
+      {
+        "id": "open",
+        "title": "无限画布",
+        "panel": "main"
+      }
+    ]
+  },
+  "androidHost": {
+    "name": "OpenMinis",
+    "apiVersion": 2,
+    "surfaces": [
+      "plugin.menu",
+      "conversation.menu",
+      "screen"
+    ]
+  }
+}

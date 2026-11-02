@@ -116,7 +116,7 @@ class SessionForkManager(
                 sessionId = new.id,
                 role = msg.role,
                 partsJson = resources.rewrite(msg.partsJson),
-                tokenUsage = msg.tokenUsage,
+                tokenUsage = com.openminis.app.usage.StoredUsageJson.markCopied(msg.tokenUsage),
                 reasoningContent = msg.reasoningContent,
             )
             oldToNewId[msg.id] = newMsg.id

@@ -109,8 +109,11 @@ object ExecutionCoordinator {
         TerminalSession.broadcastTimezone(PRootKernel.updateTimezone())
     }
 
-    suspend fun broadcastProxyChange() {
+    suspend fun broadcastProxyChange(cleared: Set<String> = emptySet()) {
         if (!PRootKernel.isBooted) return
-        TerminalSession.broadcastProxy(PRootKernel.updateProxy(appContext))
+        TerminalSession.broadcastProxy(
+            cleared.associateWith { "" } + PRootKernel.updateProxy(appContext) +
+                com.openminis.app.network.NetworkShellEnvironment.proxyVariables(),
+        )
     }
 }

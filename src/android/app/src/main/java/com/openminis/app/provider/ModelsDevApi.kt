@@ -36,6 +36,8 @@ object ModelsDevApi {
 
     private var cachedRegistry: Map<String, ProviderEntry>? = null
     private var cacheTimestamp: Long = 0L
+    @Volatile private var fetchedAt: Long = 0L
+    private const val MANUAL_REFRESH_FRESH_MS = 10 * 60 * 1000L
 
     /**
      * [T-android-modelsdev-aggregate-fallback] Memoized stage-3 index, keyed on
@@ -61,7 +63,8 @@ object ModelsDevApi {
 
     // MARK: - Public: Fetch models by base URL (fallback)
 
-    fun fetchModels(forBaseURL: String): List<LLMModel> {
+    fun fetchModels(forBaseURL: String, fresh: Boolean = false): List<LLMModel> {
+        if (fresh && System.currentTimeMillis() - fetchedAt > MANUAL_REFRESH_FRESH_MS) refreshFromNetwork()
         val registry = loadRegistry() ?: return emptyList()
 
         // Phase 1: Exact API base match (with/without /v1)
@@ -366,8 +369,8 @@ object ModelsDevApi {
 
     private fun applyDevData(model: LLMModel, devModel: ModelDevEntry): LLMModel {
         return model.copy(
-            contextWindow = devModel.contextWindow ?: model.contextWindow,
-            maxOutputTokens = devModel.maxOutputTokens ?: model.maxOutputTokens,
+            contextWindow = if (model.limitsReportedByEndpoint == true) model.contextWindow ?: devModel.contextWindow else devModel.contextWindow ?: model.contextWindow,
+            maxOutputTokens = if (model.limitsReportedByEndpoint == true) model.maxOutputTokens ?: devModel.maxOutputTokens else devModel.maxOutputTokens ?: model.maxOutputTokens,
             supportsReasoning = devModel.reasoning ?: model.supportsReasoning,
             interleavedReasoningField = devModel.interleavedField ?: model.interleavedReasoningField,
             inputModalities = devModel.inputModalities ?: model.inputModalities,
@@ -462,6 +465,7 @@ object ModelsDevApi {
             val (parsed, diskDate) = diskResult
             cachedRegistry = parsed
             cacheTimestamp = diskDate
+            fetchedAt = diskDate
             if (System.currentTimeMillis() - diskDate >= CACHE_TTL_MS) {
                 scheduleBackgroundRefresh()
             }
@@ -498,7 +502,9 @@ object ModelsDevApi {
     private fun refreshFromNetwork() {
         try {
             val request = Request.Builder().url(SOURCE_URL).build()
-            val response = client.newCall(request).execute()
+            val response = com.openminis.app.network.NetworkHttp.client(
+                com.openminis.app.network.NetworkHttp.DEFAULT_TAG, client,
+            ).newCall(request).execute()
             if (!response.isSuccessful) {
                 Log.e(TAG, "models.dev HTTP error: ${response.code}")
                 response.close()
@@ -512,6 +518,7 @@ object ModelsDevApi {
                 synchronized(this) {
                     cachedRegistry = parsed
                     cacheTimestamp = System.currentTimeMillis()
+                    fetchedAt = cacheTimestamp
                 }
                 saveDiskCache(body)
                 Log.d(TAG, "Background-refreshed models.dev registry: ${parsed.size} providers")

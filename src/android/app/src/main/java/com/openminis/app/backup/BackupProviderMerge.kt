@@ -13,7 +13,21 @@ object BackupProviderMerge {
         val skipped: Int,
         val hasChanges: Boolean,
         val groupIdRemapping: Map<String, String>,
+        val instancesAdded: Set<String> = emptySet(),
+        val instancesChanged: Set<String> = emptySet(),
+        val groupsAdded: Int = 0,
+        val groupsChanged: Int = 0,
     )
+
+    data class RestoreCounts(val imported: Int, val updated: Int, val skipped: Int)
+
+    /** Count providers once even when both their settings and credentials changed. */
+    fun counts(result: Result, packageInstanceIds: Collection<String>, credentialsWritten: Collection<String>): RestoreCounts {
+        val ids = packageInstanceIds.toSet()
+        val added = result.instancesAdded intersect ids
+        val changed = ((result.instancesChanged + credentialsWritten) intersect ids) - added
+        return RestoreCounts(added.size + result.groupsAdded, changed.size + result.groupsChanged, ids.size - added.size - changed.size)
+    }
 
     fun merge(local: ProviderConfig, incoming: ProviderConfig): Result {
         var imported = 0
@@ -115,10 +129,29 @@ object BackupProviderMerge {
             voiceInputGroupId = voiceIn, voiceOutputGroupId = voiceOut, visionGroupId = vision,
             agentLoopModelEntryIds = agentEntries, agentLoopGroupIds = agentGroups, subAgents = agents,
         )
+        val beforeInstances = local.instances.associateBy { it.id }
+        val beforeEntries = local.modelEntries.associateBy { it.id }
+        val affectedByEntries = incoming.modelEntries.filter { remote ->
+            val before = beforeEntries[remote.id]
+            val after = entries.firstOrNull { it.id == remote.id }
+            before == null || after?.copy(userModifiedAt = before.userModifiedAt, absentSince = before.absentSince) != before
+        }.map { it.providerInstanceId }.toSet()
+        val newInstances = incoming.instances.filter { it.id !in beforeInstances }.map { it.id }.toSet()
+        val changedInstances = incoming.instances.filter { remote ->
+            val before = beforeInstances[remote.id] ?: return@filter false
+            val after = instances.first { it.id == remote.id }
+            after.copy(createdAt = before.createdAt) != before || remote.id in affectedByEntries
+        }.map { it.id }.toSet()
         return Result(
             merged, imported, updated, skipped,
             imported > 0 || updated > 0 || settingsChanged || orderChanged || agents != local.subAgents,
             aliases.filter { (from, to) -> from != to },
+            instancesAdded = newInstances,
+            instancesChanged = changedInstances,
+            groupsAdded = restoredGroupIds.count { it !in localById },
+            groupsChanged = restoredGroupIds.count { id -> id in localById && (
+                mergedGroups[id] != localById[id] || incomingGroups.any { it.id != id && aliases[it.id] == id }
+            ) },
         )
     }
 }

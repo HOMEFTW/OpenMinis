@@ -4,7 +4,8 @@ import com.openminis.app.data.db.UsageRecord
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderConfig
 import com.openminis.app.data.model.ProviderType
-import org.json.JSONObject
+import com.openminis.app.usage.StoredUsageJson
+import com.openminis.app.usage.StoredUsageParse
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -27,12 +28,17 @@ internal data class UsageTokens(
     val output: Long = 0,
     val cacheRead: Long = 0,
     val cacheCreation: Long = 0,
+    val cacheReported: Boolean? = null,
+    val cacheEligibleInput: Long = if (cacheReported == true || cacheRead > 0 || cacheCreation > 0) input + cacheRead + cacheCreation else 0,
 ) {
     val totalInput: Long get() = input + cacheRead + cacheCreation
     val total: Long get() = totalInput + output
-    val cacheHitRate: Double? get() = if (totalInput > 0) cacheRead.toDouble() / totalInput * 100 else null
+    val cacheHitRate: Double? get() = if (cacheEligibleInput > 0) cacheRead.toDouble() / cacheEligibleInput * 100 else null
     operator fun plus(other: UsageTokens) = UsageTokens(input + other.input, output + other.output,
-        cacheRead + other.cacheRead, cacheCreation + other.cacheCreation)
+        cacheRead + other.cacheRead, cacheCreation + other.cacheCreation,
+        if (cacheReported == true || other.cacheReported == true) true
+        else if (cacheReported == false || other.cacheReported == false) false else null,
+        cacheEligibleInput + other.cacheEligibleInput)
 }
 
 internal data class UsageSample(
@@ -55,9 +61,9 @@ internal fun usageSamples(records: List<UsageRecord>, config: ProviderConfig?): 
     val byInstance = entries.associateBy { it.providerInstanceId to it.model.id }
     val builtIns = LLMModel.allModels.associateBy { it.id }
     return records.mapNotNull { record ->
-        val json = runCatching { JSONObject(record.tokenUsage) }.getOrNull() ?: return@mapNotNull null
-        fun count(key: String, legacy: String? = null): Long =
-            json.optLong(key, legacy?.let { json.optLong(it, 0) } ?: 0).coerceAtLeast(0)
+        val usage = (StoredUsageJson.parse(record.tokenUsage) as? StoredUsageParse.Valid)?.usage
+            ?.takeUnless { it.copied } ?: return@mapNotNull null
+
         val instance = record.providerInstanceId?.let(instances::get)
         val entry = if (record.providerInstanceId != null) byInstance[record.providerInstanceId to record.modelId] else
             entries.firstOrNull { it.model.id == record.modelId &&
@@ -75,8 +81,7 @@ internal fun usageSamples(records: List<UsageRecord>, config: ProviderConfig?): 
             attribution = classifyAttribution(record.modelId, record.hasSnapshot, entry != null || builtIn != null),
             createdAt = record.createdAt,
             sessionId = record.sessionId,
-            tokens = UsageTokens(count("inputTokens"), count("outputTokens"),
-                count("cacheReadTokens", "cacheReadInputTokens"), count("cacheCreationTokens", "cacheCreationInputTokens")),
+            tokens = UsageTokens(usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.cacheReported),
         )
     }
 }
@@ -93,7 +98,20 @@ internal fun usageInDateRange(createdAt: Long, now: Long, days: Int, zone: ZoneI
 internal fun usageMatchesSearch(id: String, name: String, provider: String, search: String): Boolean =
     search.trim().let { query -> listOf(id, name, provider).any { it.contains(query, ignoreCase = true) } }
 
-internal fun usageTotal(samples: List<UsageSample>): UsageTokens = samples.fold(UsageTokens()) { total, row -> total + row.tokens }
+/** Use one cache-reporting cohort for both totals and chart buckets in the selected range. */
+private fun withCacheEligibility(samples: List<UsageSample>): List<UsageSample> {
+    fun cohort(row: UsageSample) = row.providerKey to com.openminis.app.usage.ModelKey.merged(row.modelId)
+    val withCache = samples.filter { it.tokens.cacheRead + it.tokens.cacheCreation > 0 }.mapTo(HashSet(), ::cohort)
+    return samples.map { row ->
+        val tokens = row.tokens
+        val eligible = tokens.cacheReported == true || tokens.cacheRead + tokens.cacheCreation > 0 ||
+            (tokens.cacheReported == null && cohort(row) in withCache)
+        row.copy(tokens = tokens.copy(cacheEligibleInput = if (eligible) tokens.totalInput else 0))
+    }
+}
+
+internal fun usageTotal(samples: List<UsageSample>): UsageTokens =
+    withCacheEligibility(samples).fold(UsageTokens()) { total, row -> total + row.tokens }
 
 internal fun usageModelStats(samples: List<UsageSample>, zone: ZoneId): List<UsageModelStats> = samples
     .groupBy { Triple(it.providerKey, it.modelId, it.attribution) }.values.map { rows ->
@@ -114,7 +132,7 @@ internal fun usageTrend(samples: List<UsageSample>, now: Long, days: Int, zone: 
         monthly -> "yyyy-MM"
         else -> "MM-dd"
     }, Locale.getDefault())
-    val sorted = samples.filter { usageInDateRange(it.createdAt, now, days, zone) }.sortedBy { it.createdAt }
+    val sorted = withCacheEligibility(samples.filter { usageInDateRange(it.createdAt, now, days, zone) }).sortedBy { it.createdAt }
     var index = 0
     val buckets = mutableListOf<UsageBucket>()
     while (cursor < end) {

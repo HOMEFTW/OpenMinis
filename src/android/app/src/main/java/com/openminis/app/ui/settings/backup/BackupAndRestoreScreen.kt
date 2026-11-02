@@ -1373,13 +1373,14 @@ private fun RestoreReport(
     val prov = report.categories.firstOrNull {
         it.category == BackupCategory.PROVIDERS.key
     }
-    if (prov != null) {
-        val msg = when {
-            prov.credentialsRestored > 0 ->
+    val credentialsNotice = prov?.let(::restoreCredentialsNotice)
+    if (prov != null && credentialsNotice != null) {
+        val msg = when (credentialsNotice) {
+            RestoreCredentialsNotice.RESTORED ->
                 stringResource(R.string.build34_backup_credentials_restored, prov.credentialsRestored)
-            prov.credentialsKept > 0 ->
+            RestoreCredentialsNotice.KEPT ->
                 stringResource(R.string.build34_backup_credentials_unchanged, prov.credentialsKept)
-            else ->
+            RestoreCredentialsNotice.NONE_IN_PACKAGE ->
                 stringResource(R.string.backup_creds_none)
         }
         SettingsSection(footer = msg) {}

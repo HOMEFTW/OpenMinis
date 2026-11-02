@@ -99,8 +99,15 @@ class OpenAIProvider private constructor(
      * which is wrong for Azure's deployments-path routing.
      */
     private val azureBase: String? = null,
-) : LLMProvider {
+) : LLMProvider, com.openminis.app.network.NetworkTagged {
     override val name = "OpenAI"
+
+    /**
+     * [T-quota-codex-subscription] The instance this provider serves, set by
+     * ProviderFactory for Codex (ChatGPT OAuth) instances only. Every reply's
+     * `x-codex-*` headers feed its quota.
+     */
+    var quotaInstanceId: String? = null
     override var imageNormalizer: (ByteArray, String) -> com.openminis.app.provider.ImageBudget.NormalizedImage? =
         com.openminis.app.provider.ImageBudget::normalizeImage
         internal set
@@ -197,6 +204,8 @@ class OpenAIProvider private constructor(
     ) : this(apiKey = null, oauthTokenProvider = oauthTokenProvider, model = model, codexAccountId = codexAccountId)
 
     companion object {
+        internal fun socketReadTimeoutSeconds(responseTimeoutSeconds: Int?): Long =
+            maxOf(600L, responseTimeoutSeconds?.coerceIn(30, 3600)?.toLong()?.plus(30L) ?: 600L)
         /**
          * [T-android-thinking-level-arch] Codex OAuth client version advertised
          * in the Version / User-Agent headers. Bumped 0.142.3 → 0.144.1 to
@@ -421,6 +430,10 @@ class OpenAIProvider private constructor(
      */
     override val streamTextIsMonolithic: Boolean get() = usesChatCompletionsAPI
 
+    override fun echoesReasoningContent(thinkingLevel: ThinkingLevel): Boolean =
+        usesChatCompletionsAPI && (clampThinkingLevel(thinkingLevel).isEnabled || model.supportsReasoning == true) &&
+            model.supportsReasoning != false && !(isMistral || isCerebras)
+
     /**
      * [T-codex-gpt-image2-oauth-android] gpt-image-2 is a special image-
      * generation model driven through the Codex OAuth backend's built-in
@@ -469,7 +482,7 @@ class OpenAIProvider private constructor(
     private val responseWaitMs: Long get() = responseTimeoutSeconds?.coerceIn(30, 3600)?.times(1000L) ?: STREAM_TTFB_TIMEOUT_MS
     private val baseClient by lazy { OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(responseTimeoutSeconds?.coerceIn(30, 3600)?.toLong() ?: 600L, TimeUnit.SECONDS)
+        .readTimeout(socketReadTimeoutSeconds(responseTimeoutSeconds), TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         // [T-android-stale-conn-retry-hang] Shared pool so NetworkMonitor's
         // network-transition eviction reaches THIS client's connections —
@@ -478,7 +491,10 @@ class OpenAIProvider private constructor(
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .eventListenerFactory { OkHttpNetTraceListener() }
         .build() }
-    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, basePath)
+    override var netTag: String? = null
+    private val client get() = com.openminis.app.network.NetworkHttp.client(
+        netTag, com.openminis.app.network.EndpointCertificates.client(baseClient, basePath),
+    )
 
     /** Detect OpenRouter base URL. */
     private val isOpenRouter: Boolean = basePath.contains("openrouter.ai")
@@ -659,7 +675,7 @@ class OpenAIProvider private constructor(
         ).collect { chunk ->
             when (chunk) {
                 is LLMStreamChunk.Text -> textBuf.append(chunk.text)
-                is LLMStreamChunk.Usage -> usage = chunk.usage
+                is LLMStreamChunk.Usage -> usage = com.openminis.app.usage.UsageChunkMerger.merge(usage, chunk.usage)
                 is LLMStreamChunk.Finished -> stopReason = chunk.stopReason
                 is LLMStreamChunk.MediaAttachment -> media.add(chunk.attachment)
                 else -> Unit
@@ -862,7 +878,7 @@ class OpenAIProvider private constructor(
         } catch (e: IOException) {
             if (ttfbTimedOut.get()) {
                 throw LLMError.TransientError(
-                    "no response from server (${STREAM_TTFB_TIMEOUT_MS / 1000}s TTFB) — check network/proxy",
+                    "no response from server (${responseWaitMs / 1000}s TTFB) — check network/proxy",
                 )
             }
             throw e
@@ -870,6 +886,10 @@ class OpenAIProvider private constructor(
             headersArrived.set(true)
             ttfbWatchdog.cancel()
             if (!responseReceived) callCancellation.cancel()
+        }
+        // [T-quota-codex-subscription] Codex replies, errors included.
+        if (isOAuth && !forceChatCompletions) {
+            com.openminis.app.quota.QuotaObservationSink.recordCodexResponse(quotaInstanceId, response.headers)
         }
         // T321: response-side diagnostic log (status + select header values).
         run {
@@ -1210,6 +1230,9 @@ class OpenAIProvider private constructor(
                             throw mapStreamError(err ?: JSONObject().put("message", message))
                         }
                         type == "response.incomplete" -> {
+                            event.optJSONObject("response")?.optJSONObject("usage")?.let {
+                                sendChunk(LLMStreamChunk.Usage(parseResponsesAPIUsage(it)))
+                            }
                             // [T-responses-terminal-events] The server ended the
                             // response early; incomplete_details.reason is
                             // "max_output_tokens" or "content_filter".
@@ -1217,6 +1240,11 @@ class OpenAIProvider private constructor(
                                 ?.optJSONObject("incomplete_details")
                                 ?.optString("reason")?.takeIf { it.isNotEmpty() }
                                 ?: "unknown"
+                            if (reason == com.openminis.app.provider.StopReasons.CONTENT_FILTER) {
+                                finishReason = com.openminis.app.provider.StopReasons.CONTENT_FILTER
+                                sawFinishReason = true
+                                break
+                            }
 
                             // [T-android-incomplete-keep-partial] Only fail the
                             // turn when there is genuinely nothing to show.
@@ -1933,7 +1961,9 @@ class OpenAIProvider private constructor(
                 if (urlStr.isNotEmpty()) {
                     try {
                         val dlReq = Request.Builder().url(urlStr).get().build()
-                        com.openminis.app.network.EndpointCertificates.client(baseClient, urlStr)
+                        com.openminis.app.network.NetworkHttp.client(
+                            netTag, com.openminis.app.network.EndpointCertificates.client(baseClient, urlStr),
+                        )
                             .newCall(dlReq).execute().use { dlResp ->
                             if (!dlResp.isSuccessful) throw java.io.IOException("HTTP ${dlResp.code}")
                             val ctMime = dlResp.header("Content-Type")?.substringBefore(';')
@@ -2124,9 +2154,8 @@ class OpenAIProvider private constructor(
                             }
                         }
                         val textParts = msg.contentParts.filterIsInstance<AgentContentPart.Text>()
-                        if (textParts.isNotEmpty()) {
-                            obj.put("content", textParts.joinToString("") { it.text })
-                        }
+                        // Relays with required content fields also accept tool-only assistant turns.
+                        obj.put("content", textParts.joinToString("") { it.text })
                         val toolUseParts = msg.contentParts.filterIsInstance<AgentContentPart.ToolUse>()
                         if (toolUseParts.isNotEmpty()) {
                             val toolCallsArr = JSONArray()
@@ -2360,7 +2389,8 @@ class OpenAIProvider private constructor(
         // "Duplicate value for tool_call_id ... in message[N]" whenever
         // any id repeats across the full messages array.
         globallyDedupeToolCallIds(messagesArray)
-        body.put("messages", messagesArray)
+        val paired = ChatCompletionsToolPairing.sanitize(messagesArray)
+        body.put("messages", paired.messages)
 
         // [T-android-model-use-passthrough-mode GH#72] Merge user-supplied extra
         // body fields verbatim (no OpenAI→native conversion — callers own the
@@ -2551,30 +2581,8 @@ class OpenAIProvider private constructor(
         return builder.build()
     }
 
-    private fun parseChatCompletionsUsage(usage: JSONObject): LLMUsage {
-        val promptTokens = usage.optInt("prompt_tokens", 0)
-        // DeepSeek reports cache hits at `usage.prompt_cache_hit_tokens` instead
-        // of the OpenAI-native `prompt_tokens_details.cached_tokens`. Mirrors
-        // iOS OpenAIProvider.swift:629-630. Without this fallback, DeepSeek V4
-        // looked like it never cached even when it did, masking T122's win.
-        val cacheRead = usage.optJSONObject("prompt_tokens_details")
-            ?.optInt("cached_tokens")?.takeIf { it > 0 }
-            ?: usage.optInt("prompt_cache_hit_tokens", 0).takeIf { it > 0 }
-        // OpenAI/DeepSeek `prompt_tokens` is the FULL input (cached + fresh), so
-        // subtract the cached portion to keep `inputTokens` meaning fresh-only —
-        // matching the Anthropic convention. Otherwise the cached tokens are
-        // counted twice in `input + cacheRead` (deflates the cache-hit rate;
-        // DeepSeek 99% hit showed as ~48%). Guard: only subtract when it stays
-        // non-negative; no cache field (cacheRead == null) → unchanged.
-        // latestContextTokens stays the full prompt (that IS the context size).
-        val freshInput = cacheRead?.let { (promptTokens - it).takeIf { d -> d >= 0 } } ?: promptTokens
-        return LLMUsage(
-            inputTokens = freshInput,
-            outputTokens = usage.optInt("completion_tokens", 0),
-            cacheReadInputTokens = cacheRead,
-            latestContextTokens = promptTokens,
-        )
-    }
+    private fun parseChatCompletionsUsage(usage: JSONObject): LLMUsage =
+        com.openminis.app.usage.ProviderUsageParser.openAIChat(usage).toLLMUsage()
 
     /**
      * Inject provider-specific thinking parameters into the request body.
@@ -3544,28 +3552,8 @@ class OpenAIProvider private constructor(
     }
 
     /** Parse usage from Responses API format. */
-    private fun parseResponsesAPIUsage(usage: JSONObject): LLMUsage {
-        val inputTokens = usage.optInt("input_tokens", 0)
-        // Responses API reports cache hits at `input_tokens_details.cached_tokens`
-        // (distinct from Chat Completions' `prompt_tokens_details.cached_tokens`).
-        // Mirrors iOS OpenAIProvider.swift:640. Without this, even a perfectly
-        // cached Responses-API request showed cacheRead=0 in usage stats —
-        // making T126's prompt_cache_key wiring look like it had no effect.
-        val cacheRead = usage.optJSONObject("input_tokens_details")
-            ?.optInt("cached_tokens")?.takeIf { it > 0 }
-        // `input_tokens` is the FULL input (cached subset included); subtract the
-        // cached portion so `inputTokens` is fresh-only, matching Anthropic — else
-        // the cache is counted twice in `input + cacheRead` (deflates hit rate).
-        // Guard: only subtract when non-negative; no cache field → unchanged.
-        // latestContextTokens stays the full input (that IS the context size).
-        val freshInput = cacheRead?.let { (inputTokens - it).takeIf { d -> d >= 0 } } ?: inputTokens
-        return LLMUsage(
-            inputTokens = freshInput,
-            outputTokens = usage.optInt("output_tokens", 0),
-            cacheReadInputTokens = cacheRead,
-            latestContextTokens = inputTokens,
-        )
-    }
+    private fun parseResponsesAPIUsage(usage: JSONObject): LLMUsage =
+        com.openminis.app.usage.ProviderUsageParser.openAIResponses(usage).toLLMUsage()
 
     private fun mapStreamError(error: JSONObject): LLMError {
         val code = error.safeOptString("code", "").ifEmpty { error.safeOptString("type", "") }

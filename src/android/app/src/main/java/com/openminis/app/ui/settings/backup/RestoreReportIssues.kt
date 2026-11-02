@@ -78,3 +78,15 @@ internal fun restoreIssues(report: BackupImporter.Report): List<RestoreIssue> = 
         }
     }
 }
+
+internal enum class RestoreCredentialsNotice { RESTORED, KEPT, NONE_IN_PACKAGE }
+
+/** An unreadable/empty provider category must not suggest that restored providers lost their keys. */
+internal fun restoreCredentialsNotice(providers: BackupImporter.CategoryReport): RestoreCredentialsNotice? = when {
+    providers.credentialsRestored > 0 -> RestoreCredentialsNotice.RESTORED
+    providers.credentialsKept > 0 -> RestoreCredentialsNotice.KEPT
+    // Thinking rules and subagents share this category in the fork.
+    providers.declaredAccounted == 0 -> null
+    providers.imported + providers.updated > 0 -> RestoreCredentialsNotice.NONE_IN_PACKAGE
+    else -> null
+}

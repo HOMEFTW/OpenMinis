@@ -139,6 +139,7 @@ fun ProviderDetailScreen(
     var showCallCheckModelPicker by remember(instanceId) { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var refreshError by remember(instanceId) { mutableStateOf<String?>(null) }
+    var refreshOutcome by remember(instanceId) { mutableStateOf<com.openminis.app.data.repository.ProviderRepository.ModelRefreshOutcome?>(null) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
     val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -182,6 +183,7 @@ fun ProviderDetailScreen(
                 }
             }
         }
+
 
         // ─── Credential / API Key ───────────────────────────────────
         val isOAuthProvider =
@@ -373,6 +375,7 @@ fun ProviderDetailScreen(
         }
 
         // ─── API Format (OpenAI API-key only) ───────────────────────
+        ProviderNetworkRouteSection(instance.id)
         if (!instance.customBaseURL.isNullOrBlank() && instance.providerType in setOf(
                 ProviderType.openAI, ProviderType.openAIResponses, ProviderType.anthropic,
                 ProviderType.gemini, ProviderType.deepSeek,
@@ -543,6 +546,14 @@ fun ProviderDetailScreen(
             )
         }
 
+        // ─── Quota [T-provider-quota] ───────────────────────────────
+        // The account's upstream balance / quota, right after Status. Hidden for
+        // a disabled instance or one without a credential. Kimi Code keeps its
+        // own subscription usage block (KimiSubscriptionUsageBlock).
+        if (instance.providerType != ProviderType.kimiCode) {
+            com.openminis.app.ui.quota.ProviderQuotaSection(instance = instance)
+        }
+
         officialProviderConsole(instance.customBaseURL)?.let { consoleURL ->
             SettingsSection(header = null) {
                 SettingsRow(
@@ -627,7 +638,18 @@ fun ProviderDetailScreen(
             // Refresh action sits as the first row, mirroring the iOS
             // tap-to-refresh affordance in the section header area.
             SettingsRow(
-                title = if (isRefreshing) "Refreshing…" else "Refresh model list",
+                title = stringResource(if (isRefreshing) R.string.provider_refreshing_models else R.string.provider_refresh_model_list),
+                subtitle = refreshOutcome?.let { result ->
+                    val error = result.vendorError
+                    when {
+                        error == null -> stringResource(R.string.provider_refresh_result_ok, result.total, result.added)
+                        result.source == com.openminis.app.data.repository.ProviderRepository.ModelRefreshSource.KEPT && result.added > 0 ->
+                            stringResource(R.string.provider_refresh_result_builtin, error, result.added)
+                        result.source == com.openminis.app.data.repository.ProviderRepository.ModelRefreshSource.KEPT ->
+                            stringResource(R.string.provider_refresh_result_kept, error)
+                        else -> stringResource(R.string.provider_refresh_result_fallback, error, result.total)
+                    }
+                },
                 onClick = if (isRefreshing) {
                     null
                 } else {
@@ -636,10 +658,7 @@ fun ProviderDetailScreen(
                         refreshError = null
                         scope.launch {
                             try {
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                    providerRepository.refreshModels(instance, forceRefresh = true,
-                                        onVendorError = { refreshError = it })
-                                }
+                                refreshOutcome = providerRepository.refreshModels(instance, forceRefresh = true)
                                 AppLogger.info(TAG, "Refreshed models for ${instance.id}")
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e

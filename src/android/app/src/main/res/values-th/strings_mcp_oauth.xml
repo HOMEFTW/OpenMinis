@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">การให้สิทธิ์</string>
+    <string name="mcp_form_auth_none">ไม่มี</string>
+    <string name="mcp_signin_not_signed_in">ยังไม่ได้ลงชื่อเข้าใช้</string>
+    <string name="mcp_signin_sign_in">ลงชื่อเข้าใช้</string>
+    <string name="mcp_signin_reset_confirm">รีเซ็ต</string>
+</resources>

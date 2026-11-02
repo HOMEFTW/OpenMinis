@@ -21,6 +21,8 @@ import com.openminis.app.provider.safeOptString
 import com.openminis.app.provider.SseEventReader
 import com.openminis.app.provider.parseToolInputObject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
@@ -30,6 +32,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Call
+import okhttp3.Response
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -46,7 +50,7 @@ class GeminiProvider(
     private val apiKey: String,
     override var model: LLMModel = LLMModel.gemini25Flash,
     private val basePath: String = "https://generativelanguage.googleapis.com/v1beta",
-) : LLMProvider {
+) : LLMProvider, com.openminis.app.network.NetworkTagged {
     override val name = "Google"
     override var imageNormalizer: (ByteArray, String) -> ImageBudget.NormalizedImage? = ImageBudget::normalizeImage
 
@@ -58,7 +62,10 @@ class GeminiProvider(
         // Network-transition eviction must reach provider connections.
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .build()
-    private val client get() = com.openminis.app.network.EndpointCertificates.client(baseClient, basePath)
+    override var netTag: String? = null
+    private val client get() = com.openminis.app.network.NetworkHttp.client(
+        netTag, com.openminis.app.network.EndpointCertificates.client(baseClient, basePath),
+    )
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>,
@@ -70,21 +77,11 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
         val budgeted = budgetProviderRequest(messages, imageParts, normalizer = imageNormalizer)
-        val body = buildRequestBody(budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools, thinkingLevel)
-        val url = "$basePath/models/${model.id}:generateContent?key=$apiKey"
-        val request = Request.Builder()
-            .url(url)
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            // [T-android-default-ua] Brand the outbound UA so server logs
-            // can trace the request back to the Minis build. Gemini has no
-            // SDK-specific UA requirement, so the helper's default kicks in.
-            .applyUserAgentOverride(null)
-            .build()
-
-        val call = client.newCall(request)
-        val callCancellation = cancelOnCancellation { call.cancel() }
+        val active = executeWithThinkingRetry("generateContent") { format ->
+            buildRequestBody(budgeted.messages, systemPrompt, maxTokens, temperature, budgeted.imageParts, tools, thinkingLevel, format)
+        }
         try {
-            call.execute().use { response ->
+            active.response.use { response ->
                 val responseBody = response.body?.string() ?: ""
                 if (!response.isSuccessful) throw mapHttpError(response.code, responseBody)
                 val json = JSONObject(responseBody)
@@ -95,7 +92,7 @@ class GeminiProvider(
             currentCoroutineContext().ensureActive()
             throw error
         } finally {
-            callCancellation.cancel()
+            active.close()
         }
     }
 
@@ -129,28 +126,12 @@ class GeminiProvider(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = callbackFlow {
-        val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
-        val url = "$basePath/models/${model.id}:streamGenerateContent?alt=sse&key=$apiKey"
-        val request = Request.Builder()
-            .url(url)
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            // [T-android-default-ua] same intent as the non-streaming
-            // branch above — brand outbound requests with Minis/<version>.
-            .applyUserAgentOverride(null)
-            .build()
-
-        val call = client.newCall(request)
-        // Register before execute()/readLine(): awaitClose below is too late
-        // to interrupt a collector cancelled during blocking I/O.
-        val callCancellation = cancelOnCancellation {
-            try { call.cancel() } catch (_: Throwable) {}
+        val active = executeWithThinkingRetry("streamGenerateContent?alt=sse") { format ->
+            buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel, format)
         }
-        val response = try {
-            call.execute()
-        } catch (e: Throwable) {
-            callCancellation.cancel()
-            throw e
-        }
+        val call = active.call
+        val callCancellation = active.cancellation
+        val response = active.response
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
             response.close()
@@ -281,6 +262,50 @@ class GeminiProvider(
             .put("data", Base64.encodeToString(normalized.data, Base64.NO_WRAP)))
     }
 
+    private data class ActiveResponse(val response: Response, val call: Call, val cancellation: Job) {
+        fun close() {
+            response.close()
+            cancellation.cancel()
+        }
+    }
+
+    /** Only a thinking-parameter HTTP 400 may be retried, before any output is exposed. */
+    private fun CoroutineScope.executeWithThinkingRetry(
+        method: String,
+        bodyFor: (ThinkingRuleResolver.GeminiThinkingFormat?) -> JSONObject,
+    ): ActiveResponse {
+        val modelId = model.id
+        val separator = if ('?' in method) "&" else "?"
+        val url = "$basePath/models/$modelId:$method${separator}key=$apiKey"
+        fun post(body: JSONObject): ActiveResponse {
+            val request = Request.Builder().url(url)
+                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .applyUserAgentOverride(null).build()
+            val call = client.newCall(request)
+            val cancellation = cancelOnCancellation { call.cancel() }
+            try {
+                return ActiveResponse(call.execute(), call, cancellation)
+            } catch (error: Throwable) {
+                cancellation.cancel()
+                coroutineContext.ensureActive()
+                throw error
+            }
+        }
+        val instance = netTag ?: basePath
+        val first = bodyFor(GeminiThinkingRetry.preferred(instance, modelId))
+        val active = post(first)
+        if (active.response.code != 400) return active
+        val sent = GeminiThinkingRetry.thinkingConfigOf(first) ?: return active
+        val errorBody = try { active.response.body?.string().orEmpty() } finally { active.close() }
+        coroutineContext.ensureActive()
+        val format = GeminiThinkingRetry.formatFor(errorBody) ?: throw mapHttpError(400, errorBody)
+        val second = bodyFor(format)
+        if (GeminiThinkingRetry.thinkingConfigOf(second) == sent) throw mapHttpError(400, errorBody)
+        val retried = post(second)
+        if (retried.response.isSuccessful) GeminiThinkingRetry.remember(instance, modelId, format)
+        return retried
+    }
+
     private fun buildRequestBody(
         messages: List<LLMMessage>,
         systemPrompt: String?,
@@ -291,6 +316,7 @@ class GeminiProvider(
         // [T-android-thinking-level-arch] Already clamped to the model ceiling by
         // LLMProvider.streamMessage/sendMessage before reaching here.
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        thinkingFormat: ThinkingRuleResolver.GeminiThinkingFormat? = null,
     ): JSONObject {
         val body = JSONObject()
 
@@ -299,7 +325,7 @@ class GeminiProvider(
         // functionCall 400s ("Function call is missing a thought_signature").
         // Only gemini-3.x enforces this, so gate the whole special-case on it
         // to leave 1.x/2.x/flash behaviour byte-for-byte unchanged.
-        val requiresSig = model.id.lowercase().contains("gemini-3")
+        val requiresSig = ThinkingRuleResolver.isGeminiLevelFamily(model.id)
         // Tool-call ids we CANNOT safely replay as a functionCall because their
         // signature is missing (old sessions, non-3.x-origin history, dropped
         // field). For these, both the functionCall AND its paired functionResponse
@@ -489,7 +515,7 @@ class GeminiProvider(
         }
 
         // Thinking configuration (model-specific)
-        buildThinkingConfig(thinkingLevel)?.let { thinkingConfig ->
+        buildThinkingConfig(thinkingLevel, thinkingFormat)?.let { thinkingConfig ->
             config.put("thinkingConfig", thinkingConfig)
         }
 
@@ -518,13 +544,16 @@ class GeminiProvider(
      * - Gemini 2.5 Flash: uses thinkingBudget (0-8192)
      * - Gemini 2.5 Flash Lite: no thinking support
      */
-    private fun buildThinkingConfig(level: ThinkingLevel): JSONObject? {
+    private fun buildThinkingConfig(
+        level: ThinkingLevel,
+        format: ThinkingRuleResolver.GeminiThinkingFormat? = null,
+    ): JSONObject? {
         // [T-thinking-rules-phase2] The per-family rules now live in
         // ThinkingRuleResolver.geminiThinkingConfig so every vendor's thinking contract
         // is described in ONE place. Behaviour is byte-for-byte unchanged — verified by
         // a reflection cross-check against this method's previous body (0 diffs across
         // 10 models x 7 levels) and pinned by ThinkingWireGeminiAnthropicSnapshotTest.
-        val cfg = ThinkingRuleResolver.geminiThinkingConfig(model.id, level)
+        val cfg = ThinkingRuleResolver.geminiThinkingConfig(model.id, level, format)
         com.openminis.app.logging.AppLogger.info(
             "Thinking",
             "[resolve] provider=gemini model=${model.id} level=${level.name} " +
@@ -683,27 +712,8 @@ class GeminiProvider(
         }
 
         /** Exposed for tests and for any other endpoint speaking this protocol. */
-        fun parseUsageMetadata(usage: JSONObject): LLMUsage {
-            val promptTokens = usage.optInt("promptTokenCount", 0)
-            val candidatesTokens = usage.optInt("candidatesTokenCount", 0)
-            val thoughtsTokens = usage.optInt("thoughtsTokenCount", 0)
-            // Absent or 0 both mean "no cache to report" — keep null so a
-            // cache-less chunk stays distinguishable from a measured zero.
-            val cachedTokens = usage.optInt("cachedContentTokenCount", 0).takeIf { it > 0 }
-
-            val totalOutput = candidatesTokens + thoughtsTokens
-            // Clamped: a relay reporting a cache larger than the prompt must not
-            // yield a negative input count.
-            val freshInput = cachedTokens?.let { (promptTokens - it).coerceAtLeast(0) } ?: promptTokens
-
-            return LLMUsage(
-                inputTokens = freshInput,
-                outputTokens = totalOutput,
-                cacheCreationInputTokens = null,
-                cacheReadInputTokens = cachedTokens,
-                latestContextTokens = promptTokens,
-            )
-        }
+        fun parseUsageMetadata(usage: JSONObject): LLMUsage =
+            com.openminis.app.usage.ProviderUsageParser.gemini(usage).toLLMUsage()
     }
 
     private fun mapHttpError(statusCode: Int, body: String): LLMError {

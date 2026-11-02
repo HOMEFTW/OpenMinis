@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_error_model_refused">模型拒绝响应此请求。请尝试换一种说法，或切换到其他模型。</string>
+    <string name="chat_error_model_refused_category">模型服务商的使用政策拦截了这个请求（类别：%1$s）。在这个对话里继续或换个说法，大概率仍会被拦截——请换用其他模型，或开一个新对话。</string>
+    <string name="chat_error_dsml_tool_call_leak">模型的工具调用格式出错（被写进了思考内容），已自动重试 2 次仍未成功。点「继续」再试一次。</string>
+</resources>

@@ -1,6 +1,7 @@
 package com.openminis.app.sandbox.offload
 
 import android.content.Context
+import com.openminis.app.logging.AppLogger
 import android.util.Base64
 import android.util.Log
 import com.openminis.app.data.model.LLMMessage
@@ -113,6 +114,9 @@ class ModelUseOffloadHandler(
     }
 
     private fun cmdRun(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
+        val caller = OffloadCallerSession.resolve(request.sessionId)
+        val callerSid = caller.sid
+        AppLogger.info(TAG, "[ModelUse] run caller=$callerSid source=${caller.source}")
         val modelArg = args.get("model")
             ?: return NativeOffloadResult(2, "--model is required. Usage: minis-model-use run --model <id_or_name>\n")
 
@@ -187,13 +191,13 @@ class ModelUseOffloadHandler(
 
         // System prompt: --system takes precedence over --system-file
         val explicitSystem = args.get("system") ?: args.get("system-file")?.let {
-            readLinuxPath(it, request.sessionId)
+            readLinuxPath(it, callerSid)
                 ?: return NativeOffloadResult(2, "minis-model-use run: cannot read --system-file '$it'\n")
         }
 
         // Parse input messages: --input <path> | stdin
         val inputText = when {
-            args.get("input") != null -> readLinuxPath(args.get("input")!!, request.sessionId)
+            args.get("input") != null -> readLinuxPath(args.get("input")!!, callerSid)
                 ?: return NativeOffloadResult(
                     2,
                     "minis-model-use run: cannot read --input '${args.get("input")}'\n",
@@ -201,7 +205,7 @@ class ModelUseOffloadHandler(
             else -> ""
         }
         val parsed = try {
-            parseMessages(inputText, request.sessionId)
+            parseMessages(inputText, callerSid)
         } catch (e: ImageInputError) {
             return NativeOffloadResult(
                 2,
@@ -277,7 +281,7 @@ class ModelUseOffloadHandler(
             )
         val provider = ProviderFactory.create(
             instance, apiKey, entry.model, context,
-            sessionId = request.sessionId, overrides = entry.overrides,
+            sessionId = callerSid, overrides = entry.overrides,
         )
 
         // [GH#67] input_audio serialization is implemented for the OpenAI
@@ -324,7 +328,7 @@ class ModelUseOffloadHandler(
                 messages = messages,
                 maxTokens = maxTokens,
                 outputPath = outputPath,
-                sessionId = request.sessionId,
+                sessionId = callerSid,
             )
         }
 
@@ -378,7 +382,7 @@ class ModelUseOffloadHandler(
             inputImages = imageParts,
             outputPath = outputPath,
             outputExt = outputExt,
-            sessionId = request.sessionId,
+            sessionId = callerSid,
             callWarnings = callWarnings,
         )
         if (imageRouted != null) return attachCallFeedback(imageRouted, callWarnings, appliedExtras)
@@ -411,10 +415,10 @@ class ModelUseOffloadHandler(
                 response = response,
                 outputPath = outputPath,
                 outputExt = outputExt,
-                resolveFile = { path -> sessionScopedHostFile(path, request.sessionId) ?: PRootKernel.resolveHostPath(path) },
+                resolveFile = { path -> sessionScopedHostFile(path, callerSid) ?: PRootKernel.resolveHostPath(path) },
                 requireMedia = "image" in outputs && "text" !in outputs,
                 mimeToExt = ::mimeToExt,
-                logWrite = { path, file -> logModelUseWrite(path, file, request.sessionId) },
+                logWrite = { path, file -> logModelUseWrite(path, file, callerSid) },
             ),
             callWarnings, appliedExtras,
         )

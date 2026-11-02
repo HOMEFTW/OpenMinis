@@ -60,6 +60,8 @@ data class LLMModel(
     val entryThinkingCeiling: ThinkingLevel? = null,
     @kotlinx.serialization.SerialName("serviceTiers")
     val supportedServiceTiers: List<String>? = null,
+    /** Endpoint-reported limits survive catalog enrichment and export/import. */
+    val limitsReportedByEndpoint: Boolean? = null,
 ) {
     val isGPT6Astra: Boolean get() = isGPT6AstraId(id)
     val isGPT61Sol: Boolean get() = matchesModelId(id, "gpt-6.1-sol")

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="skill_copy_source_url">Bron-URL kopiëren</string>
+    <string name="skill_source_url_copied">Bron-URL gekopieerd</string>
+    <string name="session_duplicate_suffix">Kopie</string>
+</resources>

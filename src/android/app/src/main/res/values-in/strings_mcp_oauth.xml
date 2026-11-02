@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Otorisasi</string>
+    <string name="mcp_form_auth_none">Tidak ada</string>
+    <string name="mcp_signin_not_signed_in">Belum masuk</string>
+    <string name="mcp_signin_sign_in">Masuk</string>
+    <string name="mcp_signin_reset_confirm">Setel Ulang</string>
+</resources>

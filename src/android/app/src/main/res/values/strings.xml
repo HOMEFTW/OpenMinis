@@ -2337,9 +2337,6 @@
     <string name="helper_steer_message">New instructions</string>
     <string name="helper_steer_failed">This agent can no longer accept instructions.</string>
     <string name="helper_steer_send">Send instructions</string>
-    <string name="chat_completed_tools">%1$d completed tools</string>
-    <string name="chat_tools_collapse">Collapse tools</string>
-    <string name="chat_tools_expand">Expand tools</string>
     <string name="chat_question_title">Your input is needed</string>
     <string name="chat_question_other">Write another answer</string>
     <string name="chat_question_submit">Submit answers</string>
@@ -2381,7 +2378,7 @@
     <string name="chat_wallpaper_transparency_value">Background transparency · %1$d%%</string>
     <string name="chat_wallpaper_visible">0% · Fully visible</string>
     <string name="chat_wallpaper_transparent">100% · Transparent</string>
-    <string name="chat_wallpaper_default_hint">Default transparency for chats without an override. Backgrounds switch with DeepSeek, GPT and Claude models; other models use a plain background. Each chat can change transparency or turn its background off from the menu.</string>
+    <string name="chat_wallpaper_default_hint">Default transparency for chats without an override. Backgrounds switch with DeepSeek, GPT, Claude and Grok models; other models use a plain background. Each chat can change transparency or turn its background off from the menu.</string>
     <string name="chat_wallpaper_following_default">Following the default transparency in Settings.</string>
     <string name="chat_wallpaper_override">This transparency applies only to this chat.</string>
     <string name="chat_wallpaper_restore_default">Use default transparency</string>

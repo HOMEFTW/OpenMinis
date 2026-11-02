@@ -3,7 +3,6 @@ package com.openminis.app.auth
 import android.content.Context
 import android.net.Uri
 import android.util.Log
-import androidx.browser.customtabs.CustomTabsIntent
 import com.openminis.app.BuildConfig
 import com.openminis.app.data.repository.ProviderRepository
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +17,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import kotlin.coroutines.resume
 import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.resumeWithException
 
 /**
  * OAuth manager for Anthropic (Claude) OAuth flow.
@@ -138,7 +138,12 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val accessToken = withContext(Dispatchers.IO) {
             // Step 1: Wait for callback code
             val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
-                val server = OAuthCallbackServer(callbackPort) { receivedCode, receivedState ->
+                val server = OAuthCallbackServer(
+                    callbackPort,
+                    // [T-oauth-callback-double-resume] Denied / failed on the
+                    // provider's page: end the sign-in now with its reason.
+                    onError = { err -> if (cont.isActive) cont.resumeWithException(err.toException(context)) },
+                ) { receivedCode, receivedState ->
                     if (cont.isActive) {
                         cont.resume(receivedCode to receivedState)
                     }
@@ -156,10 +161,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 // FLAG_ACTIVITY_NEW_TASK: MainActivity is singleTask, and launching Custom
                 // Tab in a new task causes the IME to be dismissed whenever the authorization
                 // page focuses an input.
-                val customTabsIntent = CustomTabsIntent.Builder()
-                    .setShowTitle(true)
-                    .build()
-                customTabsIntent.launchUrl(context, Uri.parse(authUrl))
+                OAuthTabLauncher.launch(context, Uri.parse(authUrl))
                 Log.i(TAG, "Opened Custom Tab for Anthropic authorization")
             }
 

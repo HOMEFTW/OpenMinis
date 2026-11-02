@@ -1,6 +1,6 @@
 package com.openminis.app.data.model
 
-enum class ChatWallpaper { DEEPSEEK, GPT, CLAUDE }
+enum class ChatWallpaper { DEEPSEEK, GPT, CLAUDE, GROK }
 
 data class ChatWallpaperSession(
     val enabled: Boolean = true,
@@ -26,6 +26,7 @@ private val gptWallpaperId = Regex(
 private val claudeWallpaperId = Regex(
     """^(?:claude|(?:(?:us|eu|apac|global)\.)?anthropic\.claude)(?:$|-)""",
 )
+private val grokWallpaperId = Regex("""^grok(?:$|[-_.])""")
 
 /** Resolve the actual model ID, including gateway namespaces and Bedrock aliases. */
 fun resolveChatWallpaper(modelId: String?): ChatWallpaper? {
@@ -39,6 +40,7 @@ fun resolveChatWallpaper(modelId: String?): ChatWallpaper? {
         deepSeekWallpaperId.containsMatchIn(name) -> ChatWallpaper.DEEPSEEK
         gptWallpaperId.containsMatchIn(name) -> ChatWallpaper.GPT
         claudeWallpaperId.containsMatchIn(name) -> ChatWallpaper.CLAUDE
+        grokWallpaperId.containsMatchIn(name) -> ChatWallpaper.GROK
         else -> null
     }
 }

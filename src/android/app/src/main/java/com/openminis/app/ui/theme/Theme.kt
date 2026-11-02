@@ -169,6 +169,26 @@ fun MinisTheme(
     }
 }
 
+/**
+ * [T-multi-select-share] Re-themes a subtree light or dark regardless of the app's
+ * own appearance, keeping the app's typography (font scale) and shapes. The chat
+ * export uses it so a dark app can share a light page and the other way round:
+ * every chat row reads its colours from MaterialTheme / LocalChatPalette.
+ */
+@Composable
+fun MinisAppearance(darkTheme: Boolean, content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
+        shapes = MaterialTheme.shapes,
+        typography = MaterialTheme.typography,
+    ) {
+        CompositionLocalProvider(
+            LocalChatPalette provides if (darkTheme) DarkChatPalette else LightChatPalette,
+            content = content,
+        )
+    }
+}
+
 private fun TextStyle.scale(factor: Float): TextStyle =
     if (factor == 1f) this else copy(fontSize = fontSize * factor)
 

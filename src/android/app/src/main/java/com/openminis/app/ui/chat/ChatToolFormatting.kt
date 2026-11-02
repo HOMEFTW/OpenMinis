@@ -55,7 +55,7 @@ internal fun formatStepDuration(seconds: Long, stillRunning: Boolean): String {
 
 // Helper: tool accent color
 internal fun toolAccentColor(toolName: String): Color = when (toolName) {
-    "request_user_input", "ask_user", "ask_question" -> Color(0xFF32ADE6)
+    "request_user_input", "ask_user", "ask_question", "user_ask" -> Color(0xFF32ADE6)
     "shell_execute" -> Color(0xFF34C759)
     "file_read" -> Color(0xFF32ADE6)
     "file_write" -> Color(0xFF007AFF)
@@ -71,7 +71,7 @@ internal fun toolAccentColor(toolName: String): Color = when (toolName) {
 
 // Helper: tool icon (iOS: distinct SF Symbols per tool type)
 internal fun toolIconFor(toolName: String) = when (toolName) {
-    "request_user_input", "ask_user", "ask_question" -> Icons.Default.HelpOutline
+    "request_user_input", "ask_user", "ask_question", "user_ask" -> Icons.Default.HelpOutline
     "shell_execute" -> Icons.Default.Terminal
     "file_read" -> Icons.Default.Description         // iOS: doc.text
     "file_write" -> Icons.AutoMirrored.Filled.NoteAdd   // iOS: doc.text.fill (filled variant)
@@ -92,7 +92,7 @@ internal fun toolIconFor(toolName: String) = when (toolName) {
 // together and cannot silently diverge. Adding a tool means adding it to both.
 @androidx.annotation.DrawableRes
 internal fun toolIconResFor(toolName: String?): Int = when (toolName) {
-    "request_user_input", "ask_user", "ask_question" -> R.drawable.ic_tool_question
+    "request_user_input", "ask_user", "ask_question", "user_ask" -> R.drawable.ic_tool_question
     "shell_execute" -> R.drawable.ic_tool_terminal
     "file_read" -> R.drawable.ic_tool_description
     "file_write" -> R.drawable.ic_tool_note_add
@@ -109,7 +109,7 @@ internal fun toolIconResFor(toolName: String?): Int = when (toolName) {
 // literals, as a packed ARGB Int rather than a Compose Color.
 @androidx.annotation.ColorInt
 internal fun toolAccentColorInt(toolName: String?): Int = when (toolName) {
-    "request_user_input", "ask_user", "ask_question" -> 0xFF32ADE6.toInt()
+    "request_user_input", "ask_user", "ask_question", "user_ask" -> 0xFF32ADE6.toInt()
     "shell_execute" -> 0xFF34C759.toInt()
     "file_read" -> 0xFF32ADE6.toInt()
     "file_write" -> 0xFF007AFF.toInt()
@@ -132,7 +132,7 @@ internal fun toolAccentColorInt(toolName: String?): Int = when (toolName) {
  * several sessions edit concurrently; the vocabulary here is small and stable.
  */
 internal fun friendlyToolTitleFor(toolName: String?): String = when (toolName) {
-    "request_user_input", "ask_user", "ask_question" -> "Ask the user"
+    "request_user_input", "ask_user", "ask_question", "user_ask" -> "Ask the user"
     null, "" -> "Minis"
     "shell_execute" -> "Execute Shell"
     "file_read" -> "Read File"

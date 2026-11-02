@@ -31,7 +31,18 @@ object FileWriteTool {
         propertyOrdering = listOf("tool_title", "path", "content", "append", "create_dirs"),
     )
 
-    fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
+    fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult = try {
+        FileToolIO.run(NAME, writes = true) { executeImpl(argsJson, sessionId, context) }
+    } catch (e: FileToolIO.TimedOut) {
+        ToolExecutionResult("Error: ${e.message}", false, toolTitle = NAME, timedOut = true)
+    } catch (e: FileToolIO.OutOfMemory) {
+        ToolExecutionResult("Error: ${e.message}", false, toolTitle = NAME)
+    } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        ToolExecutionResult("Error: File operation interrupted. A write may still complete; re-read the file before retrying.", false, toolTitle = NAME)
+    }
+
+    private fun executeImpl(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
         return try {
             val args = JSONObject(argsJson)
             val path = args.optString("path", "")

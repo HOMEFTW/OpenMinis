@@ -14,6 +14,17 @@ from transport import http, stdio
 
 
 class ToolRetryTests(unittest.TestCase):
+    def test_daemon_uses_each_callers_current_route_and_resets_it(self):
+        server = daemon.DaemonServer("unused", "unused")
+        observed = []
+        def call(*args, **kwargs):
+            observed.append(http.request_proxy.get())
+        with patch.object(server.pool, "call_with_retry", side_effect=call):
+            for proxy in ("http://mcp:pw@127.0.0.1:41000", "http://mcp:down@127.0.0.1:1", ""):
+                self.assertTrue(server.handle_request({"cmd": "ping", "server": "fixture", "mcp_proxy": proxy})["ok"])
+                self.assertIsNone(http.request_proxy.get())
+        self.assertEqual(["http://mcp:pw@127.0.0.1:41000", "http://mcp:down@127.0.0.1:1", ""], observed)
+
     def test_cli_reply_loss_is_not_reported_as_safe_to_resend(self):
         sock = types.SimpleNamespace(settimeout=lambda value: None, connect=lambda target: None,
                                      sendall=lambda value: None, recv=lambda n: b"", close=lambda: None)
@@ -57,7 +68,8 @@ for line in sys.stdin:
             if len(attempts) == 1:
                 raise http.MCPError("TIMEOUT", "lost reply")
             return "ok"
-        with patch.object(pool, "get", return_value=object()), patch.object(pool, "evict") as evict:
+        session = types.SimpleNamespace(inflight=1, last_activity=0)
+        with patch.object(pool, "get", return_value=session), patch.object(pool, "evict") as evict:
             with self.assertRaises(http.MCPError) as failure:
                 pool.call_with_retry("fixture", invoke, retry_safe=False)
             self.assertEqual("OUTCOME_UNKNOWN", failure.exception.code)

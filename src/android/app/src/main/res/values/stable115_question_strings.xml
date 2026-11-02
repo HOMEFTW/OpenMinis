@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="stable115_question_timeout">Question wait time</string>
+    <string name="stable115_question_unlimited">Wait indefinitely</string>
+    <string name="stable115_question_minutes">%1$d min</string>
+    <string name="stable115_question_previous">Previous</string>
+    <string name="stable115_question_deferred">Answer when ready</string>
+</resources>

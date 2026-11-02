@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">مجوزدهی</string>
+    <string name="mcp_form_auth_none">هیچ‌کدام</string>
+    <string name="mcp_form_auth_browser">ورود با مرورگر</string>
+    <string name="mcp_signin_intro">Minis صفحهٔ ورود این سرویس را به‌طور خودکار پیدا می‌کند. نیازی به Client ID نیست.</string>
+    <string name="mcp_signin_signed_in">وارد شده‌اید</string>
+    <string name="mcp_signin_expired">ورود منقضی شده</string>
+    <string name="mcp_signin_not_signed_in">وارد نشده</string>
+    <string name="mcp_signin_sign_in">ورود</string>
+    <string name="mcp_signin_sign_in_again">ورود دوباره</string>
+    <string name="mcp_signin_reset_confirm">بازنشانی</string>
+    <string name="mcp_signin_manual_fallback">این سرویس از ثبت‌نام خودکار پشتیبانی نمی‌کند. Client ID آن را در زیر وارد کنید.</string>
+    <string name="mcp_signin_not_completed">ورود کامل نشد. می‌توانید دوباره امتحان کنید.</string>
+    <string name="mcp_dcr_not_protected">این سرور درخواست مجوز نکرد، بنابراین چیزی برای اتصال وجود ندارد.</string>
+    <string name="mcp_dcr_bad_server_url">نشانی URL سرور معتبر نیست.</string>
+    <string name="mcp_dcr_no_auth_server">سرور هیچ سرور مجوزدهی معرفی نکرد.</string>
+    <string name="mcp_dcr_bad_auth_server_url">نشانی URL سرور مجوزدهی معتبر نیست.</string>
+    <string name="mcp_dcr_metadata_incomplete">فرادادهٔ سرور مجوزدهی ناقص است.</string>
+    <string name="mcp_dcr_metadata_unreadable">خواندن فراداده‌های سرور مجوزدهی ممکن نشد.</string>
+    <string name="mcp_dcr_no_pkce">این سرور مجوزدهی از PKCE (S256) که الزامی است پشتیبانی نمی‌کند.</string>
+    <string name="mcp_dcr_bad_registration_endpoint">نشانی ثبت‌نام معتبر نیست.</string>
+    <string name="mcp_dcr_registration_unreadable">پاسخ ثبت‌نام قابل خواندن نبود.</string>
+</resources>

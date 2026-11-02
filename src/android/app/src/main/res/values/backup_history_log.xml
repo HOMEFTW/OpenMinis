@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="backup_history_log_omitted">Earlier lines omitted: %1$d</string>
+</resources>

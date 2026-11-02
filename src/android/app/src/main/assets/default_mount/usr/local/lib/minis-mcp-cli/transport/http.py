@@ -30,6 +30,42 @@ TIMEOUT_SECONDS = 300  # 5 min
 _ENV_RE = re.compile(r"\$\$?\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 
+# [FEAT-261021-14 G3] Settings > Network "MCP" scope. While its local entry
+# runs, the app exports MINIS_MCP_PROXY = the entry's HTTP front with the
+# `mcp` tag (http://mcp:<password>@127.0.0.1:<port>); the entry then sends
+# each request direct, through the tailnet or through a proxy, as the MCP
+# route says. The shell's own proxy variables are ignored for MCP traffic
+# then: the MCP scope decides, not the shell's. Unset (the entry is off, or
+# an older app) = exactly as before. A server on this device's loopback is
+# never proxied.
+MCP_PROXY_ENV = "MINIS_MCP_PROXY"
+
+# A daemon outlives the shell that started it. Each IPC request carries the
+# current route; ContextVar isolates simultaneous callers without changing env.
+from contextvars import ContextVar
+request_proxy = ContextVar("minis_mcp_request_proxy", default=None)
+
+
+def proxy_kwargs(url, env=None):
+    """httpx keyword arguments routing a request to `url` per the MCP scope."""
+    if env is None and request_proxy.get() is not None:
+        env = {MCP_PROXY_ENV: request_proxy.get()}
+    proxy = (os.environ if env is None else env).get(MCP_PROXY_ENV, "").strip()
+    if not proxy:
+        return {}
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    if host in ("localhost", "::1") or host.startswith("127."):
+        return {"trust_env": False}
+    version = tuple(int(p) for p in re.findall(r"\d+", getattr(httpx, "__version__", "0"))[:2]) if httpx else (0,)
+    # `proxy=` since httpx 0.26; `proxies=` before (removed in 0.28).
+    key = "proxy" if version >= (0, 26) else "proxies"
+    return {key: proxy, "trust_env": False}
+
+
 class MCPError(Exception):
     def __init__(self, code, message, status_code=None):
         super().__init__(message)
@@ -38,12 +74,34 @@ class MCPError(Exception):
         self.status_code = status_code
 
 
+_warned_unset = set()
+
+
 def expand_env(value):
     """Replace $VAR / ${VAR} / $$VAR / $${VAR} with the environment value (empty
-    if unset)."""
+    if unset).
+
+    An unset name - missing, or disabled in Settings -> Environment Variables,
+    which keeps it out of the environment - still expands to "" so the call
+    goes ahead, but says so once per name on stderr instead of failing later
+    with a puzzling 401."""
     if not isinstance(value, str):
         return value
-    return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+
+    def _sub(m):
+        name = m.group(1)
+        found = os.environ.get(name)
+        if found is None:
+            if name not in _warned_unset:
+                _warned_unset.add(name)
+                sys.stderr.write(
+                    "minis-mcp: warning: $%s is not set (missing, or disabled in "
+                    "Settings -> Environment Variables); using an empty string\n" % name
+                )
+            return ""
+        return found
+
+    return _ENV_RE.sub(_sub, value)
 
 
 def _expand_headers(headers):
@@ -257,7 +315,8 @@ class HTTPTransport:
         if tokens.get("resource"):
             form["resource"] = tokens["resource"]
         try:
-            resp = httpx.post(token_endpoint, data=form, timeout=30)
+            resp = httpx.post(token_endpoint, data=form, timeout=30,
+                              **proxy_kwargs(token_endpoint))
         except httpx.HTTPError:
             return None
         if resp.status_code >= 400:
@@ -314,7 +373,8 @@ class HTTPTransport:
             headers["Mcp-Session-Id"] = self._session_id
         try:
             resp = httpx.post(
-                self.url, json=body, headers=headers, timeout=TIMEOUT_SECONDS
+                self.url, json=body, headers=headers, timeout=TIMEOUT_SECONDS,
+                **proxy_kwargs(self.url)
             )
         except httpx.TimeoutException:
             raise MCPError("TIMEOUT", "request timed out after %ds" % TIMEOUT_SECONDS)

@@ -371,7 +371,7 @@ internal fun ImageActionButton(
 internal suspend fun loadBitmap(context: Context, model: Any): Bitmap? =
     withContext(Dispatchers.IO) {
         try {
-            val loader = ImageLoader(context)
+            val loader = coil.Coil.imageLoader(context)
             val req = ImageRequest.Builder(context).data(model).allowHardware(false).build()
             val result = loader.execute(req)
             (result as? SuccessResult)?.drawable?.toBitmap()

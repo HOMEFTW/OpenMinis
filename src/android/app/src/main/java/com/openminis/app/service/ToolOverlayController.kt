@@ -1476,7 +1476,9 @@ class ToolOverlayController(private val context: Context) {
         val key = if (landscape) "landscape" else "portrait"
         val savedX = positionPrefs.getInt("${key}_x", -1)
         val savedY = positionPrefs.getInt("${key}_y", -1)
-        if (savedX >= 0 && savedY >= 0) return area.clamp(OverlayPlacement.Point(savedX, savedY), width, height)
+        if (positionPrefs.contains("${key}_x") && positionPrefs.contains("${key}_y")) {
+            return area.clamp(OverlayPlacement.Point(savedX, savedY), width, height)
+        }
         // Migrate the old single slot once, for the orientation actually shown.
         // It must not seed both orientations with the same physical coordinates.
         if (!positionPrefs.getBoolean("legacy_migrated", false)) {

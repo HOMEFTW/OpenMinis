@@ -325,16 +325,6 @@ internal sealed class FlatChatItem {
         override fun hashCode(): Int = message.hashCode()
     }
 
-    data class CompletedTools(
-        val messageId: String,
-        val firstToolId: String,
-        val count: Int,
-        val expanded: Boolean,
-    ) : FlatChatItem() {
-        override val key = "toolgroup:${messageId}:${firstToolId}"
-        override val contentType = "toolgroup"
-    }
-
     data class AssistantHeader(val messageId: String) : FlatChatItem() {
         override val key = "header:$messageId"
         override val contentType = "header"
@@ -464,12 +454,37 @@ internal sealed class FlatChatItem {
         override val contentType = "tool"
     }
 
+    /**
+     * [T-port-fold-tools] One folded run of consecutive tool calls: the
+     * "Ran N tools · 9s" row. Its members follow it as ordinary rows only
+     * while [expanded]. Inserted by [applyToolFolds] after the build, never by
+     * [buildFlatChatItems] itself.
+     */
+    data class AssistantToolGroup(
+        val messageId: String,
+        /** The run's expanded-state key: its first tool's tool_use id. */
+        val runKey: String,
+        val toolCount: Int,
+        val failedCount: Int,
+        val cancelledCount: Int,
+        val durationMs: Long?,
+        val expanded: Boolean,
+    ) : FlatChatItem() {
+        override val key = "toolgroup:$messageId:$runKey"
+        override val contentType = "toolgroup"
+    }
+
     data class AssistantInfo(
         val messageId: String,
         val block: AssistantBlock,
     ) : FlatChatItem() {
         override val key = "info:$messageId:${block.id}"
         override val contentType = "info"
+    }
+
+    data class AssistantUsage(val messageId: String, val usage: ChatTokenUsage, val completedAt: Long?) : FlatChatItem() {
+        override val key = "usage:$messageId"
+        override val contentType = "usage"
     }
 
     data class AssistantTyping(val messageId: String) : FlatChatItem() {
@@ -586,7 +601,6 @@ internal fun buildFlatChatItems(
             is FlatChatItem.UserBubble -> FlatChatItem.UserBubble(item.message.copy(id = "${item.message.id}#$n"), item.precededByUser)
             is FlatChatItem.ScheduledTaskCardItem -> FlatChatItem.ScheduledTaskCardItem(item.message.copy(id = "${item.message.id}#$n"), item.marker)
             is FlatChatItem.AgentCallbackCard -> item.copy(message = item.message.copy(id = "${item.message.id}#$n"))
-            is FlatChatItem.CompletedTools -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantHeader -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantText -> FlatChatItem.AssistantText(
                 messageId = "${item.messageId}#$n",
@@ -605,7 +619,9 @@ internal fun buildFlatChatItems(
             )
             is FlatChatItem.AssistantThinking -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantToolUse -> item.copy(messageId = "${item.messageId}#$n")
+            is FlatChatItem.AssistantToolGroup -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantInfo -> item.copy(messageId = "${item.messageId}#$n")
+            is FlatChatItem.AssistantUsage -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantError -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantLegacyContent -> FlatChatItem.AssistantLegacyContent(
@@ -852,43 +868,14 @@ internal fun buildFlatChatItems(
             )))
         }
 
+        if (!message.isStreaming) message.tokenUsage?.let { usage ->
+            out.add(dedupe(FlatChatItem.AssistantUsage(message.id, usage, message.completedAt)))
+        }
+
         // Inline error banner
         message.error?.let {
             out.add(dedupe(FlatChatItem.AssistantError(message.id, it)))
         }
     }
     return out
-}
-
-internal fun groupCompletedTools(
-    items: List<FlatChatItem>,
-    expandedKeys: Set<String>,
-): List<FlatChatItem> {
-    val candidates = items.map { item ->
-        val tool = item as? FlatChatItem.AssistantToolUse
-        ToolFoldCandidate(
-            tool?.messageId.orEmpty(),
-            tool != null && tool.block.toolStatus == ToolBlockStatus.SUCCESS &&
-                !com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(tool.block.toolName) &&
-                tool.block.toolName !in setOf("ask_user", "ask_question", "request_user_input"),
-        )
-    }
-    val ranges = completedToolRunRanges(candidates).associateBy { it.first }
-    if (ranges.isEmpty()) return items
-    return buildList {
-        var index = 0
-        while (index < items.size) {
-            val range = ranges[index]
-            if (range == null) {
-                add(items[index++])
-                continue
-            }
-            val first = items[index] as FlatChatItem.AssistantToolUse
-            val key = "toolgroup:${first.messageId}:${first.block.id}"
-            val expanded = key in expandedKeys
-            add(FlatChatItem.CompletedTools(first.messageId, first.block.id, range.count(), expanded))
-            if (expanded) addAll(items.subList(range.first, range.last + 1))
-            index = range.last + 1
-        }
-    }
 }

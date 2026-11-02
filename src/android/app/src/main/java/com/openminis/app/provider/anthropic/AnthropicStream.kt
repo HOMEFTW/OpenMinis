@@ -2,6 +2,7 @@ package com.openminis.app.provider.anthropic
 
 import com.openminis.app.data.model.*
 import com.openminis.app.provider.parseToolInputObject
+import com.openminis.app.provider.safeOptString
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,6 +17,8 @@ internal class AnthropicStream(private val model: String) {
     )
     private val blocks = linkedMapOf<Int, Block>()
     private var reason: String? = null
+    private var refusalCategory: String? = null
+    private var refusalExplanation: String? = null
     var completed = false
         private set
 
@@ -85,7 +88,13 @@ internal class AnthropicStream(private val model: String) {
                 }
             }
             "message_delta" -> {
-                event.optJSONObject("delta")?.opt("stop_reason")?.let { if (it is String && it.isNotBlank()) reason = it }
+                val delta = event.optJSONObject("delta")
+                delta?.opt("stop_reason")?.let { if (it is String && it.isNotBlank()) reason = it }
+                if (reason == "refusal" && delta?.has("stop_details") == true) {
+                    val details = delta?.optJSONObject("stop_details")
+                    refusalCategory = details?.safeOptString("category")?.takeIf { it.isNotBlank() && it != "null" }
+                    refusalExplanation = details?.safeOptString("explanation")?.takeIf { it.isNotBlank() && it != "null" }
+                }
             }
             "message_stop" -> {
                 if (reason == null || blocks.values.any { !it.closed }) malformed("unsettled message_stop")
@@ -116,7 +125,8 @@ internal class AnthropicStream(private val model: String) {
                 val reasoning = blocks.toSortedMap().values.filter { it.value.optString("type") == "thinking" }
                     .joinToString("") { it.value.getString("thinking") }
                 add(LLMStreamChunk.ReasoningContent(reasoning, anthropicReplay = AnthropicReplay.capture(model, replay)))
-                add(LLMStreamChunk.Finished(reason, discardToolCalls = discard))
+                add(LLMStreamChunk.Finished(reason, discardToolCalls = discard,
+                    refusalCategory = refusalCategory, refusalExplanation = refusalExplanation))
                 completed = true
             }
         }

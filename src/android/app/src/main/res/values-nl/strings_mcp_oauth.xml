@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Autorisatie</string>
+    <string name="mcp_form_auth_none">Geen</string>
+    <string name="mcp_form_auth_browser">Inloggen via browser</string>
+    <string name="mcp_signin_intro">Minis vindt de inlogpagina van deze service automatisch. Geen client-ID nodig.</string>
+    <string name="mcp_signin_signed_in">Ingelogd</string>
+    <string name="mcp_signin_expired">Inlogsessie verlopen</string>
+    <string name="mcp_signin_not_signed_in">Niet ingelogd</string>
+    <string name="mcp_signin_sign_in">Inloggen</string>
+    <string name="mcp_signin_sign_in_again">Opnieuw inloggen</string>
+    <string name="mcp_signin_reset_confirm">Opnieuw instellen</string>
+    <string name="mcp_signin_manual_fallback">Deze dienst ondersteunt geen automatische registratie. Vul hieronder de client-ID in.</string>
+    <string name="mcp_signin_not_completed">Inloggen is niet voltooid. Je kunt het opnieuw proberen.</string>
+    <string name="mcp_dcr_not_protected">Deze server vroeg niet om autorisatie, dus er is niets om te verbinden.</string>
+    <string name="mcp_dcr_bad_server_url">De server-URL is ongeldig.</string>
+    <string name="mcp_dcr_no_auth_server">De server heeft geen autorisatieserver genoemd.</string>
+    <string name="mcp_dcr_bad_auth_server_url">De URL van de autorisatieserver is ongeldig.</string>
+    <string name="mcp_dcr_metadata_incomplete">De metadata van de autorisatieserver is onvolledig.</string>
+    <string name="mcp_dcr_metadata_unreadable">Kan de metadata van de autorisatieserver niet lezen.</string>
+    <string name="mcp_dcr_no_pkce">Deze autorisatieserver ondersteunt geen PKCE (S256), wat vereist is.</string>
+    <string name="mcp_dcr_bad_registration_endpoint">Het registratie-endpoint is ongeldig.</string>
+    <string name="mcp_dcr_registration_unreadable">Het registratieantwoord kon niet worden gelezen.</string>
+</resources>

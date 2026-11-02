@@ -102,9 +102,7 @@ class ResponsesIncompletePartialTest {
     }
 
     @Test
-    fun `content_filter truncation is also preserved when text arrived`() {
-        // The reason string must not change the keep-vs-throw decision — the
-        // question is only whether the user has something to read.
+    fun `content_filter preserves partial text and terminates as a refusal`() {
         val chunks = responsesChunks(
             """
             data: {"type":"response.output_text.delta","delta":"partial before filter"}
@@ -117,7 +115,9 @@ class ResponsesIncompletePartialTest {
             "partial before filter",
             chunks.filterIsInstance<LLMStreamChunk.Text>().joinToString("") { it.text },
         )
-        assertEquals("length", chunks.filterIsInstance<LLMStreamChunk.Finished>().first().stopReason)
+        val finished = chunks.filterIsInstance<LLMStreamChunk.Finished>().single()
+        assertEquals("content_filter", finished.stopReason)
+        assertEquals(171671, chunks.filterIsInstance<LLMStreamChunk.Usage>().single().usage.inputTokens)
     }
 
     // ── Nothing usable still fails ────────────────────────────────────────

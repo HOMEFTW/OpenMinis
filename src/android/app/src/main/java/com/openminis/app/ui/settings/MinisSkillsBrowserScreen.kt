@@ -152,6 +152,11 @@ fun MinisSkillsBrowserScreen(
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
                         webViewClient = object : WebViewClient() {
+                            override fun onReceivedHttpAuthRequest(view: WebView?, handler: android.webkit.HttpAuthHandler?, host: String?, realm: String?) {
+                                if (handler != null && com.openminis.app.network.WebViewNetworkProxy.answerAuth(handler, host, realm, view?.url)) return
+                                super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                            }
+
                             override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                                 webViewRef = null
                                 rendererFailed = true
@@ -294,18 +299,10 @@ private suspend fun importSkillFromCurrentUrl(
         // updating existing" path so users can refresh in place.
         val rawUrl = toRawGitHubUrl(url)
         val content = withContext(Dispatchers.IO) {
-            val conn = URL(rawUrl).openConnection() as HttpURLConnection
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 15_000
-            try {
-                if (conn.responseCode == 200) {
-                    conn.inputStream.bufferedReader().readText()
-                } else {
-                    null
-                }
-            } finally {
-                conn.disconnect()
-            }
+            com.openminis.app.network.NetworkUrlRequest.open(
+                com.openminis.app.network.NetworkHttp.DEFAULT_TAG, rawUrl,
+                connectTimeoutMs = 15_000, readTimeoutMs = 15_000,
+            ).use { response -> if (response.code == 200) response.text() else null }
         }
 
         if (content == null) {

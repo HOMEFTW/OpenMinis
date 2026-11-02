@@ -536,17 +536,18 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
         val id = registerDownload(dest, contentLength)
         val job = downloadScope.launch {
             try {
-                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-                conn.connectTimeout = 15_000
-                conn.readTimeout = 30_000
-                conn.instanceFollowRedirects = true
-                userAgent?.takeIf { it.isNotEmpty() }?.let { conn.setRequestProperty("User-Agent", it) }
+                val headers = mutableMapOf<String, String>()
+                userAgent?.takeIf { it.isNotEmpty() }?.let { headers["User-Agent"] = it }
                 // Reuse the WebView's cookies so authenticated downloads work.
                 android.webkit.CookieManager.getInstance().getCookie(url)?.let {
-                    conn.setRequestProperty("Cookie", it)
+                    headers["Cookie"] = it
                 }
-                val total = if (contentLength > 0) contentLength else conn.contentLengthLong
-                conn.inputStream.use { input ->
+                com.openminis.app.network.NetworkUrlRequest.open(
+                    com.openminis.app.network.NetworkScope.BROWSER.tag, url,
+                    headers = headers, connectTimeoutMs = 15_000, readTimeoutMs = 30_000,
+                ).use { conn ->
+                val total = if (contentLength > 0) contentLength else conn.contentLength
+                conn.body().use { input ->
                     dest.outputStream().use { out ->
                         val buf = ByteArray(64 * 1024)
                         var copied = 0L
@@ -562,7 +563,7 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
                         }
                     }
                 }
-                conn.disconnect()
+                }
                 finishDownload(id, dest)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // User cancel is not a failure notice-worthy event: delete the
@@ -1187,6 +1188,7 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
             return null
         }
 
+        syncGlobalDefaultsFromStore()
         val id = nextTabId++
         val webView = WebView(context)
         // [T-android-minis-url-session-scope] Hand the manager a LIVE reader of
@@ -1205,6 +1207,7 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
         // Honor the resolved viewport (session override > global custom > UA default).
         val (vpW, vpH) = resolvedViewportSize()
         manager.applyViewport(vpW, vpH)
+        manager.viewportOverride = { customViewportOverride() }
 
         // Setup window.open / close handlers
         manager.onNewWindow = { resultMsg -> handleNewWindow(manager, resultMsg) }
@@ -1517,19 +1520,24 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
 
     // -- User Agent --
 
-    /** Set user agent from UI settings. Applies to all existing tabs and reloads them. */
+    private fun syncGlobalDefaultsFromStore() {
+        val prefs = context.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
+        val profileName = prefs.getString("user_agent_profile", null)
+        val profile = profileName?.let { runCatching { UserAgentProfile.valueOf(it) }.getOrNull() }
+        if (profile != null) _userAgentProfile.value = profile
+        customUserAgentString = prefs.getString("custom_user_agent", null)?.ifEmpty { null }
+        // Global custom viewport (0 = unset → fall back to UA profile).
+        // Mirrors iOS `BrowserCustomViewport{Width,Height}` UserDefaults keys.
+        _customViewportWidth.value = prefs.getInt(PREF_GLOBAL_VIEWPORT_WIDTH, 0).coerceAtLeast(0)
+        _customViewportHeight.value = prefs.getInt(PREF_GLOBAL_VIEWPORT_HEIGHT, 0).coerceAtLeast(0)
+    }
+
+
+
+    /** Settings affect tabs opened later; existing tabs retain their UA and viewport. */
     fun setUserAgentFromUI(profile: UserAgentProfile, customUA: String? = null) {
         userAgentProfile = profile
         customUserAgentString = customUA
-        for (tab in _tabs.value) {
-            tab.manager.setUserAgent(profile, customUA)
-        }
-        // `setUserAgent` resets each tab's layout to the new UA profile's
-        // default viewport. Re-apply the resolved viewport so a session or
-        // global custom override isn't silently clobbered by a UA switch.
-        // applyViewportToAllTabs is suspend because it awaits tab reloads;
-        // fire-and-forget since this is called from the UI thread.
-        evictionScope.launch { applyViewportToAllTabs() }
     }
 
     // -- Release --
@@ -1762,6 +1770,16 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
         return userAgentProfile.viewportSize
     }
 
+    private fun customViewportOverride(): Pair<Int, Int>? {
+        if (_sessionViewportWidth.value > 0 && _sessionViewportHeight.value > 0) {
+            return _sessionViewportWidth.value to _sessionViewportHeight.value
+        }
+        if (_customViewportWidth.value > 0 && _customViewportHeight.value > 0) {
+            return _customViewportWidth.value to _customViewportHeight.value
+        }
+        return null
+    }
+
     /** True if a session or global custom viewport is active. */
     fun hasCustomViewport(): Boolean =
         (_sessionViewportWidth.value > 0 && _sessionViewportHeight.value > 0) ||
@@ -1779,7 +1797,7 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
             .putInt(PREF_GLOBAL_VIEWPORT_WIDTH, _customViewportWidth.value)
             .putInt(PREF_GLOBAL_VIEWPORT_HEIGHT, _customViewportHeight.value)
             .apply()
-        applyViewportToAllTabs()
+        // Global defaults apply to newly created tabs.
     }
 
     /**

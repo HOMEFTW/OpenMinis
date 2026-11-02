@@ -437,11 +437,7 @@ class BackupExporter(
         val repo = app?.providerRepositoryOrNull
         val config = repo?.config?.value ?: com.openminis.app.data.model.ProviderConfig()
         val url = File(dataDir, "provider_config.json")
-        url.writeText(
-            BackupFormat.json.encodeToString(
-                com.openminis.app.data.model.ProviderConfig.serializer(), config
-            )
-        )
+        url.writeText(BackupProviderWire.encode(config))
         var bytes = url.length()
 
         val ruleCount = exportThinkingRules(dataDir)
@@ -550,7 +546,7 @@ class BackupExporter(
         val entries = repo?.entries?.value ?: emptyList()
         if (entries.isEmpty()) return null
         val meta = entries.map {
-            BackupEnvVarMeta(id = it.id, key = it.key, note = it.note, createdAt = it.createdAt)
+            BackupEnvVarMeta(id = it.id, key = it.key, note = it.note, createdAt = it.createdAt, enabled = it.enabled)
         }
         val url = File(dataDir, "env_vars.json")
         url.writeText(

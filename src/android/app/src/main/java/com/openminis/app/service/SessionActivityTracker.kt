@@ -1,5 +1,7 @@
 package com.openminis.app.service
 
+import com.openminis.app.notification.BackgroundTurnOutcome
+
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
@@ -400,6 +402,26 @@ object SessionActivityTracker {
     private val _pendingWork = MutableStateFlow<Set<String>>(emptySet())
     val pendingWork: StateFlow<Set<String>> = _pendingWork.asStateFlow()
 
+    private val _scheduledWaits = MutableStateFlow<List<ScheduledSessionWait>>(emptyList())
+    val scheduledWaits: StateFlow<List<ScheduledSessionWait>> = _scheduledWaits.asStateFlow()
+    private val _scheduledSessions = MutableStateFlow<Set<String>>(emptySet())
+    val scheduledSessions: StateFlow<Set<String>> = _scheduledSessions.asStateFlow()
+
+    /** Called by the schedule observer after store/run/countdown-window changes. */
+    @Synchronized
+    fun setScheduledSessions(waits: List<ScheduledSessionWait>, heldSessionIds: Set<String> = waits.map { it.sessionId }.toSet()) {
+        _scheduledWaits.value = waits.toList()
+        _scheduledSessions.value = heldSessionIds.toSet()
+        setPendingWork("scheduled-session-hold", heldSessionIds.map { "scheduled:$it" }.toSet())
+    }
+
+    /** Unlike activeSessions, includes chats waiting between their own scheduled fires. */
+    fun isProcessing(sessionId: String): Boolean = isActive(sessionId) || sessionId in _scheduledSessions.value
+
+    /** Disable tasks for these creators before cancelling loops (prevents a rearming race). */
+    @Volatile
+    var cancelScheduledByUser: ((Set<String>) -> Unit)? = null
+
     /** Handoffs and durable queues keep the service alive until execution or failure. */
     @Synchronized
     fun setPendingWork(owner: String, workIds: Set<String>) {
@@ -473,6 +495,7 @@ object SessionActivityTracker {
      * Cleared as soon as the listener has fired.
      */
     private val pendingErrorFlag = mutableSetOf<String>()
+    private val pendingInterruptFlag = mutableSetOf<String>()
 
     /**
      * T180-bg-notif: completion listener. Wired in MinisApp.onCreate to
@@ -486,9 +509,9 @@ object SessionActivityTracker {
      * direct ChatRepository / Notifier dependencies preserves its
      * "pure session-tracking" responsibility.
      */
-    private var completionListener: ((sessionId: String, isError: Boolean) -> Unit)? = null
+    private var completionListener: ((sessionId: String, outcome: BackgroundTurnOutcome) -> Unit)? = null
 
-    fun setCompletionListener(listener: ((sessionId: String, isError: Boolean) -> Unit)?) {
+    fun setCompletionListener(listener: ((sessionId: String, outcome: BackgroundTurnOutcome) -> Unit)?) {
         completionListener = listener
     }
 
@@ -547,6 +570,12 @@ object SessionActivityTracker {
      */
     fun init(context: Context) {
         appContext = context.applicationContext
+        com.openminis.app.scheduled.ScheduledSessionCoordinator.install(context)
+        OAuthWaitKeepAlive.install(context)
+        com.openminis.app.agent.jobs.UserQuestionRegistry.initialize(context)
+        (context.applicationContext as? com.openminis.app.MinisApp)?.let { app ->
+            UserQuestionNotifications.startRestoring(context, app.isAppForegroundFlow)
+        }
     }
 
     /**
@@ -565,6 +594,8 @@ object SessionActivityTracker {
         // "begins" only on the empty → non-empty edge. A second concurrent
         // session joining an in-flight run must not restart the clock.
         val wasRunIdle = _activeSessions.value.isEmpty()
+        synchronized(pendingErrorFlag) { pendingErrorFlag.remove(sessionId) }
+        synchronized(pendingInterruptFlag) { pendingInterruptFlag.remove(sessionId) }
         _activeSessions.value = _activeSessions.value + sessionId
         if (onStop != null) {
             synchronized(streamCancellers) { streamCancellers[sessionId] = onStop }
@@ -611,6 +642,7 @@ object SessionActivityTracker {
         markTaskFinished(sessionId)
         synchronized(streamCancellers) { streamCancellers.remove(sessionId) }
         val wasError = synchronized(pendingErrorFlag) { pendingErrorFlag.remove(sessionId) }
+        val wasInterrupted = synchronized(pendingInterruptFlag) { pendingInterruptFlag.remove(sessionId) }
         Log.d(TAG, "Session deactivated: $sessionId (total: ${_activeSessions.value.size})")
 
         if (_activeSessions.value.isEmpty()) {
@@ -652,7 +684,9 @@ object SessionActivityTracker {
         // Skip if the session was never marked active (defensive — keeps
         // the "completed" semantic honest).
         if (wasActive) {
-            completionListener?.invoke(sessionId, wasError)
+            completionListener?.invoke(sessionId, BackgroundTurnOutcome.decide(
+                streamError = wasError, turnError = false, canResume = wasInterrupted, userStopped = false,
+            ))
         }
     }
 
@@ -665,6 +699,13 @@ object SessionActivityTracker {
     fun markStreamError(sessionId: String) {
         synchronized(pendingErrorFlag) { pendingErrorFlag.add(sessionId) }
     }
+
+    @Synchronized
+    fun markStreamInterrupted(sessionId: String) {
+        if (sessionId !in _activeSessions.value) return
+        synchronized(pendingInterruptFlag) { pendingInterruptFlag.add(sessionId) }
+    }
+
 
     /**
      * T166: marks the user as present in a chat (composer is mounted,
@@ -735,6 +776,14 @@ object SessionActivityTracker {
      * so iterating the live map would ConcurrentModificationException.
      */
     fun cancelAllActiveStreams() {
+        val questions = com.openminis.app.agent.jobs.UserQuestionRegistry.pending.value.keys
+        val creators = _scheduledSessions.value + _activeSessions.value + questions
+        runCatching { cancelScheduledByUser?.invoke(creators) }
+            .onFailure { Log.w(TAG, "scheduled canceller threw: ${it.javaClass.simpleName}") }
+        questions.forEach { sessionId ->
+            runCatching { com.openminis.app.agent.jobs.UserQuestionRegistry.cancelSession(sessionId) }
+                .onFailure { Log.w(TAG, "question canceller threw: ${it.javaClass.simpleName}") }
+        }
         val snapshot = synchronized(streamCancellers) { streamCancellers.values.toList() }
         Log.d(TAG, "cancelAllActiveStreams: dispatching to ${snapshot.size} session(s)")
         for (cancel in snapshot) {

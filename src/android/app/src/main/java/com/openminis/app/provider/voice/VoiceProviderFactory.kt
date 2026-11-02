@@ -42,9 +42,11 @@ object VoiceProviderFactory {
                         instance.id,
                         custom ?: "https://openrouter.ai/api",
                         apiKey,
-                    )
+                    ).also { it.customUserAgent = instance.customUserAgent }
                 }
                 when {
+                    ZhipuVoiceProvider.matches(normalizedBase) ->
+                        ZhipuVoiceProvider(instance.id, custom ?: ZhipuVoiceProvider.DEFAULT_ORIGIN, apiKey)
                     normalizedBase.contains("groq.com") ->
                         GroqVoiceProvider(instance.id, custom ?: "https://api.groq.com/openai", apiKey)
                     normalizedBase.contains("dashscope") ->
@@ -106,7 +108,7 @@ object VoiceProviderFactory {
             // [T-android-provider-type-parity] No voice support for types this
             // build cannot drive.
             ProviderType.githubCopilot, ProviderType.antigravity, ProviderType.unsupported -> null
-        }
+        }?.also { it.customUserAgent = instance.customUserAgent }
     }
 
     /**

@@ -201,9 +201,10 @@ enum class ImageEndpointMode {
  * - default: only on rate limiting (429) or server errors (5xx)
  * - always: on any error, including network errors, auth failures, etc.
  */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 enum class FallbackStrategy {
-    default,
+    @kotlinx.serialization.json.JsonNames("limited") default,
     always,
 }
 

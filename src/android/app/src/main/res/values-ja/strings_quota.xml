@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-provider-quota] Provider balance and subscription usage, from upstream strings.xml. -->
+<resources>
+    <string name="quota_source">ソース</string>
+    <string name="quota_done">完了</string>
+    <string name="quota_status_unknown">不明</string>
+    <string name="quota_status_low">低</string>
+    <string name="quota_updated">更新日</string>
+    <string name="quota_status_rate_limited">レート制限</string>
+</resources>

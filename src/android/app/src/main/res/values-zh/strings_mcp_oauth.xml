@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">授权</string>
+    <string name="mcp_form_auth_none">无</string>
+    <string name="mcp_form_auth_browser">浏览器登录</string>
+    <string name="mcp_form_auth_manual">OAuth（Client ID + Secret）</string>
+    <string name="mcp_signin_intro">Minis 会自动找到该服务的登录页,无需填写 Client ID。</string>
+    <string name="mcp_signin_signed_in">已登录</string>
+    <string name="mcp_signin_expired">登录已失效</string>
+    <string name="mcp_signin_not_signed_in">未登录</string>
+    <string name="mcp_signin_sign_in">登录</string>
+    <string name="mcp_signin_sign_in_again">重新登录</string>
+    <string name="mcp_signin_reset">重置登录…</string>
+    <string name="mcp_signin_reset_title">重置该服务的登录?</string>
+    <string name="mcp_signin_reset_message">将退出登录,并清除 Minis 在该服务上的注册信息。下次登录时会重新注册。</string>
+    <string name="mcp_signin_reset_confirm">重置</string>
+    <string name="mcp_signin_phase_discovering">正在查找登录页…</string>
+    <string name="mcp_signin_phase_registering_again">该服务已不认识本应用,正在重新注册…</string>
+    <string name="mcp_signin_phase_waiting">等待你在浏览器中完成登录…</string>
+    <string name="mcp_signin_phase_finishing">正在完成登录…</string>
+    <string name="mcp_signin_manual_fallback">该服务不支持自动注册,请在下方填写它的 Client ID。</string>
+    <string name="mcp_signin_not_completed">未完成登录,可以再试一次。</string>
+    <string name="mcp_signin_denied">未获得授权,可以再试一次。</string>
+    <string name="mcp_signin_timed_out">登录超时,可以再试一次。</string>
+    <string name="mcp_signin_registration_rejected">该服务没有接受本应用的注册。请稍后再试,或手动填写 Client ID。</string>
+    <string name="mcp_signin_grant_rejected">该服务没有接受这次登录,请重新登录。</string>
+    <string name="mcp_signin_client_rejected">该服务没有接受这个 Client ID。</string>
+    <string name="mcp_signin_reset_done">已退出登录。下次登录时会重新注册本应用。</string>
+    <string name="mcp_signin_need_name_url">请先填写服务器名称和 URL。</string>
+    <string name="mcp_dcr_not_protected">该服务器没有要求授权,无需连接。</string>
+    <string name="mcp_dcr_bad_server_url">服务器地址无效。</string>
+    <string name="mcp_dcr_no_auth_server">服务器未指明授权服务器。</string>
+    <string name="mcp_dcr_bad_auth_server_url">授权服务器地址无效。</string>
+    <string name="mcp_dcr_metadata_incomplete">授权服务器的元数据不完整。</string>
+    <string name="mcp_dcr_metadata_unreadable">无法读取授权服务器的元数据。</string>
+    <string name="mcp_dcr_no_pkce">该授权服务器不支持必需的 PKCE(S256)。</string>
+    <string name="mcp_dcr_bad_registration_endpoint">注册端点无效。</string>
+    <string name="mcp_dcr_registration_refused">授权服务器拒绝了注册（HTTP %1$d）。</string>
+    <string name="mcp_dcr_registration_unreadable">无法读取注册响应。</string>
+    <string name="mcp_dcr_http_status">%1$s 返回了 HTTP %2$d。</string>
+    <string name="mcp_dcr_unreadable">%1$s 返回的数据无法读取。</string>
+</resources>

@@ -67,6 +67,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.style.BaselineShift
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -584,6 +585,7 @@ private fun parseInline(
 ): AnnotatedString = buildAnnotatedString {
     var i = 0
     val len = text.length
+    val htmlPairs = InlineHtmlTags.LazyPairs(text)
 
     while (i < len) {
         // Escaped character
@@ -684,10 +686,59 @@ private fun parseInline(
             }
         }
 
+        if (text[i] == '&') {
+            val entity = InlineHtmlTags.entityAt(text, i)
+            if (entity != null) {
+                append(entity.first)
+                i += entity.second
+                continue
+            }
+        }
+        if (text[i] == '<' && InlineHtmlTags.mayStartTag(text, i)) {
+            val br = InlineHtmlTags.brLength(text, i)
+            if (br > 0) {
+                append('\n')
+                i = InlineHtmlTags.afterBr(text, i, br)
+                continue
+            }
+            val open = InlineHtmlTags.openAt(text, i)
+            if (open != null) {
+                val close = htmlPairs.closeOf(i)
+                if (close != -1) {
+                    val inner = text.substring(i + open.length, close)
+                    withStyle(inlineHtmlStyle(open.kind, inlineCodeColor, inlineCodeBg, baseStyle)) {
+                        append(parseInline(inner, color, baseStyle, inlineCodeBg, inlineCodeColor, linkColor, linkListener))
+                    }
+                    i = InlineHtmlTags.closeEnd(text, close, open)
+                    continue
+                }
+            }
+        }
+
         // Regular character
         append(text[i])
         i++
     }
+}
+
+private fun inlineHtmlStyle(
+    kind: InlineHtmlTags.Kind,
+    inlineCodeColor: Color,
+    inlineCodeBg: Color,
+    baseStyle: TextStyle,
+): SpanStyle = when (kind) {
+    InlineHtmlTags.Kind.BOLD -> SpanStyle(fontWeight = FontWeight.Bold)
+    InlineHtmlTags.Kind.ITALIC -> SpanStyle(fontStyle = FontStyle.Italic)
+    InlineHtmlTags.Kind.UNDERLINE -> SpanStyle(textDecoration = TextDecoration.Underline)
+    InlineHtmlTags.Kind.STRIKE -> SpanStyle(textDecoration = TextDecoration.LineThrough)
+    InlineHtmlTags.Kind.CODE -> SpanStyle(
+        fontFamily = FontFamily.Monospace,
+        color = inlineCodeColor,
+        background = inlineCodeBg,
+        fontSize = (baseStyle.fontSize.value * 0.85).sp,
+    )
+    InlineHtmlTags.Kind.SUB -> SpanStyle(baselineShift = BaselineShift.Subscript, fontSize = (baseStyle.fontSize.value * 0.75).sp)
+    InlineHtmlTags.Kind.SUP -> SpanStyle(baselineShift = BaselineShift.Superscript, fontSize = (baseStyle.fontSize.value * 0.75).sp)
 }
 
 // ─── Media blocks (inline image / video / audio) ────────────────────────────

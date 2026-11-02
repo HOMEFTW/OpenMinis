@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 internal class KimiSubscriptionUsageClient(
     client: OkHttpClient = defaultClient,
     private val endpoint: HttpUrl = USAGE_URL.toHttpUrl(),
+    private val netTag: String? = null,
 ) {
     companion object {
         // Official CLI: auth/platforms.py base URL + ui/shell/usage.py /usages.
@@ -40,7 +41,8 @@ internal class KimiSubscriptionUsageClient(
             currentCoroutineContext().ensureActive()
             val request = Request.Builder().url(endpoint).get()
                 .header("Authorization", "Bearer $token").header("Accept", "application/json").build()
-            val response = http.newCall(request).readProviderResponse()
+            val response = com.openminis.app.network.NetworkHttp.client(netTag, http)
+                .newCall(request).readProviderResponse()
             when (response.status) {
                 401, 403 -> failed(KimiUsageFailure.AUTHENTICATION)
                 429 -> failed(KimiUsageFailure.RATE_LIMITED)

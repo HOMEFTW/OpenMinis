@@ -2115,7 +2115,7 @@
     <string name="chat_wallpaper_transparency_value">背景透明度 · %1$d%%</string>
     <string name="chat_wallpaper_visible">0% · 完全顯示</string>
     <string name="chat_wallpaper_transparent">100% · 完全透明</string>
-    <string name="chat_wallpaper_default_hint">未單獨調整的對話使用此預設透明度。背景隨 DeepSeek、GPT、Claude 模型自動切換，其他模型使用純色背景。也可在對話選單中單獨調整透明度或關閉背景。</string>
+    <string name="chat_wallpaper_default_hint">未單獨調整的對話使用此預設透明度。背景隨 DeepSeek、GPT、Claude、Grok 模型自動切換，其他模型使用純色背景。也可在對話選單中單獨調整透明度或關閉背景。</string>
     <string name="chat_wallpaper_following_default">正在使用設定中的預設透明度。</string>
     <string name="chat_wallpaper_override">目前透明度僅適用於此對話。</string>
     <string name="chat_wallpaper_restore_default">還原預設透明度</string>

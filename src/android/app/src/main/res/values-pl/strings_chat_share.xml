@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-multi-select-share] Share Chat picker and export, from upstream strings.xml. -->
+<resources>
+    <string name="chat_share_n_selected">Wybrano: %1$d</string>
+    <string name="chat_share_select_all">Zaznacz wszystko</string>
+    <string name="chat_share_deselect_all">Odznacz wszystko</string>
+</resources>

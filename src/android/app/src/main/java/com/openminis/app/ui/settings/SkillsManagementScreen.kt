@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
@@ -285,6 +286,7 @@ fun SkillsManagementScreen(
             } else {
                 filteredSkills.forEachIndexed { index, skill ->
                     val (badgeIcon, badgeColor) = sourceIconAndColor(skill.importSource)
+                    val sourceUrl = SkillSourceUrl.copyable(skill)
                     SettingsRow(
                         title = skill.name,
                         subtitle = skill.description.takeIf { it.isNotEmpty() }?.let { stripMarkdown(it) },
@@ -295,6 +297,15 @@ fun SkillsManagementScreen(
                             // Source badge + Switch. Wrapping in a Row keeps
                             // them visually grouped before the row's chevron.
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (sourceUrl != null) {
+                                    IconButton(onClick = { SkillSourceUrl.copy(context, sourceUrl) }) {
+                                        Icon(
+                                            Icons.Default.ContentCopy,
+                                            contentDescription = stringResource(R.string.skill_copy_source_url),
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
                                 Icon(
                                     badgeIcon,
                                     contentDescription = null,
@@ -559,11 +570,10 @@ private fun downloadSkillFromUrl(url: String): String? {
         withFile.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/").replace("/tree/", "/")
     } else url
 
-    val connection = java.net.URL(rawUrl).openConnection() as java.net.HttpURLConnection
-    connection.connectTimeout = 15_000
-    connection.readTimeout = 15_000
-    return try { if (connection.responseCode == 200) connection.inputStream.bufferedReader().readText() else null }
-    finally { connection.disconnect() }
+    return com.openminis.app.network.NetworkUrlRequest.open(
+        com.openminis.app.network.NetworkHttp.DEFAULT_TAG, rawUrl,
+        connectTimeoutMs = 15_000, readTimeoutMs = 15_000,
+    ).use { response -> if (response.code == 200) response.text() else null }
 }
 
 // ─── Skill Detail Sheet ─────────────────────────────────────────────────────
@@ -647,6 +657,7 @@ fun SkillDetailScreen(
         SkillRepository.ImportSource.BUNDLED -> stringResource(R.string.skill_detail_source_bundled)
         SkillRepository.ImportSource.SESSION -> stringResource(R.string.skill_detail_source_session)
     }
+    val sourceUrl = SkillSourceUrl.copyable(skill)
 
     Scaffold(
         topBar = {
@@ -738,6 +749,15 @@ fun SkillDetailScreen(
                     Text(stringResource(R.string.skill_detail_label_source), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(120.dp))
                     Spacer(Modifier.weight(1f))
                     Text(sourceLabel, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (sourceUrl != null) {
+                        IconButton(onClick = { SkillSourceUrl.copy(context, sourceUrl) }) {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = stringResource(R.string.skill_copy_source_url),
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
                 }
             }
 

@@ -39,6 +39,12 @@ class RequestProviderCacheTest {
         val routed = current
         instance.useResponsesAPI = true
         assertNotSame(routed, resolve())
+        val endpointType = current
+        instance = instance.copy(providerType = ProviderType.openAIResponses)
+        assertNotSame(endpointType, resolve())
+        val typed = current
+        instance = instance.copy(credentialType = ProviderCredential.oauth)
+        assertNotSame(typed, resolve())
         val protocol = current
         instance.responseTimeoutSeconds = 30
         assertNotSame(protocol, resolve())

@@ -336,6 +336,7 @@ internal class FreshProcessShell(
         cmd.add("--link2symlink")
         // Requires the pinned OpenMinis PRoot fork with rtnetlink emulation.
         cmd.add("--fake-netlink")
+        cmd.addAll(com.openminis.app.network.ShellTransparentNet.prootArgs(rootfsManager.prootBinary))
         cmd.add("-r"); cmd.add(rootfsManager.rootfsDir.absolutePath)
         cmd.add("-b"); cmd.add("/dev")
         cmd.add("-b"); cmd.add("/proc")
@@ -345,7 +346,7 @@ internal class FreshProcessShell(
             cmd.add("-b"); cmd.add("$hostPath:$linuxPath")
         }
         val handlers = NativeOffloadServer.registeredHandlers
-        if (handlers.isNotEmpty()) {
+        if (handlers.isNotEmpty() && NativeOffloadServer.awaitListening()) {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
         // Only pass flags supported by this checkout's bundled PRoot binary.
@@ -376,6 +377,7 @@ internal class FreshProcessShell(
         if (debugOffload) env["MINIS_NOFF_DEBUG"] = "1"
         env["MINIS_CHAT_SESSION_ID"] = sessionId
         for ((k, v) in PRootKernel.customEnvironment) env[k] = v
+        env.putAll(com.openminis.app.network.NetworkShellEnvironment.proxyVariables())
         // User-configured variables go in as real environment entries rather
         // than `export` lines written to a shared stdin — one more thing the
         // warm path had to do that this one does not.
@@ -383,7 +385,7 @@ internal class FreshProcessShell(
         if (useNoSeccomp) {
             env[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
         }
-        return pb.start()
+        return SpawnSignalMask.start(pb)
     }
 
     /**

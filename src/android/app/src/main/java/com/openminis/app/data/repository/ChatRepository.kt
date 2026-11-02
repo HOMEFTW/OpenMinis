@@ -49,12 +49,13 @@ class ChatRepository(internal val dao: ChatDao) {
         val storageOwners = SessionStorageOwners.collect(listOfNotNull(session.id, parentSessionId),
             { dao.getSession(it)?.parentSessionId }, SessionWorkspaceRegistry::owner)
         SessionStorageMaintenanceGate.shared.withSessionActivity(storageOwners) {
-            dao.insertSession(session)
+            if (parentSessionId == null) dao.insertSession(session) else dao.insertChildSession(session)
         }
         return session
     }
 
-    suspend fun getSession(id: String): ChatSessionEntity? = dao.getSession(id)
+    suspend fun getSession(id: String): ChatSessionEntity? =
+        SessionStorageMaintenanceGate.shared.withSessionActivity(setOf(id)) { dao.getSession(id) }
 
     /** Draft preferences stay in memory until the first message creates the session. */
     suspend fun updateSessionThinkingOverride(sessionId: String, level: String) {
@@ -127,6 +128,11 @@ class ChatRepository(internal val dao: ChatDao) {
         dao.updateSessionTitleAndCategory(id, title, category, System.currentTimeMillis())
     }
 
+    /** [T-sessions-cli-update] Set the icon (category); null = the default icon. */
+    suspend fun updateSessionCategory(id: String, category: String?) {
+        dao.updateSessionCategory(id, category, System.currentTimeMillis())
+    }
+
     suspend fun updateSessionTitleIfUnchanged(id: String, expectedTitle: String?, title: String, category: String? = null): Boolean =
         dao.updateSessionTitleIfUnchanged(id, expectedTitle, title, category, System.currentTimeMillis()) == 1
 
@@ -168,6 +174,9 @@ class ChatRepository(internal val dao: ChatDao) {
         dao.deleteMessages(id)
         dao.deleteSession(id)
     }
+
+    internal suspend fun deleteOrphanTreeIfUnchanged(rootId: String, ids: List<String>, olderThanMs: Long): Boolean =
+        dao.deleteOrphanTreeIfUnchanged(rootId, ids, olderThanMs)
 
     // ─── Session groups ("folders") ────────────────────────────────────────
     // [T-android-session-grouping] Ported from iOS ChatStore's Folders section.
@@ -313,28 +322,33 @@ class ChatRepository(internal val dao: ChatDao) {
      *    result shows why it is one.
      *  - On an SQLite without JSON functions the raw-JSON query runs instead;
      *    its rows are still subject to the drop rule.
+     *  - [T-search-multi-keyword] (iOS b09df3824) Whitespace separates
+     *    keywords ([SessionSearch.searchTerms], at most 10) and a session
+     *    holding ANY of them is a result; `%` and `_` match literally. One
+     *    keyword gives the sessions the whole-string search always gave.
      */
     suspend fun searchSessionsWithHits(query: String): List<SessionSearchResult> {
-        val q = query.trim()
-        if (q.isEmpty()) return emptyList()
-        val like = "%$q%"
+        val terms = SessionSearch.searchTerms(query)
+        if (terms.isEmpty()) return emptyList()
+        val args = SessionSearch.searchArgs(terms)
         var visibleOnly = true
         val rows = try {
-            dao.runSessionSearchQuery(androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.VISIBLE_SEARCH_SQL, arrayOf(like, q)))
+            dao.runSessionSearchQuery(androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.visibleSearchSql(terms.size), args))
         } catch (e: android.database.sqlite.SQLiteException) {
             android.util.Log.w("ChatRepository", "[Search] visible-field query unavailable (${e.message}) — raw-JSON fallback")
             visibleOnly = false
-            dao.runSessionSearchQuery(androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.LEGACY_SEARCH_SQL, arrayOf(like, q)))
+            dao.runSessionSearchQuery(androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.legacySearchSql(terms.size), args))
         }
         var lookbackBudget = SessionSearch.OLDER_LOOKBACK_SESSIONS
         var dropped = 0
         val out = ArrayList<SessionSearchResult>(rows.size)
         for (row in rows) {
-            val titleMatched = row.session.title?.contains(q, ignoreCase = true) == true
-            var snippet = row.hitPartsJson?.let { SessionSearch.searchSnippet(it, q) }
+            val title = row.session.title
+            val titleMatched = title != null && SessionSearch.firstHit(title, terms) != null
+            var snippet = row.hitPartsJson?.let { SessionSearch.searchSnippet(it, terms) }
             if (snippet == null && row.hitPartsJson != null && lookbackBudget > 0) {
                 lookbackBudget--
-                snippet = olderSearchSnippet(row.session.id, like, q, visibleOnly)
+                snippet = olderSearchSnippet(row.session.id, terms, visibleOnly)
             }
             if (!titleMatched && snippet == null) {
                 dropped++
@@ -352,15 +366,18 @@ class ChatRepository(internal val dao: ChatDao) {
     }
 
     /** The newest match was already tried; look through the next few. */
-    private suspend fun olderSearchSnippet(sessionId: String, like: String, query: String, visibleOnly: Boolean): String? {
+    private suspend fun olderSearchSnippet(sessionId: String, terms: List<String>, visibleOnly: Boolean): String? {
         val older = try {
             dao.runPartsJsonQuery(
-                androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.olderMatchesSql(visibleOnly), arrayOf(like, sessionId, query.trim())),
+                androidx.sqlite.db.SimpleSQLiteQuery(
+                    SessionSearch.olderMatchesSql(visibleOnly, terms.size),
+                    SessionSearch.searchArgs(terms) + sessionId,
+                ),
             )
         } catch (e: android.database.sqlite.SQLiteException) {
             return null
         }
-        return older.drop(1).firstNotNullOfOrNull { SessionSearch.searchSnippet(it.partsJson, query) }
+        return older.drop(1).firstNotNullOfOrNull { SessionSearch.searchSnippet(it.partsJson, terms) }
     }
 
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>> =
@@ -656,9 +673,25 @@ class ChatRepository(internal val dao: ChatDao) {
         limit: Int,
         startMs: Long?,
         endMs: Long?,
+        /**
+         * [T-sessions-cli-update] `list --group`: null = no filter; an empty
+         * list = ungrouped sessions only (no folder, or a folder that is not
+         * here - the list renders those as ungrouped too); otherwise members
+         * of any of these folder ids.
+         */
+        folderIds: List<String>? = null,
     ): List<SessionMeta> {
         val conditions = mutableListOf<String>()
         val args = mutableListOf<Any>()
+
+        if (folderIds != null) {
+            if (folderIds.isEmpty()) {
+                conditions += "(s.folder_id IS NULL OR s.folder_id NOT IN (SELECT id FROM folders))"
+            } else {
+                conditions += "s.folder_id IN (${folderIds.joinToString(",") { "?" }})"
+                args.addAll(folderIds)
+            }
+        }
 
         if (!sessionIds.isNullOrEmpty()) {
             conditions += "s.id IN (${sessionIds.joinToString(",") { "?" }})"
@@ -689,7 +722,8 @@ class ChatRepository(internal val dao: ChatDao) {
                     WHERE m2.session_id = s.id AND m2.role = 'user'
                     ORDER BY m2.sort_order ASC LIMIT 1) AS first_user_msg,
                    s.source, s.created_at, s.updated_at,
-                   (SELECT COUNT(*) FROM messages m3 WHERE m3.session_id = s.id) AS msg_count
+                   (SELECT COUNT(*) FROM messages m3 WHERE m3.session_id = s.id) AS msg_count,
+                   s.folder_id, s.category
             FROM sessions s
             $where
             ORDER BY s.updated_at DESC
@@ -712,6 +746,8 @@ class ChatRepository(internal val dao: ChatDao) {
                 startedAt = r.createdAt,
                 lastActive = r.updatedAt,
                 messageCount = r.msgCount,
+                folderId = r.folderId,
+                category = r.category,
             )
         }
     }
@@ -1240,6 +1276,9 @@ data class SessionMeta(
     val startedAt: Long,    // ms — sessions.created_at
     val lastActive: Long,   // ms — sessions.updated_at
     val messageCount: Int,
+    /** [T-sessions-cli-update] Group id (null = ungrouped) and icon (category). */
+    val folderId: String? = null,
+    val category: String? = null,
 )
 
 /** T188: a single matching message returned by `minis-sessions-cli search`. */

@@ -6,9 +6,9 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AnthropicStreamRegressionTest {
-    @Test fun `Claude 5 off never emits the unsupported disabled literal`() {
+    @Test fun `explicit disabled support includes Sonnet 5 and Claude 4 point 6`() {
         assertTrue(AnthropicProvider.modelAcceptsExplicitThinkingDisabled("claude-opus-4-6"))
-        assertFalse(AnthropicProvider.modelAcceptsExplicitThinkingDisabled("claude-sonnet-5"))
+        assertTrue(AnthropicProvider.modelAcceptsExplicitThinkingDisabled("claude-sonnet-5"))
         assertFalse(AnthropicProvider.modelAcceptsExplicitThinkingDisabled("claude-sonnet-4-5"))
     }
 

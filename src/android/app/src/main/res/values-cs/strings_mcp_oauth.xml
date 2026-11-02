@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-mcp-oauth-signin] Remote MCP browser sign-in and discovery, from upstream strings.xml. -->
+<resources>
+    <string name="mcp_form_auth_mode">Autorizace</string>
+    <string name="mcp_form_auth_none">Žádné</string>
+    <string name="mcp_form_auth_browser">Přihlásit se v prohlížeči</string>
+    <string name="mcp_signin_intro">Minis najde přihlašovací stránku této služby automaticky. Client ID není potřeba.</string>
+    <string name="mcp_signin_signed_in">Přihlášeno</string>
+    <string name="mcp_signin_expired">Platnost přihlášení vypršela</string>
+    <string name="mcp_signin_not_signed_in">Nepřihlášeno</string>
+    <string name="mcp_signin_sign_in">Přihlásit se</string>
+    <string name="mcp_signin_sign_in_again">Přihlásit se znovu</string>
+    <string name="mcp_signin_reset_confirm">Resetovat</string>
+    <string name="mcp_signin_manual_fallback">Tato služba nepodporuje automatickou registraci. Níže zadej její Client ID.</string>
+    <string name="mcp_signin_not_completed">Přihlášení nebylo dokončeno. Můžeš to zkusit znovu.</string>
+    <string name="mcp_dcr_not_protected">Tento server nepožádal o autorizaci, takže není k čemu se připojit.</string>
+    <string name="mcp_dcr_bad_server_url">URL serveru není platná.</string>
+    <string name="mcp_dcr_no_auth_server">Server neuvedl autorizační server.</string>
+    <string name="mcp_dcr_bad_auth_server_url">URL autorizačního serveru není platná.</string>
+    <string name="mcp_dcr_metadata_incomplete">Metadata autorizačního serveru jsou neúplná.</string>
+    <string name="mcp_dcr_metadata_unreadable">Nepodařilo se načíst metadata autorizačního serveru.</string>
+    <string name="mcp_dcr_no_pkce">Tento autorizační server nepodporuje PKCE (S256), které je vyžadováno.</string>
+    <string name="mcp_dcr_bad_registration_endpoint">Registrační endpoint není platný.</string>
+    <string name="mcp_dcr_registration_unreadable">Odpověď na registraci se nepodařilo přečíst.</string>
+</resources>

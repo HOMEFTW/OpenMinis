@@ -34,6 +34,9 @@ data class SessionMetaRow(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "updated_at") val updatedAt: Long,
     @ColumnInfo(name = "msg_count") val msgCount: Int,
+    /** [T-sessions-cli-update] Group membership and icon (category) for `list`. */
+    @ColumnInfo(name = "folder_id") val folderId: String? = null,
+    val category: String? = null,
 )
 
 /**
@@ -152,11 +155,23 @@ interface ChatDao {
     @Upsert
     suspend fun insertSession(session: ChatSessionEntity)
 
+    /** A child queued behind file maintenance must not recreate a deleted parent tree. */
+    @androidx.room.Transaction
+    suspend fun insertChildSession(session: ChatSessionEntity) {
+        val parent = requireNotNull(session.parentSessionId)
+        check(getSession(parent) != null) { "Parent session no longer exists" }
+        insertSession(session)
+    }
+
     @Query("UPDATE sessions SET title = :title, updated_at = :updatedAt WHERE id = :id")
     suspend fun updateSessionTitle(id: String, title: String, updatedAt: Long)
 
     @Query("UPDATE sessions SET title = :title, category = COALESCE(:category, category), updated_at = :updatedAt WHERE id = :id")
     suspend fun updateSessionTitleAndCategory(id: String, title: String, category: String?, updatedAt: Long)
+
+    /** [T-sessions-cli-update] Set the icon (category); null = the default icon. */
+    @Query("UPDATE sessions SET category = :category, updated_at = :updatedAt WHERE id = :id")
+    suspend fun updateSessionCategory(id: String, category: String?, updatedAt: Long)
 
     @Query("UPDATE sessions SET title = :title, category = COALESCE(:category, category), updated_at = :updatedAt WHERE id = :id AND title IS :expectedTitle")
     suspend fun updateSessionTitleIfUnchanged(id: String, expectedTitle: String?, title: String, category: String?, updatedAt: Long): Int
@@ -207,6 +222,31 @@ interface ChatDao {
         """
     )
     suspend fun orphanChildSessionIds(olderThanMs: Long): List<String>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id IN (:sessionIds) AND created_at >= :olderThanMs)")
+    suspend fun hasRecentMessages(sessionIds: List<String>, olderThanMs: Long): Boolean
+
+    /** Validate and delete exactly the claimed tree in one Room transaction. */
+    @androidx.room.Transaction
+    suspend fun deleteOrphanTreeIfUnchanged(rootId: String, expectedIds: List<String>, olderThanMs: Long): Boolean {
+        if (expectedIds.isEmpty() || expectedIds.last() != rootId || expectedIds.distinct().size != expectedIds.size) return false
+        val root = getSession(rootId) ?: return false
+        val parent = root.parentSessionId?.takeIf { it.isNotBlank() } ?: return false
+        if (getSession(parent) != null) return false
+        val currentIds = com.openminis.app.data.session.SessionTree.subtreeDeepestFirst(rootId) { childSessionIds(it) }
+        if (currentIds != expectedIds) return false
+        for (id in expectedIds) {
+            val row = getSession(id) ?: return false
+            if (row.updatedAt >= olderThanMs) return false
+        }
+        // Also catch a raw message insert that has not yet touched its session row.
+        if (hasRecentMessages(expectedIds, olderThanMs)) return false
+        for (id in expectedIds) {
+            deleteMessages(id)
+            deleteSession(id)
+        }
+        return true
+    }
 
     /**
      * [T-android-search-visible-only] Session-list search. Raw because the SQL
@@ -299,6 +339,10 @@ interface ChatDao {
     /** Clear membership for every session of a group — the dissolve half. */
     @Query("UPDATE sessions SET folder_id = NULL WHERE folder_id = :folderId")
     suspend fun clearFolderForSessions(folderId: String)
+
+    /** [T-multi-select-share] When the earliest of these rows was written (the share export header's date). */
+    @Query("SELECT MIN(created_at) FROM messages WHERE id IN (:ids)")
+    suspend fun earliestCreatedAt(ids: List<String>): Long?
 
     // Messages
     @androidx.room.Transaction

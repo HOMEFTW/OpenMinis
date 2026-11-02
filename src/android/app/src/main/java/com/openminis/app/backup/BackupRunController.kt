@@ -190,7 +190,7 @@ object BackupRunController {
         writeHistory(history, record)
 
         fun note(line: String, problem: Boolean = false) {
-            log.add(BackupHistory.LogEntry(System.currentTimeMillis(), line, problem))
+            BackupLogRules.append(log, BackupHistory.LogEntry(System.currentTimeMillis(), line, problem))
         }
         fun progress(line: String) {
             _statusText.value = line
@@ -459,6 +459,7 @@ object BackupRunController {
                 break
             }
             try {
+                val progressGate = PercentGate()
                 onProgress("Sending to ${remote.name}…")
                 if (com.openminis.app.backup.remote.RcloneRemoteStore.isLocalFolder(remote.backend)) {
                     val treeUri = remote.params[
@@ -469,12 +470,12 @@ object BackupRunController {
                     }
                     localDelivery.deliver(packageFile, treeUri, isCancelled) { sent, total ->
                         val pct = if (total > 0) (sent * 100 / total) else 0
-                        onProgress("Saving to ${remote.name}… $pct%")
+                        if (progressGate.admit(pct.toInt())) onProgress("Saving to ${remote.name}… $pct%")
                     }
                 } else {
                     uploader.upload(packageFile, remote, backupId, isCancelled = isCancelled) { p ->
                         val pct = if (p.totalBytes > 0) (p.bytesSent * 100 / p.totalBytes) else 0
-                        onProgress("Sending to ${remote.name}… $pct%")
+                        if (progressGate.admit(pct.toInt())) onProgress("Sending to ${remote.name}… $pct%")
                     }
                 }
                 outcomes.add(

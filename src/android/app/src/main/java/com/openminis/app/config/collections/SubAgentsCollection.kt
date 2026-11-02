@@ -1,6 +1,7 @@
 package com.openminis.app.config.collections
 
 import com.openminis.app.config.*
+import com.openminis.app.config.readable.*
 import com.openminis.app.config.fields.ClosureField
 import com.openminis.app.data.model.SubAgentDefinition
 import com.openminis.app.data.model.SubAgentLimits
@@ -44,6 +45,14 @@ class SubAgentsCollection(private val repo: ProviderRepository) : ConfigCollecti
     override val basePath = "subagents"
     override val displayName = "Sub agents"
     override val description = "The configured sub agent roster. The built-in agent cannot be renamed or removed."
+    override val readableSubjectFormat = "Sub agent “%1\$@” – %2\$@"
+    override fun entityLabel(id: String): String? = repo.subAgent(id)?.name
+    override fun readableForAdd(payload: RedactedConfigValue): List<ReadableLine> = listOf(
+        ReadableLine("%@: new entry added", listOf(ReadableArg.Key("Sub agent"))),
+    )
+    override fun readableForRemove(id: String): List<ReadableLine> = listOf(
+        ReadableLine("%1\$@: removed %2\$@", listOf(ReadableArg.Key("Sub agent"), ReadableArg.Text(entityLabel(id) ?: id))),
+    )
 
     override fun childIds(): List<String> = repo.subAgents.map { it.id }
 
@@ -59,6 +68,7 @@ class SubAgentsCollection(private val repo: ProviderRepository) : ConfigCollecti
         fun text(leaf: String, limit: Int, readOnly: Boolean = false,
                  read: (SubAgentDefinition) -> String, update: (SubAgentDefinition, String) -> SubAgentDefinition) = ClosureField(
             path = "$basePath.$forId.$leaf", displayName = leaf, description = "Sub agent $leaf.",
+            readable = if (readOnly) ConfigReadable.notWritable else ConfigReadable(if (leaf == "instructions") ConfigValueFormatter.LongText else ConfigValueFormatter.Text()),
             valueSchema = ConfigSchema.Str(maxLength = limit),
             access = if (readOnly) ConfigAccess.READONLY else ConfigAccess.READWRITE,
             reader = { ConfigValue.Str(read(current(forId))) },
@@ -73,12 +83,14 @@ class SubAgentsCollection(private val repo: ProviderRepository) : ConfigCollecti
             text("instructions", SubAgentLimits.INSTRUCTIONS_MAX_LENGTH, read = { it.instructions }) { item, value -> item.copy(instructions = value) },
             ClosureField(
                 path = "$basePath.$forId.model_group", displayName = "Model group", description = "Configured model group ID, or null for Auto.",
+                readable = ConfigReadable(ConfigValueFormatter.Ref(ConfigRefKind.Group)),
                 valueSchema = ConfigSchema.Optional(ConfigSchema.Str()),
                 reader = { current(forId).modelGroupId?.let { ConfigValue.Str(it) } ?: ConfigValue.Null },
                 writer = { save(current(forId).copy(modelGroupId = (it as? ConfigValue.Str)?.value?.takeIf(String::isNotBlank))) },
             ),
             ClosureField(
                 path = "$basePath.$forId.thinking", displayName = "Thinking strength", description = "A thinking level, or null/\"inherit\" to use the group's default.",
+                readable = ConfigReadable(ConfigValueFormatter.EnumLabels(mapOf("inherit" to "Inherit") + ThinkingLevel.entries.associate { it.name.lowercase(Locale.ROOT) to it.name })),
                 valueSchema = ConfigSchema.Optional(ConfigSchema.StrEnum(listOf("inherit") + ThinkingLevel.entries.map { it.name.lowercase(Locale.ROOT) })),
                 reader = { current(forId).thinkingLevelOverride?.let { ConfigValue.Str(it.name.lowercase(Locale.ROOT)) } ?: ConfigValue.Null },
                 writer = { value -> save(current(forId).copy(thinkingLevelOverride = thinking((value as? ConfigValue.Str)?.value))) },

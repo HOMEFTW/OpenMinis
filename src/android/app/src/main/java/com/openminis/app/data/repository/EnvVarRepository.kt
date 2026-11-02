@@ -36,6 +36,8 @@ class EnvVarRepository(private val context: Context) {
          */
         val note: String = "",
         val createdAt: Long = System.currentTimeMillis(),
+        /** Not stored in env-vars.json. Absent state means enabled. */
+        val enabled: Boolean = true,
     )
 
     private val _entries = MutableStateFlow<List<EnvVarEntry>>(emptyList())
@@ -48,6 +50,8 @@ class EnvVarRepository(private val context: Context) {
 
     private val metadataFile: File
         get() = File(context.filesDir, METADATA_FILE)
+
+    private val states = EnvVarStateStore(context.filesDir)
 
     init {
         loadMetadata()
@@ -70,16 +74,17 @@ class EnvVarRepository(private val context: Context) {
 
     // -- CRUD --
 
-    fun add(key: String, value: String, note: String = ""): Boolean {
+    fun add(key: String, value: String, note: String = "", enabled: Boolean = true): Boolean {
         val normalizedKey = key.trim().uppercase()
         if (!isValidKey(normalizedKey)) return false
         if (isDuplicateKey(normalizedKey)) return false
 
-        val entry = EnvVarEntry(key = normalizedKey, note = note.trim())
+        val entry = EnvVarEntry(key = normalizedKey, note = note.trim(), enabled = enabled)
         _entries.value = _entries.value + entry
         encryptedPrefs.edit().putString(normalizedKey, sanitizeValue(value)).apply()
         saveMetadata()
-        Log.i(TAG, "Added env var: $normalizedKey")
+        if (!enabled) states.setEnabled(entry.id, normalizedKey, false)
+        Log.i(TAG, "Added env var: $normalizedKey enabled=$enabled")
         return true
     }
 
@@ -105,7 +110,17 @@ class EnvVarRepository(private val context: Context) {
         // Save new value
         encryptedPrefs.edit().putString(normalizedKey, sanitizeValue(newValue)).apply()
         saveMetadata()
+        states.renamed(id, normalizedKey)
         Log.i(TAG, "Updated env var: ${current.key} → $normalizedKey")
+        return true
+    }
+
+    fun setEnabled(id: String, enabled: Boolean): Boolean {
+        val current = _entries.value.find { it.id == id } ?: return false
+        if (current.enabled == enabled && states.state(id) != null) return true
+        states.setEnabled(id, current.key, enabled)
+        _entries.value = _entries.value.map { if (it.id == id) it.copy(enabled = enabled) else it }
+        Log.i(TAG, "Env var ${current.key} enabled=$enabled")
         return true
     }
 
@@ -114,18 +129,22 @@ class EnvVarRepository(private val context: Context) {
         encryptedPrefs.edit().remove(entry.key).apply()
         _entries.value = _entries.value.filter { it.id != id }
         saveMetadata()
+        states.remove(id)
         Log.i(TAG, "Deleted env var: ${entry.key}")
     }
 
     fun getValue(key: String): String? = encryptedPrefs.getString(key, null)
 
+    fun isDisabled(key: String): Boolean =
+        _entries.value.any { it.key.equals(key, ignoreCase = true) && !it.enabled }
+
     /**
-     * Returns all env vars as a Map<String, String> for sandbox injection.
-     * Reads directly from storage to be thread-safe.
+     * Enabled variables for shell, terminal and MCP injection.
      */
     fun allAsDict(): Map<String, String> {
         val result = mutableMapOf<String, String>()
         for (entry in _entries.value) {
+            if (!entry.enabled) continue
             val value = encryptedPrefs.getString(entry.key, null)
             if (value != null) {
                 result[entry.key] = value
@@ -133,6 +152,10 @@ class EnvVarRepository(private val context: Context) {
         }
         return result
     }
+
+    /** Includes disabled secrets so tool output stays masked. */
+    fun allValuesForRedaction(): List<String> =
+        _entries.value.mapNotNull { encryptedPrefs.getString(it.key, null) }
 
     // -- Metadata Persistence --
 
@@ -155,19 +178,30 @@ class EnvVarRepository(private val context: Context) {
 
     private fun loadMetadata() {
         try {
-            if (!metadataFile.exists()) return
+            if (!metadataFile.exists()) {
+                states.prune(emptySet())
+                return
+            }
             val array = JSONArray(metadataFile.readText())
             val entries = mutableListOf<EnvVarEntry>()
+            var mintedIds = false
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
+                val id = obj.optString("id", "").ifEmpty {
+                    mintedIds = true
+                    UUID.randomUUID().toString()
+                }
                 entries.add(EnvVarEntry(
-                    id = obj.optString("id", UUID.randomUUID().toString()),
+                    id = id,
                     key = obj.optString("key", ""),
                     note = obj.optString("note", ""),
                     createdAt = obj.optLong("createdAt", 0),
+                    enabled = states.isEnabled(id),
                 ))
             }
             _entries.value = entries
+            if (mintedIds) saveMetadata()
+            states.prune(entries.map { it.id }.toSet())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load metadata: ${e.message}")
         }

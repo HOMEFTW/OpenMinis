@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [T-provider-quota] Provider balance and subscription usage, from upstream strings.xml. -->
+<resources>
+    <string name="quota_source">Kaynak</string>
+    <string name="quota_done">Bitti</string>
+    <string name="quota_status_unknown">Bilinmiyor</string>
+    <string name="quota_status_low">Düşük</string>
+    <string name="quota_updated">Güncellendi</string>
+</resources>

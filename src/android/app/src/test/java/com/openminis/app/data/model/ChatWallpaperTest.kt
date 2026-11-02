@@ -73,13 +73,25 @@ class ChatWallpaperTest {
     }
 
     @Test
+    fun `grok IDs include xai gateway namespaces and version paths`() {
+        for (id in listOf("grok", "grok-3", "grok-3-mini", "grok-4", "grok-4-fast-reasoning",
+            "grok-4-1-fast-non-reasoning", "grok-4.7", "x-ai/grok-4", "xai/grok-4.7",
+            "gateway/x-ai/grok-4.7", "grok-4/v1", "x-ai/grok-4/v1.2", "  X-AI/GROK-4.7  ")) {
+            assertEquals(id, ChatWallpaper.GROK, resolveChatWallpaper(id))
+        }
+        assertEquals(ChatWallpaper.GPT, resolveChatWallpaper("xai/gpt-6.1-sol"))
+        assertEquals(ChatWallpaper.CLAUDE, resolveChatWallpaper("x-ai/claude-sonnet-4-6"))
+    }
+
+    @Test
     fun `unknown models and embedded family names do not select wallpaper`() {
         for (id in listOf(null, "", "  ", "unknown", "gemini-3-pro", "google/gemini-3-flash",
             "qwen3", "qwen/qwen3-coder", "openai/gemini-3-pro", "openai/qwen3", "openai/unknown",
             "some-gpt", "fake-gpt6-sol", "qwen-gpt-6.1-sol", "custom-chatgpt", "custom-codex",
             "gpt6fake", "gpt-fake", "o3fake", "chatgptfake", "codexfake", "deepseekfake",
             "fake-deepseek-flash", "claudefake", "fake-claude", "notanthropic.claude-sonnet-4",
-            "gemini-3-pro-gpt", "gpt-6.1-sol/unknown", "openai/", "v4.1")) {
+            "gemini-3-pro-gpt", "gpt-6.1-sol/unknown", "openai/", "v4.1",
+            "grokfake", "fake-grok-4", "qwen-grok", "x-ai/unknown", "xai/", "grok-4/unknown")) {
             assertNull(id, resolveChatWallpaper(id))
         }
     }

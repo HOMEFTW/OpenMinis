@@ -20,6 +20,32 @@ fun AgentToolsSettingsScreen(onBack: () -> Unit) {
     var userAskEnabled by remember { mutableStateOf(AgentToolSwitch.USER_ASK.isEnabled(context)) }
     val prefs = remember { context.getSharedPreferences(AgentToolSwitch.PREFS, android.content.Context.MODE_PRIVATE) }
     var backgroundQuestions by remember { mutableStateOf(prefs.getBoolean("agent.tools.userAsk.notifyInBackground", true)) }
+    var timeoutMinutes by remember { mutableStateOf(com.openminis.app.agent.jobs.UserQuestionSettings.timeoutMinutes(context)) }
+    var showQuestionTimeout by remember { mutableStateOf(false) }
+
+    if (showQuestionTimeout) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showQuestionTimeout = false },
+            title = { androidx.compose.material3.Text(stringResource(R.string.stable115_question_timeout)) },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    com.openminis.app.agent.jobs.UserQuestionSettings.TIMEOUT_CHOICES.forEach { minutes ->
+                        SettingsChoiceRow(
+                            title = if (minutes == 0) stringResource(R.string.stable115_question_unlimited)
+                                else stringResource(R.string.stable115_question_minutes, minutes),
+                            selected = timeoutMinutes == minutes,
+                            onSelect = {
+                                timeoutMinutes = minutes
+                                com.openminis.app.agent.jobs.UserQuestionSettings.setTimeoutMinutes(context, minutes)
+                                showQuestionTimeout = false
+                            }, showDivider = false,
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+    }
 
     SettingsScaffold(title = stringResource(R.string.settings_agent_tools), onBack = onBack) {
         SettingsSection(footer = stringResource(R.string.agent_tools_browser_footer)) {
@@ -38,6 +64,12 @@ fun AgentToolsSettingsScreen(onBack: () -> Unit) {
                 title = stringResource(R.string.build34_user_questions),
                 checked = userAskEnabled,
                 onCheckedChange = { userAskEnabled = it; AgentToolSwitch.USER_ASK.setEnabled(context, it) },
+            )
+            SettingsValueRow(
+                title = stringResource(R.string.stable115_question_timeout),
+                value = if (timeoutMinutes == 0) stringResource(R.string.stable115_question_unlimited)
+                    else stringResource(R.string.stable115_question_minutes, timeoutMinutes),
+                onClick = { if (userAskEnabled) showQuestionTimeout = true },
             )
             SettingsSwitchRow(
                 title = stringResource(R.string.build34_user_questions_background),

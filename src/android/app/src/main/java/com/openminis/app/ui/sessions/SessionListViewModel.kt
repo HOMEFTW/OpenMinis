@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.openminis.app.R
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.model.LLMMessage
@@ -24,8 +25,10 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -39,14 +42,6 @@ class SessionListViewModel(
 
     companion object {
         private const val TAG = "SessionListVM"
-
-        /**
-         * [GH#210] The placeholder ChatViewModel writes for a session whose
-         * title has not been generated yet. The fallback path keys off this
-         * exact string (plus null/blank), which is what keeps a user-typed
-         * title from ever being overwritten.
-         */
-        private const val NEW_CHAT_TITLE = "New Chat"
 
         /**
          * [T-android-group-ai-suggest] Verbatim from iOS `suggestFolder`, so
@@ -157,6 +152,45 @@ class SessionListViewModel(
      */
     val searchSnippets = MutableStateFlow<Map<String, String>>(emptyMap())
 
+    /**
+     * [T-search-folder-expand] A result set for a real query has arrived (iOS
+     * `searchMatchedIds != nil`): the list groups it by folder. Cleared with
+     * the query; a new query keeps the previous set on screen until its own
+     * arrives, as on iOS.
+     */
+    val searchResultsReady = MutableStateFlow(false)
+
+    /** [T-search-folder-expand] Folders whose name matched the result set's query. */
+    val searchMatchedFolderIds = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * [T-search-folder-pages] "Show more" pages per folder in the result set
+     * (absent = the first 20). Reset whenever a new result set arrives and when
+     * the query is cleared; never mixed with [folderPages].
+     */
+    val searchFolderPages = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /**
+     * [T-search-folder-collapse] Result folders the user folded for this
+     * search (iOS 14bc208b1). Never saved and no accordion; cleared by a new
+     * result set, an emptied query and closing search. Its search pages are
+     * kept, so unfolding shows the same rows.
+     */
+    val searchCollapsedFolderIds = MutableStateFlow<Set<String>>(emptySet())
+
+    fun toggleSearchFolderCollapsed(folderId: String) {
+        searchCollapsedFolderIds.update { if (folderId in it) it - folderId else it + folderId }
+    }
+
+    /** "New chat in group" in a result set: reopen the folder if it was folded here. */
+    fun reopenSearchFolder(folderId: String) {
+        searchCollapsedFolderIds.update { it - folderId }
+    }
+
+    fun showMoreInSearchFolder(folderId: String, pagesShown: Int) {
+        searchFolderPages.update { FolderPages.afterSearchShowMore(it, folderId, pagesShown) }
+    }
+
     // The list to actually show: search results when searching, otherwise all sessions
     val displayedSessions: StateFlow<List<ChatSessionEntity>> = combine(
         _allSessions, searchResults, searchQuery, isSearchActive
@@ -193,6 +227,21 @@ class SessionListViewModel(
     private fun setCollapsedFolders(ids: Set<String>) {
         collapsedFolderIds.value = ids
         uiPrefs.edit().putStringSet("collapsedFolderIds", ids).apply()
+        // [T-folder-pages] A folder that closes reopens on page 1.
+        folderPages.update { pages -> pages.filterKeys { it !in ids } }
+    }
+
+    /**
+     * [T-folder-pages] Pages of members shown per open folder (iOS
+     * `folderPages`); absent = the first 20. In memory only. Search never
+     * touches this map.
+     */
+    val folderPages = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /** "Show N more": one page past what is on screen ([FolderGroupBlock.pagesShown]). */
+    fun showMoreInFolder(folderId: String, pagesShown: Int) {
+        if (folderId in collapsedFolderIds.value) return
+        folderPages.update { it + (folderId to maxOf(1, pagesShown) + 1) }
     }
 
     /**
@@ -347,13 +396,24 @@ class SessionListViewModel(
                                 !it.session.isChild || it.session.parentSessionId !in existingIds
                             }
                         }
-                        searchResults.value = hits.map { it.session }
+                        // [T-search-folder-expand] A folder whose name matches brings
+                        // all its members along (iOS 6b0ee14c1, any keyword).
+                        val folderHits = SearchFolders.matchedFolderIds(folders.value, q)
+                        searchResults.value = SearchFolders.withFolderMembers(hits.map { it.session }, _allSessions.value, folderHits)
                         searchSnippets.value = hits.mapNotNull { hit ->
                             hit.snippet?.let { hit.session.id to it }
                         }.toMap()
+                        searchMatchedFolderIds.value = folderHits
+                        searchFolderPages.value = emptyMap()
+                        searchCollapsedFolderIds.value = emptySet()
+                        searchResultsReady.value = true
                     } else {
                         searchResults.value = emptyList()
                         searchSnippets.value = emptyMap()
+                        searchMatchedFolderIds.value = emptySet()
+                        searchFolderPages.value = emptyMap()
+                        searchCollapsedFolderIds.value = emptySet()
+                        searchResultsReady.value = false
                     }
                     isSearching.value = false
                 }
@@ -791,206 +851,10 @@ class SessionListViewModel(
         }
     }
 
-    /**
-     * [GH#210] Generate a title for [id] purely from what is in the DB.
-     *
-     * Takes no ViewModel state, so the same code serves any USER-INITIATED
-     * entry point. It is deliberately never called automatically: an implicit
-     * LLM request the user did not ask for — e.g. sweeping untitled sessions
-     * at list load — would mean a burst of hidden network calls at startup,
-     * which is not an acceptable trade for a cosmetic title.
-     *
-     * @param origin tags the log line so different entry points can be told
-     *   apart when reconciling dispatch against outcome.
-     * @return true when a title was written (LLM or fallback).
-     */
-    private suspend fun generateTitleFromStore(id: String, origin: String): Boolean {
-        val startedAt = System.currentTimeMillis()
-        var firstUserRaw: String? = null
-        try {
-                val session = chatRepository.getSession(id) ?: return false
-                val messages = chatRepository.loadMessages(id)
-                if (messages.isEmpty()) return false
+    private val titleRegenerator = SessionTitleRegenerator(chatRepository, providerRepository, context)
 
-                // [T-titlegen-context-first-last-pair] Summary = first user +
-                // first assistant, plus (when the session has more than one user
-                // turn) the last user + last assistant, each truncated to 200
-                // chars — so a regenerated title reflects a mid/late topic shift
-                // rather than only the opener.
-                val userMessages = messages.filter { it.role == "user" }
-                // Keep the untruncated first user message for the fallback path.
-                firstUserRaw = userMessages.firstOrNull()?.let { extractText(it.partsJson) }
-                val userText = firstUserRaw?.take(200) ?: return false
-                // First/last assistant *text* message — skip tool-only messages
-                // whose extracted text is blank so the summary carries real prose.
-                val assistantTexts = messages.filter { it.role == "assistant" }
-                    .map { extractText(it.partsJson) }
-                    .filter { it.isNotBlank() }
-                val firstAssistantText = assistantTexts.firstOrNull()?.take(200) ?: ""
-                val hasMultipleUserTurns = userMessages.size > 1
-                val lastUserText = if (hasMultipleUserTurns) userMessages.lastOrNull()?.let { extractText(it.partsJson) }?.take(200) ?: "" else ""
-                val lastAssistantText = if (hasMultipleUserTurns) assistantTexts.lastOrNull()?.take(200) ?: "" else ""
-
-                val prompt = buildString {
-                    append("Based on the following conversation, generate a short title (max 6 words) that captures the topic. ")
-                    append("Also pick a task category from: code, writing, research, analysis, creative, chat, math, translation, health, finance, travel, education, design, productivity, support, other.\n\n")
-                    append("You MUST respond with valid JSON only. Example:\n")
-                    append("{\"title\": \"Debug Login Page Issue\", \"category\": \"code\"}\n\n")
-                    append("User: $userText\n")
-                    if (firstAssistantText.isNotEmpty()) append("Assistant: $firstAssistantText\n")
-                    if (lastUserText.isNotEmpty()) append("User: $lastUserText\n")
-                    if (lastAssistantText.isNotEmpty()) append("Assistant: $lastAssistantText\n")
-                    append(com.openminis.app.ui.chat.titleLanguageDirective())
-                }
-
-                val candidates = com.openminis.app.ui.chat.TitleCandidates.forSession(
-                    providerRepository, id,
-                    com.openminis.app.ui.chat.TitleCandidates.PrimarySource.parse(session.modelBinding),
-                    session.modelId,
-                )
-                val written = com.openminis.app.ui.chat.TitleCandidates.walk(
-                    candidates, origin = origin,
-                    shouldStop = { chatRepository.getSession(id)?.title != session.title },
-                ) { entry ->
-                    val provider = com.openminis.app.ui.chat.TitleCandidates.providerFor(
-                        providerRepository, context, entry, id,
-                    ) ?: return@walk null
-
-                    AppLogger.info(
-                        "TitleGen",
-                        "dispatch origin=$origin session=${id.take(8)} model=${entry.model.id}",
-                    )
-
-                        // T334: reasoning models burn the entire token budget on hidden thinking
-                        // before emitting any content. With maxTokens=100 every reasoning candidate
-                        // returned `finish_reason=length` with empty text, then the loop silently
-                        // moved on. Give reasoning models a real budget (1024) so they can finish
-                        // thinking and still emit the JSON title.
-                        val titleMaxTokens = if (entry.model.supportsReasoning == true) 2048 else 100
-                        // [T-android-titlegen-reasoning] Explicitly disable
-                        // thinking (thinkingLevel = OFF), matching iOS
-                        // callSubModelForTitle and the auto-title path. The
-                        // provider's injectThinkingParams honors OFF (e.g.
-                        // DeepSeek V4 → {"thinking":{"type":"disabled"}}), so a
-                        // reasoning model doesn't spend the budget on hidden
-                        // thinking; the T334 maxTokens bump above stays as a
-                        // safety net for models where OFF is a no-op (Qwen3).
-                        val response = provider.sendMessage(
-                            messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
-                            // [T-android-titlegen-systemprompt-unify] Shared with
-                            // the auto path via TITLE_GEN_SYSTEM_PROMPT (iOS-aligned
-                            // wording). Passed bare — AnthropicProvider handles the
-                            // OAuth Claude Code prefix at the provider layer.
-                            systemPrompt = com.openminis.app.ui.chat.TITLE_GEN_SYSTEM_PROMPT,
-                            maxTokens = titleMaxTokens,
-                            // [T-android-titlegen-temperature] null (not 0.3) so
-                            // buildRequestBody omits the field — the gpt-5.x
-                            // family only accepts temperature=1 and 400s on any
-                            // other value, which would silently skip that
-                            // candidate. Aligns with the auto-title path and iOS
-                            // AIChatViewModel.swift:11244.
-                            temperature = null,
-                            thinkingLevel = ThinkingLevel.OFF,
-                        )
-                        val parsed = com.openminis.app.ui.chat.parseGeneratedTitle(response.text, response.stopReason)
-                        val title = parsed?.title.orEmpty()
-                        val category = parsed?.category
-                        if (title.isNotEmpty()) {
-                            if (chatRepository.getSession(id)?.title != session.title) return@walk false
-                            if (!chatRepository.updateSessionTitleIfUnchanged(id, session.title, title, category)) return@walk false
-                            AppLogger.info(
-                                "TitleGen",
-                                "outcome=set origin=$origin session=${id.take(8)} " +
-                                    "model=${entry.model.id} elapsedMs=${System.currentTimeMillis() - startedAt}",
-                            )
-                            return@walk true
-                        }
-                        // T334: previously this empty-result path was silent — only the *last*
-                        // failing candidate's exception got reported, masking budget exhaustion
-                        // on reasoning models. Surface it explicitly so logs show the real cause.
-                        Log.w(
-                            TAG,
-                            "Title regen empty from ${entry.model.displayName}: " +
-                                "stopReason=${response.stopReason} textLen=${response.text.length} " +
-                                "maxTokens=$titleMaxTokens supportsReasoning=${entry.model.supportsReasoning}",
-                        )
-                    null
-                }
-                if (written != null) return written
-                AppLogger.warning("TitleGen", "outcome=no-title origin=$origin session=${id.take(8)} reason=all-candidates-exhausted")
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException && com.openminis.app.ui.chat.TitleCandidates.isRealCancellation(e)) throw e
-            AppLogger.warning(
-                "TitleGen",
-                "outcome=exception origin=$origin session=${id.take(8)} " +
-                    "${e.javaClass.simpleName}: ${e.message?.take(200)} " +
-                    "elapsedMs=${System.currentTimeMillis() - startedAt}",
-            )
-        }
-        // Every failure exit lands here. Mirrors iOS applyFallbackTitle: the
-        // session must never be left permanently untitled just because the LLM
-        // was unreachable.
-        return applyFallbackTitle(id, firstUserRaw, origin)
-    }
-
-    /**
-     * [GH#210] Write a title derived from the first user message.
-     *
-     * Mirrors iOS `applyFallbackTitle` — including its re-read of the session
-     * immediately before writing. That re-check is the guard that keeps this
-     * from clobbering a title the user typed (or a concurrent attempt set)
-     * while the LLM call was in flight, which can be tens of seconds.
-     */
-    private suspend fun applyFallbackTitle(id: String, firstUserRaw: String?, origin: String): Boolean {
-        val current = chatRepository.getSession(id)?.title
-        if (!current.isNullOrBlank() && current.trim() != NEW_CHAT_TITLE) {
-            AppLogger.info(
-                "TitleGen",
-                "outcome=fallback-skipped origin=$origin session=${id.take(8)} reason=already-titled",
-            )
-            return false
-        }
-        val cleaned = fallbackTitleFrom(firstUserRaw)
-        if (cleaned == null) {
-            AppLogger.warning(
-                "TitleGen",
-                "outcome=fallback-unavailable origin=$origin session=${id.take(8)} " +
-                    "reason=first-user-message-empty-after-cleanup",
-            )
-            return false
-        }
-        if (!chatRepository.updateSessionTitleIfUnchanged(id, current, cleaned)) return false
-        // Length only — never the prompt text itself.
-        AppLogger.info(
-            "TitleGen",
-            "outcome=fallback origin=$origin session=${id.take(8)} titleLen=${cleaned.length}",
-        )
-        return true
-    }
-
-    /**
-     * Strip the composer's `<user-attached-files>` block, collapse whitespace
-     * and truncate to 30 chars. Same shape as iOS `fallbackTitle(fromFirst‑
-     * UserMessage:)` and ChatViewModel.applyFallbackTitleFromFirstMessage, so
-     * a title recovered here is indistinguishable from one written by the auto
-     * path. Returns null when nothing usable remains.
-     */
-    private fun fallbackTitleFrom(raw: String?): String? {
-        var text = raw ?: return null
-        val startIdx = text.indexOf("<user-attached-files>")
-        if (startIdx >= 0) {
-            val endTag = "</user-attached-files>"
-            val endIdx = text.indexOf(endTag, startIdx)
-            text = if (endIdx >= 0) {
-                text.substring(0, startIdx) + text.substring(endIdx + endTag.length)
-            } else {
-                text.substring(0, startIdx)
-            }
-        }
-        val cleaned = text.replace(Regex("\\s+"), " ").trim()
-        if (cleaned.isEmpty()) return null
-        return if (cleaned.length > 30) cleaned.take(30).trimEnd() + "…" else cleaned
-    }
+    private suspend fun generateTitleFromStore(id: String, origin: String): Boolean =
+        titleRegenerator.regenerate(id, origin)
 
     private fun extractText(partsJson: String): String {
         return try {
@@ -1025,17 +889,48 @@ class SessionListViewModel(
     }
 
 
+    // Chosen on the main thread without a suspension between choosing and reserving.
+    private val reservedDuplicateTitles = HashSet<String>()
+
     fun duplicateSession(id: String) {
         viewModelScope.launch {
+            var reservedTitle: String? = null
             try {
-                com.openminis.app.data.SessionForkManager(chatRepository, filesDir = context.filesDir).duplicateSession(id)
+                val session = chatRepository.getSession(id) ?: return@launch
+                val existingTitles = chatRepository.observeSessions().first().mapNotNull { it.title }
+                val title = SessionDuplicateTitle.make(
+                    sourceTitle = session.title,
+                    existingTitles = existingTitles + reservedDuplicateTitles,
+                    suffixWord = context.getString(R.string.session_duplicate_suffix),
+                    knownSuffixWords = allCopySuffixWords(),
+                    untitledTitle = context.getString(R.string.chat_title_pill_session_default),
+                )
+                reservedDuplicateTitles.add(title)
+                reservedTitle = title
+                // Keep the fork's resource copy, metadata, marker remapping and rollback.
+                val copiedId = com.openminis.app.data.SessionForkManager(chatRepository, filesDir = context.filesDir)
+                    .duplicateSession(id) ?: return@launch
+                // Once copying succeeds, finish naming even if navigation cancels this scope.
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    chatRepository.updateSessionTitle(copiedId, title)
+                }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 AppLogger.warning(TAG, "Session copy failed: ${failure.message}")
+            } finally {
+                reservedTitle?.let { reservedDuplicateTitles.remove(it) }
             }
         }
     }
+
+    private fun allCopySuffixWords(): List<String> =
+        listOf("en", "zh-CN", "zh-TW", "cs", "nl", "fa", "hu", "it").map { tag ->
+            val cfg = android.content.res.Configuration(context.resources.configuration).apply {
+                setLocale(java.util.Locale.forLanguageTag(tag))
+            }
+            context.createConfigurationContext(cfg).getString(R.string.session_duplicate_suffix)
+        }.distinct()
 
     /**
      * Create a draft session ID for navigation. The actual DB record is created
