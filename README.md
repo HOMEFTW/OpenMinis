@@ -190,7 +190,7 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
-1.17.1 的网络补丁已通过 **83 项 Go 回归**；消息发送、网络、Forge 和高速模式使用定向 JVM／前端回归验证。发布包从隔离工作副本构建，保留本 fork 的签名。最终测试结果与 APK 验证见 [1.17.1 发布记录](docs/fixes/2026-11-27-release-1.17.1.md) 和 [Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.1)。
+1.17.1 已通过 **83 项 Go 回归、201 项 JVM 定向回归和 5 项 Forge 前端测试**，全部通过，无跳过。发布包从隔离工作副本构建，签名、ZIP 完整性、对齐、版本、Forge 资源及新网络库入包检查均通过。详细结果见 [1.17.1 发布记录](docs/fixes/2026-11-27-release-1.17.1.md) 和 [Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.1)。
 
 当前仍有已定位的流式 Markdown 缺陷：`#tag` 等非标题行存在高 CPU 循环路径，本次未修复。上游 Beta 功能及缺口见 [更新核对记录](docs/fixes/2026-11-27-upstream-alignment.md)，本版未全面同步 1.16 Beta。
 
