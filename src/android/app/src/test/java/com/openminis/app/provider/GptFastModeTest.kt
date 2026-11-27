@@ -86,7 +86,7 @@ class GptFastModeTest {
 
     @Test fun gptNamesDoNotEnableFastOnUnrelatedProviderRoutes() {
         FastModePrefs.setCachedEnabledForTest(true)
-        for (type in listOf(ProviderType.openRouter, ProviderType.kimiCode)) {
+        for (type in listOf(ProviderType.openRouter, ProviderType.kimiCode, ProviderType.xAI)) {
             val provider = provider("gpt-6-luna", type)
             for (responses in listOf(false, true)) {
                 assertFalse("$type / responses=$responses", body(provider, responses).has("service_tier"))
@@ -96,7 +96,8 @@ class GptFastModeTest {
 
     @Test fun imageModelsOtherFamiliesAndLookalikesDoNotReceiveFastTier() {
         FastModePrefs.setCachedEnabledForTest(true)
-        for (id in listOf("gpt-image-2.5-sunburst", "deepseek-flash", "claude-sonnet-5", "not-gpt-6-luna")) {
+        for (id in listOf("gpt-image-2.5-sunburst", "grok-4", "xai/grok-4", "openai/grok-4",
+            "deepseek-flash", "claude-sonnet-5", "not-gpt-6-luna")) {
             for (responses in listOf(false, true)) {
                 assertFalse(id, body(provider(id), responses).has("service_tier"))
             }

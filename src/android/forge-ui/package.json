@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "node ../../../scripts/build_forge_ui.mjs"
+    "build": "node ../../../scripts/build_forge_ui.mjs",
+    "test": "node --test test/*.test.cjs"
   },
   "dependencies": {
     "@xyflow/react": "12.12.0",

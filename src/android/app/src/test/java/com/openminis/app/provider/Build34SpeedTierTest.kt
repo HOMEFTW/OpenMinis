@@ -76,10 +76,10 @@ class Build34SpeedTierTest {
         assertEquals("ultrafast", body(oauth, true).getString("service_tier"))
     }
 
-    @Test fun ultrafastDoesNotLeakToOtherProtocolsOrImageOnlyModelsAndXaiKeepsPriority() {
+    @Test fun ultrafastDoesNotLeakToOtherProtocolsImageOnlyModelsOrGrok() {
         FastModePrefs.setCachedSpeedTierForTest("ultrafast")
         val model = LLMModel.gpt6Astra.copy(supportedServiceTiers = listOf("ultrafast"))
-        for (type in listOf(ProviderType.openRouter, ProviderType.kimiCode)) {
+        for (type in listOf(ProviderType.openRouter, ProviderType.kimiCode, ProviderType.xAI)) {
             for (responses in listOf(false, true)) assertFalse(body(provider(model, type), responses).has("service_tier"))
         }
         val imageOnly = model.copy(outputModalities = listOf("image"))
@@ -88,7 +88,9 @@ class Build34SpeedTierTest {
         for (responses in listOf(false, true)) {
             assertFalse(body(provider(imageOnly), responses).has("service_tier"))
             assertFalse(body(provider(nonGpt), responses).has("service_tier"))
-            assertEquals("priority", body(provider(grok, ProviderType.xAI), responses).getString("service_tier"))
+            for (type in listOf(ProviderType.xAI, ProviderType.openAI, ProviderType.openAIResponses)) {
+                assertFalse(body(provider(grok, type), responses).has("service_tier"))
+            }
         }
     }
 }

@@ -8,7 +8,7 @@ const {build} = require('esbuild');
 const out = path.join(repo, 'src/android/app/src/main/assets/forge/ui');
 fs.mkdirSync(out, {recursive:true});
 const result = await build({entryPoints:[path.join(source,'app.jsx')],outfile:path.join(out,'app.js'),bundle:true,minify:true,metafile:true,format:'iife',target:['chrome80'],define:{'process.env.NODE_ENV':'"production"'},legalComments:'linked'});
-for (const file of ['index.html','forge-sdk.js']) fs.copyFileSync(path.join(source,file),path.join(out,file));
+for (const file of ['index.html','bootstrap.js','forge-sdk.js']) fs.copyFileSync(path.join(source,file),path.join(out,file));
 let notices = 'OpenMinis Forge UI: adapted from Codex Forge 0.3.2 (MIT).\n\n';
 const packages = new Set();
 for (const input of Object.keys(result.metafile.inputs)) {

@@ -17,9 +17,9 @@ internal object FastModeSupport {
             (model.outputModalities?.any { it.normalizeModalityName() == "text" } != false)
 
     /** Keep GPT controls discoverable even when the current route cannot request Fast. */
-    fun shouldShowControl(modelId: String?, available: Boolean): Boolean =
-        available || (modelId?.let(::isGptModelId) == true)
+    fun shouldShowControl(modelId: String?): Boolean =
+        modelId?.let(::isGptModelId) == true
 
     fun isAvailable(type: ProviderType, model: LLMModel): Boolean =
-        type == ProviderType.xAI || (supportsGptRoute(type) && isGptTextModel(model))
+        supportsGptRoute(type) && isGptTextModel(model)
 }

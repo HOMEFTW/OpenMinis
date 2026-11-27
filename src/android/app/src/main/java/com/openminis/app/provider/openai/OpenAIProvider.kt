@@ -129,48 +129,20 @@ class OpenAIProvider private constructor(
 
     var modelOverrides: com.openminis.app.data.model.ModelOverrides? = null
 
-    /**
-     * [T-android-xai-priority] Whether this provider speaks xAI's Priority
-     * Processing extension, i.e. whether it is eligible to carry
-     * `service_tier: "priority"` when the user's global Fast Mode is on.
-     *
-     * This is a CAPABILITY flag, not the user's choice. The choice lives in
-     * the app-level [com.openminis.app.data.FastModePrefs] toggle that Codex
-     * Fast Mode already uses, and is read at request-BUILD time (see
-     * [buildRequestBody]) so flipping it applies to the very next request of
-     * an ongoing session — including offload / title-gen calls that never pass
-     * through ChatViewModel. Storing the user's answer here instead would
-     * freeze it at provider-construction time and miss those.
-     *
-     * False by default so every other provider's body is byte-for-byte
-     * unchanged. That matters beyond tidiness: `service_tier` is an xAI
-     * extension, and OpenAI-compatible relays that reject unknown body keys
-     * would 400 on it, so ProviderFactory sets this for ProviderType.xAI alone.
-     * A post-construction var rather than a constructor parameter for the same
-     * reason as [thinkingRuleInstanceId] — xAI resolves through two different
-     * constructors (API key and OAuth), and threading a flag through both
-     * duplicates it.
-     */
-    var supportsPriorityProcessing: Boolean = false
-
     /** Factory disables GPT Fast on other vendors' OpenAI-compatible routes. */
     internal var supportsGptFastMode: Boolean = true
 
     /**
-     * The effective `service_tier` for GPT Fast or xAI Priority Processing.
+     * The effective `service_tier` for GPT Fast.
      * OpenAI documents "priority" as an alias for "fast"; retain that wire
      * value for existing Codex and relay compatibility. Consulted by both builders.
      *
-     * Omits rather than sending `"default"` when Fast Mode is off: "default" is
-     * xAI's own behaviour, so leaving the key out keeps the body byte-identical
-     * to before this feature existed.
+     * Omit the key when Fast Mode is off or the model/route is ineligible.
      */
     internal fun resolvedServiceTier(): String? {
+        if (!supportsGptFastMode || !FastModeSupport.isGptTextModel(model)) return null
         val tier = com.openminis.app.data.FastModePrefs.speedTier.value
         if (tier == "standard") return null
-        // xAI retains its existing priority wire value for either enabled tier.
-        if (supportsPriorityProcessing) return "priority"
-        if (!supportsGptFastMode || !FastModeSupport.isGptTextModel(model)) return null
         return if (tier == "ultrafast" && OpenAISpeedTiers.supportsUltrafast(model)) "ultrafast" else "priority"
     }
 
@@ -2398,6 +2370,8 @@ class OpenAIProvider private constructor(
         // stray override can't misroute. Mirrors generateImage's merge + iOS.
         mergeModelOverridesBody(body, temperature)
         mergeChatExtraBody(body)
+        // Passthrough fields must respect the same GPT-only boundary.
+        if (!supportsGptFastMode || !FastModeSupport.isGptTextModel(model)) body.remove("service_tier")
 
         return body
     }
@@ -3395,6 +3369,8 @@ class OpenAIProvider private constructor(
         // chat-completions builder. Skipped for Codex OAuth inside mergeChatExtraBody.
         mergeModelOverridesBody(body, explicitTemperature = null)
         mergeChatExtraBody(body)
+        // Passthrough fields must respect the same GPT-only boundary.
+        if (!supportsGptFastMode || !FastModeSupport.isGptTextModel(model)) body.remove("service_tier")
 
         return body
     }

@@ -90,6 +90,7 @@ function CanvasMetaEditor({ doc, save, disabled, register }) {
   return <section className="canvas-meta" aria-label="画布信息"><div className="canvas-meta-heading"><span>画布信息</span><span className="muted" role="status">{status}</span></div><input aria-label="画布标题" value={draft.title || ''} maxLength={200} disabled={disabled} onChange={event => controller.current.change('title', event.target.value)} /><textarea aria-label="画布描述" value={draft.description || ''} maxLength={2000} disabled={disabled} onChange={event => controller.current.change('description', event.target.value)} placeholder="描述这张画布的用途…" /><div className="canvas-meta-actions"><select aria-label="画布颜色" value={draft.color || 'neutral'} disabled={disabled} onChange={event => controller.current.change('color', event.target.value)}><option value="neutral">默认颜色</option><option value="yellow">暖黄</option><option value="blue">蓝色</option><option value="green">绿色</option><option value="pink">粉色</option></select>{controller.current.dirty && <button onClick={() => controller.current.flush(true).catch(() => {})} disabled={disabled}>保存信息</button>}</div></section>;
 }
 function CanvasApp() {
+  useEffect(() => { window.forgeStartup?.ready(); }, []);
   const [canvases, setCanvases] = useState([]), [doc, setDoc] = useState(null), [nodes, setNodes] = useState([]), [edges, setEdges] = useState([]);
   const [selected, setSelected] = useState(null), [edgeId, setEdgeId] = useState(null), [mode, setMode] = useState('right'), [page, setPage] = useState('canvas'), [notes, setNotes] = useState(null);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [notice, setNotice] = useState(null), [threadId, setThreadId] = useState(null);
@@ -346,4 +347,10 @@ function CanvasApp() {
     <footer><span>{loading ? '正在打开…' : busy ? '正在保存…' : doc ? `已保存 · 修订 ${doc.revision}` : '本地画布'}</span><span className="muted">{doc ? `${doc.nodes.length} 个节点 · ${doc.edges.length} 条连线` : '自动保存 · 模型可编辑'}</span></footer>
   </main>;
 }
-createRoot(document.getElementById('root')).render(<ReactFlowProvider><CanvasApp/></ReactFlowProvider>);
+class PluginErrorBoundary extends React.Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch() { window.forgeStartup?.fail(); }
+  render() { return this.state.failed ? null : this.props.children; }
+}
+createRoot(document.getElementById('root')).render(<PluginErrorBoundary><ReactFlowProvider><CanvasApp/></ReactFlowProvider></PluginErrorBoundary>);

@@ -10,20 +10,20 @@ class FastModeSupportTest {
         for (model in listOf(LLMModel.gpt6Astra, LLMModel.gpt61Sol)) {
             val unavailableRoute = FastModeSupport.isAvailable(ProviderType.anthropic, model)
             assertFalse(unavailableRoute)
-            assertTrue(FastModeSupport.shouldShowControl(model.id, unavailableRoute))
+            assertTrue(FastModeSupport.shouldShowControl(model.id))
 
             val unavailableOutput = FastModeSupport.isAvailable(ProviderType.openAI,
                 model.copy(outputModalities = emptyList()))
             assertFalse(unavailableOutput)
-            assertTrue(FastModeSupport.shouldShowControl(model.id, unavailableOutput))
+            assertTrue(FastModeSupport.shouldShowControl(model.id))
         }
     }
 
-    @Test fun unrelatedOrUnknownModelsDoNotGainAFastControlUnlessTheirRouteSupportsIt() {
-        for (id in listOf(null, "deepseek-flash", "claude-sonnet-5", "gpt-image-2.5-sunburst")) {
-            assertFalse(FastModeSupport.shouldShowControl(id, available = false))
+    @Test fun unrelatedOrUnknownModelsNeverGainAFastControl() {
+        for (id in listOf(null, "grok-4", "xai/grok-4", "deepseek-flash", "claude-sonnet-5", "gpt-image-2.5-sunburst")) {
+            assertFalse(FastModeSupport.shouldShowControl(id))
         }
-        assertTrue(FastModeSupport.shouldShowControl("grok-4", available = true))
+        assertTrue(FastModeSupport.shouldShowControl("OPENAI/GPT-6.1-SOL"))
     }
 
     @Test fun suffixTextModalitiesRemainEligibleForGptFast() {
@@ -45,7 +45,7 @@ class FastModeSupportTest {
 
     @Test fun otherProtocolsAndNonGptModelsDoNotOfferGptFast() {
         for (type in listOf(ProviderType.openRouter, ProviderType.anthropic, ProviderType.gemini,
-            ProviderType.githubCopilot, ProviderType.kimiCode, ProviderType.deepSeek)) {
+            ProviderType.githubCopilot, ProviderType.kimiCode, ProviderType.deepSeek, ProviderType.xAI)) {
             assertFalse(type.name, FastModeSupport.isAvailable(type, LLMModel.gpt61Sol))
         }
         assertFalse(FastModeSupport.isAvailable(ProviderType.openAI,
@@ -54,7 +54,11 @@ class FastModeSupportTest {
             LLMModel("custom-gpt-6-sol", "Lookalike", "Custom")))
     }
 
-    @Test fun existingXaiPriorityOptionRemainsAvailable() {
-        assertTrue(FastModeSupport.isAvailable(ProviderType.xAI, LLMModel("grok-4", "Grok 4", "xai")))
+    @Test fun grokIsUnavailableOnNativeAndOpenAiCompatibleRoutes() {
+        for (type in listOf(ProviderType.xAI, ProviderType.openAI, ProviderType.openAIResponses)) {
+            for (id in listOf("grok-4", "xai/grok-4", "openai/grok-4")) {
+                assertFalse("$type / $id", FastModeSupport.isAvailable(type, LLMModel(id, "Grok 4", "xai")))
+            }
+        }
     }
 }

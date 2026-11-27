@@ -7,6 +7,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
+import android.webkit.ConsoleMessage
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,9 +33,11 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.openminis.app.MinisApp
 import com.openminis.app.util.launchSafely
+import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -46,10 +50,13 @@ fun ForgeScreen(sessionId: String? = null, onBack: () -> Unit) {
     val host = remember(app) { app.forgeHost }
     var selected by remember(sessionId) { mutableStateOf<ForgeHost.Plugin?>(null) }
     var revision by remember { mutableIntStateOf(0) }
+    var panelAttempt by remember { mutableIntStateOf(0) }
     val plugin = selected
     BackHandler(enabled = plugin == null, onBack = onBack)
     if (plugin != null) {
-        key(plugin.id, sessionId) { ForgeWebPanel(host, plugin, sessionId) { selected = null } }
+        key(plugin.id, sessionId, panelAttempt) {
+            ForgeWebPanel(host, plugin, sessionId, onRetry = { panelAttempt++ }, onClose = { selected = null })
+        }
         return
     }
     Scaffold(topBar = { TopAppBar(title = { Text("Forge 插件") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) }) { padding ->
@@ -67,19 +74,22 @@ fun ForgeScreen(sessionId: String? = null, onBack: () -> Unit) {
                     }
                 }
             }
-            item { Text("技能默认停用，可在 Codeg 技能包中选择。关闭插件不会删除已保存的数据。", style = MaterialTheme.typography.bodySmall) }
+            item { Text("技能默认停用，可在 Codeg 技能包中选择。关闭插件不会删除已保存的数据。当前仅支持内置插件，暂不支持安装第三方插件。", style = MaterialTheme.typography.bodySmall) }
         }
     }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun ForgeWebPanel(host: ForgeHost, plugin: ForgeHost.Plugin, sessionId: String?, onClose: () -> Unit) {
+private fun ForgeWebPanel(host: ForgeHost, plugin: ForgeHost.Plugin, sessionId: String?, onRetry: () -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val alive = remember { AtomicBoolean(true) }
     var web by remember { mutableStateOf<WebView?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var ready by remember { mutableStateOf(false) }
+    var starter by remember { mutableStateOf<ForgeWebViewStart?>(null) }
     var choosing by remember { mutableStateOf<CompletableDeferred<Uri?>?>(null) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> choosing?.complete(uri); choosing = null }
     fun emit(event: JSONObject) { if (alive.get()) web?.evaluateJavascript("window.forgeAndroidReply && window.forgeAndroidReply(${JSONObject().put("event", event)});", null) }
@@ -125,33 +135,78 @@ private fun ForgeWebPanel(host: ForgeHost, plugin: ForgeHost.Plugin, sessionId: 
             }
         }
     }
-    BackHandler { emit(JSONObject().put("type", "close-request")) }
+    fun closePanel() {
+        if (ready && error == null) emit(JSONObject().put("type", "close-request")) else onClose()
+    }
+    fun failLoading(reason: String) {
+        if (!alive.get()) return
+        loading = false
+        error = reason
+    }
+    BackHandler { closePanel() }
+    LaunchedEffect(loading) {
+        if (loading) {
+            delay(20_000)
+            if (!ready) failLoading("插件未能完成启动，请重试；仍无法打开时请更新 Android System WebView。")
+        }
+    }
     LaunchedEffect(host, plugin.id) {
         host.events.collect { event ->
             if (event.optString("type") == "plugin-state" && event.optString("pluginId") == plugin.id && !event.optBoolean("enabled")) onClose()
             else if (event.optString("pluginId").let { it.isEmpty() || it == plugin.id }) emit(event)
         }
     }
-    DisposableEffect(Unit) { onDispose { alive.set(false); choosing?.cancel(); web?.apply { stopLoading(); destroy() }; web = null } }
+    DisposableEffect(Unit) { onDispose { alive.set(false); choosing?.cancel(); starter?.dispose(); web?.apply { stopLoading(); destroy() }; web = null } }
     if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
         Column(Modifier.fillMaxSize().padding(24.dp)) { Text("请更新 Android System WebView 后使用 Forge 插件"); TextButton(onClick = onClose) { Text("返回") } }
         return
     }
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
-        error?.let { message -> Row { Text(message, Modifier.weight(1f)); TextButton(onClick = onClose) { Text("返回") } } }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            IconButton(onClick = ::closePanel) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+            Text(plugin.title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            if (error != null) TextButton(onClick = onRetry) { Text("重试") }
+        }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        error?.let { message -> Text(message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
         AndroidView(modifier = Modifier.weight(1f).fillMaxWidth(), factory = {
             val loader = WebViewAssetLoader.Builder().setDomain("forge.openminis.local")
                 .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context)).build()
             WebView(context).apply {
                 web = this
                 settings.javaScriptEnabled = true; settings.domStorageEnabled = false
+                settings.useWideViewPort = true; settings.loadWithOverviewMode = true
                 settings.allowFileAccess = false; settings.allowContentAccess = false
                 settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse =
                         loader.shouldInterceptRequest(request.url) ?: WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)))
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = request.url.toString() != "https://forge.openminis.local/assets/forge/ui/index.html"
-                    override fun onReceivedError(view: WebView, request: WebResourceRequest, failure: android.webkit.WebResourceError) { if (request.isForMainFrame) error = failure.description.toString() }
+                    override fun onReceivedError(view: WebView, request: WebResourceRequest, failure: android.webkit.WebResourceError) {
+                        if (request.isForMainFrame) failLoading("插件页面加载失败（${failure.errorCode}），请重试。")
+                    }
+                    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                        if (request.isForMainFrame || request.url.lastPathSegment in setOf("app.js", "app.css", "bootstrap.js")) {
+                            failLoading("插件资源加载失败（${response.statusCode}），请重试或重新安装应用。")
+                        }
+                    }
+                    override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                        com.openminis.app.ui.webview.WebViewRenderProcess.handle("Forge", detail)
+                        failLoading("插件页面已停止运行，请重试。")
+                        starter?.dispose()
+                        (view.parent as? android.view.ViewGroup)?.removeView(view)
+                        view.destroy()
+                        if (web === view) web = null
+                        return true
+                    }
+                }
+                webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                        if (message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                            AppLogger.warning("ForgeWebView", "JavaScript error in ${Uri.parse(message.sourceId()).lastPathSegment}:${message.lineNumber()}")
+                        }
+                        return true
+                    }
                 }
                 WebViewCompat.addWebMessageListener(this, "ForgeAndroid", setOf("https://forge.openminis.local")) { _, message, origin, mainFrame, _ ->
                     if (!mainFrame || origin.toString() != "https://forge.openminis.local" || !alive.get()) return@addWebMessageListener
@@ -165,6 +220,8 @@ private fun ForgeWebPanel(host: ForgeHost, plugin: ForgeHost.Plugin, sessionId: 
                             check(host.enabled(plugin.id)) { "此 Forge 插件已停用" }
                             val method = request.getString("method"); val args = request.optJSONObject("args") ?: JSONObject()
                             val result = when (method) {
+                                "ready" -> { ready = true; loading = false; error = null; true }
+                                "startup-error" -> { failLoading("插件启动失败，请重试；仍无法打开时请更新 Android System WebView。"); true }
                                 "close" -> { onClose(); true }
                                 "sdk" -> sdk(args)
                                 "attach" -> { require(plugin.page == "canvas"); attachment(args) }
@@ -183,10 +240,13 @@ private fun ForgeWebPanel(host: ForgeHost, plugin: ForgeHost.Plugin, sessionId: 
                             response.put("result", result ?: JSONObject.NULL)
                         } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
                         catch (failure: Exception) { response.put("error", failure.message ?: "操作失败") }
-                        if (alive.get()) evaluateJavascript("window.forgeAndroidReply && window.forgeAndroidReply($response);", null)
+                        if (alive.get() && web === this@apply) evaluateJavascript("window.forgeAndroidReply && window.forgeAndroidReply($response);", null)
                     }
                 }
-                loadUrl("https://forge.openminis.local/assets/forge/ui/index.html")
+                starter = ForgeWebViewStart(this) {
+                    loading = true
+                    loadUrl("https://forge.openminis.local/assets/forge/ui/index.html")
+                }
             }
         })
     }

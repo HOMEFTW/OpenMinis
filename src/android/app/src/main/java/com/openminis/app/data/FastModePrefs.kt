@@ -2,6 +2,8 @@ package com.openminis.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.openminis.app.data.model.LLMModel
+import com.openminis.app.provider.FastModeSupport
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,7 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * [T-codex-fast-mode] App-level persisted Fast Mode toggle (mirrors iOS
  * UserDefaults key `codexFastModeEnabled`, commit fb671083). Unlike Enhanced
  * Cache the flag IS durable and shared across sessions (user-confirmed on
- * iOS): switching to another chat reads the same enabled state.
+ * iOS). Selecting a non-GPT model in the foreground resets it to standard;
+ * returning to GPT requires explicitly enabling Fast again.
  *
  * The provider layer has no Context, and iOS deliberately reads the flag at
  * REQUEST-BUILD time so a flip applies to the very next request of an ongoing
@@ -62,6 +65,13 @@ object FastModePrefs {
         setSpeedTier(context, if (enabled) "fast" else "standard")
     }
 
+    /** Only a visible chat's resolved model may clear the shared GPT preference. */
+    fun onModelSelected(context: Context, model: LLMModel?, isForeground: Boolean) = synchronized(stateLock) {
+        if (isForeground && model != null && !FastModeSupport.isGptTextModel(model) && _enabled.value) {
+            setEnabled(context, false)
+        }
+    }
+
     /** Config's explicit tier and the legacy checkbox always update the same shared state. */
     fun setSpeedTier(context: Context, value: String) = synchronized(stateLock) {
         val tier = checkedTier(value)
@@ -80,7 +90,7 @@ object FastModePrefs {
     }
 
     /**
-     * [T-android-xai-priority] Set ONLY the in-memory cache, with no Context and
+     * Set ONLY the in-memory cache, with no Context and
      * no persistence. Exists so JVM unit tests can exercise the real
      * [isEnabled] path that request builders consult — there is no Robolectric
      * in this module, so the Context-taking [setEnabled] is unusable there, and

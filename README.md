@@ -7,7 +7,9 @@
 
 OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手机上使用 Linux 沙箱、文件工作区、浏览器、技能和记忆。本 fork 保留原项目架构，仅增加 Android 端改动；它不是上游官方发行版。
 
-**[下载 Android 1.17.0 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.0/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.0) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+**[下载 Android 1.17.1 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.1/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.1) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+
+**1.17.1 · 2026-11-27**：修复公开构建中所有模型点击发送即报 Anthropic 配置错误；修复 Forge 面板加载时机并增加失败提示与重试；高速模式限定为 GPT 文本模型，切换到其他模型时关闭。补齐上游 1.15 的 Tailscale 出口网络维护修复，并重建原生库。保留四个内置插件、品牌与背景、会话链接及上下文设置；详情见 [1.17.1 发布记录](docs/fixes/2026-11-27-release-1.17.1.md)。
 
 **1.17.0 · 2026-11-02**：新增手机独立运行的 Forge API 2 与无限画布、信息统计、Codeg 技能包、待办清单四个内置插件；新增 Grok 对话背景，随模型切换，并支持全局／会话透明度。对齐上游 **Android 1.15 稳定版（build37）** 的公开源码，补齐网络路由、Tailscale、助手提问恢复、定时任务、语音和更新校验等功能，保留本 fork 的模型接入、会话链接和上下文设置。未纳入上游 1.16 Beta。版本与 APK 验证见 [1.17.0 发布记录](docs/fixes/2026-11-02-release-1.17.0.md)。
 
@@ -31,6 +33,8 @@ OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手�
 例如对 AI 说“在无限画布整理这个方案”“把这三项加入当前会话待办”。技能正文通过 `forge` 工具读取。待办的计划时间用于记录安排，不自动启动 AI；模型检测由用户主动触发并消耗模型额度，检测结论仅供参考。技能启用不会安装额外依赖。
 
 API 2 按 Android 宿主实际能力提供权限检查、插件存储、草稿读写、面板和事件。桌面 Node/Electron、桌面插件安装和电脑数据同步不在本次移植范围。Forge 数据目前不包含在原有自定义备份导出中。实现与验证见 [接入记录](docs/fixes/2026-11-02-forge-android.md)。
+
+1.17.1 改为等待 WebView 完成挂载和布局后加载面板，并增加启动失败提示、返回和重试入口；插件列表明确标注暂不支持第三方安装。原始诊断与本地验证见 [修复记录](docs/fixes/2026-11-02-forge-startup-gpt-fast.md)。
 
 ## 应用品牌图标
 
@@ -114,6 +118,8 @@ DeepSeek、GPT、Claude、Grok 模型自动使用对应背景；对话中切换�
 3. 输入框内点击模型名切换模型，点击思考强度打开滑块。滑块只提供当前模型允许的档位；GPT 的 Fast 开关也位于该面板，下一次请求生效，可用性与费用取决于服务商。
 4. 图片模型通常作为 Agent 工具使用：在模型分组设置中开放给 Agent，再让文本模型调用 `minis-model-use`。
 
+1.17.1 将高速模式限定为 GPT 文本模型：切换到 Grok、DeepSeek、Claude 等其他模型时关闭并保存，切回 GPT 后需手动开启；非 GPT 请求不携带高速档位参数。
+
 DeepSeek 官方 Key：添加服务商时选择 **DeepSeek** 并填写密钥。旧兼容服务商配置保持不变，不会自动迁移。此入口使用官方 Harness 同款 `https://api.deepseek.com/anthropic/v1/messages` 与 `x-api-key`，由独立 DeepSeek 实现处理；不是另造私有协议。详见 [接入与验证记录](docs/superpowers/plans/2026-10-08-deepseek-native.md)。
 
 新增入口：
@@ -184,11 +190,15 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
+1.17.1 的网络补丁已通过 **83 项 Go 回归**；消息发送、网络、Forge 和高速模式使用定向 JVM／前端回归验证。发布包从隔离工作副本构建，保留本 fork 的签名。最终测试结果与 APK 验证见 [1.17.1 发布记录](docs/fixes/2026-11-27-release-1.17.1.md) 和 [Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.1)。
+
+当前仍有已定位的流式 Markdown 缺陷：`#tag` 等非标题行存在高 CPU 循环路径，本次未修复。上游 Beta 功能及缺口见 [更新核对记录](docs/fixes/2026-11-27-upstream-alignment.md)，本版未全面同步 1.16 Beta。
+
 2026-11-02，1.17.0 使用 `scripts/build_android_windows.ps1 -RunAllTests -BuildAndroidTests` 完成全量验证：**503 个测试套件、3,846 项 JVM 测试，3,838 通过、8 项条件跳过、0 失败、0 错误**。跳过项为 Windows 不支持的 POSIX 权限／SecureDirectoryStream 条件及未启用的 4 GiB 大文件用例。应用和 Android 仪器测试 APK 均编译成功；仪器测试未在设备上执行。
 
 APK v2 签名、ZIP CRC、重复条目、16 KiB 原生库／4 字节 ZIP 对齐、包名与版本检查通过。签名证书与已发布 1.16.3 一致。四个 Forge 插件、283 个技能清单文件、前端资源和 Grok 背景均已核对入包；技能原始 SHA-256 与 Windows 重新检出的文件字节一致。
 
-安装包 SHA-256 见 [1.17.0 校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.0/app-debug.apk.sha256)。详细产物、范围与限制见 [1.17.0 发布记录](docs/fixes/2026-11-02-release-1.17.0.md)。源码与 APK 对应同一 `1.17.0` 标签，GitHub 的 Source code 归档包含本次改动；原生子模块仍按构建指南初始化。
+当前安装包 SHA-256 见 [1.17.1 校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.1/app-debug.apk.sha256)。源码与 APK 对应同一 `1.17.1` 标签，GitHub 的 Source code 归档包含本次改动；原生子模块仍按构建指南初始化。上述 1.17.0 全量验收属于历史记录，详情见 [1.17.0 发布记录](docs/fixes/2026-11-02-release-1.17.0.md)。
 
 Forge 前序验证还包含 19 项前端行为回归和 360 CSS px 手机尺寸浏览器检查，使用隔离存储与合成数据，详情见 [接入记录](docs/fixes/2026-11-02-forge-android.md)。这不替代 Android WebView 和真实模型服务验收。
 
@@ -198,6 +208,7 @@ Forge 前序验证还包含 19 项前端行为回归和 360 CSS px 手机尺寸�
 
 ## 更多说明
 
+- [1.17.1 发布与验收记录](docs/fixes/2026-11-27-release-1.17.1.md)
 - [1.17.0 发布与验收记录](docs/fixes/2026-11-02-release-1.17.0.md)
 - [上游 Android 1.15 稳定版同步](docs/fixes/2026-11-02-stable-115-sync.md)
 - [Forge API 2 与四个内置插件](docs/fixes/2026-11-02-forge-android.md)

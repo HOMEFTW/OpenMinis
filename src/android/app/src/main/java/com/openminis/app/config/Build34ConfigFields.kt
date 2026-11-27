@@ -45,7 +45,7 @@ internal object Build34ConfigFields {
         bool("chat.foldTools", "Fold consecutive completed tools", KEY_FOLD_COMPLETED_TOOLS, true, agent)
 
         registry.register(ClosureField(
-            path = "chat.speedTier", displayName = "Response speed", description = "standard / fast / ultrafast. Unsupported ultrafast models use fast. Applies from the next request.",
+            path = "chat.speedTier", displayName = "Response speed", description = "standard / fast / ultrafast. Fast tiers apply only to GPT text models on OpenAI Chat/Responses routes. Unsupported GPT ultrafast models use fast. Selecting a non-GPT model in the foreground resets to standard; returning to GPT does not restore Fast. Applies from the next request.",
             readable = ConfigReadable(ConfigValueFormatter.EnumLabels(mapOf("standard" to "Standard", "fast" to "Fast", "ultrafast" to "Ultrafast"))),
             valueSchema = ConfigSchema.StrEnum(listOf("standard", "fast", "ultrafast")),
             reader = { ConfigValue.Str(FastModePrefs.speedTier.value) },

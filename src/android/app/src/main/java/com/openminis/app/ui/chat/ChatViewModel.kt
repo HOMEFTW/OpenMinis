@@ -1891,7 +1891,15 @@ class ChatViewModel(
         set(value) {
             currentModelState = value
             value?.let { _thinkingLevel.value = it.clampThinkingLevel(_thinkingLevel.value) }
+            syncFastModeForCurrentModel()
         }
+
+    /** Covers manual selection, restore, defaults, config refresh and group fallback. */
+    fun syncFastModeForCurrentModel() {
+        com.openminis.app.data.FastModePrefs.onModelSelected(
+            context, currentModel, isForeground = ChatViewModelStore.activeSessionId == activeSessionId,
+        )
+    }
 
     /**
      * Does the CURRENTLY RESOLVED main model natively consume image pixels?
@@ -2664,16 +2672,12 @@ class ChatViewModel(
         _enhancedCacheEnabled.value = enabled
     }
 
-    /**
-     * [T-codex-fast-mode] Fast Mode toggle state. APP-LEVEL and persisted
-     * (FastModePrefs / iOS UserDefaults "codexFastModeEnabled") — unlike
-     * Enhanced Cache it survives across sessions and process restarts; every
-     * chat reads the same flag. The provider reads FastModePrefs directly at
-     * request-build time, so this flow only drives the menu row + nav badge.
-     */
-    val fastModeEnabled: StateFlow<Boolean> = com.openminis.app.data.FastModePrefs.enabled
-
     fun setFastModeEnabled(enabled: Boolean) {
+        if (enabled) {
+            val entry = providerRepository.config.value.modelEntries.find { it.id == _activeEntryId.value } ?: return
+            val instance = providerRepository.instance(entry.providerInstanceId) ?: return
+            if (!com.openminis.app.provider.FastModeSupport.isAvailable(instance.providerType, entry.model)) return
+        }
         com.openminis.app.data.FastModePrefs.setEnabled(context, enabled)
     }
 
@@ -2694,7 +2698,7 @@ class ChatViewModel(
         _autoCompactEnabled.value = enabled
     }
 
-    /** GPT Chat/Responses and xAI share the persisted Fast switch and badge. */
+    /** Only GPT text models on Chat/Responses routes offer Fast. */
     val showFastModeToggle: StateFlow<Boolean> =
         kotlinx.coroutines.flow.combine(
             _activeEntryId,
@@ -2710,8 +2714,15 @@ class ChatViewModel(
             false,
         )
 
+    /** UI state is scoped to this model; request builders still read the shared preference. */
+    val fastModeEnabled: StateFlow<Boolean> = kotlinx.coroutines.flow.combine(
+        com.openminis.app.data.FastModePrefs.enabled, showFastModeToggle,
+    ) { enabled, available -> enabled && available }.stateIn(
+        viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, false,
+    )
+
     val showFastModeControl: Boolean
-        get() = com.openminis.app.provider.FastModeSupport.shouldShowControl(currentModelId, showFastModeToggle.value)
+        get() = com.openminis.app.provider.FastModeSupport.shouldShowControl(currentModelId)
 
     internal val _showSlashMenu = MutableStateFlow(false)
     val showSlashMenu: StateFlow<Boolean> = _showSlashMenu.asStateFlow()
@@ -6457,14 +6468,6 @@ class ChatViewModel(
         val provider: LLMProvider,
         val entryId: String,
     )
-
-    private fun systemPromptFor(provider: LLMProvider, prompt: String?): String? {
-        val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-        if (prompt == null || prefix.isEmpty()) return prompt
-        val bare = if (prompt.startsWith(prefix)) prompt.removePrefix(prefix).trimStart('\n') else prompt
-        val oauth = (provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true
-        return if (oauth) "$prefix\n\n$bare" else bare
-    }
 
     private fun buildFallbackProviders(primaryProvider: LLMProvider): List<FallbackCandidate> {
         val groupId = _selectedGroupId.value ?: return emptyList()

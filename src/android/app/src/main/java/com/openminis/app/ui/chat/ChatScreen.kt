@@ -810,6 +810,7 @@ fun ChatScreen(
     }
     androidx.compose.runtime.DisposableEffect(sessionId) {
         ChatViewModelStore.setActiveSession(sessionId)
+        viewModel.syncFastModeForCurrentModel()
         // [T-HANG-DIAG] enter / dispose markers around the ChatScreen lifetime
         // so we can correlate "user tapped session X" → loadSession timings
         // and any subsequent hang record. Removable by grepping out
@@ -5255,7 +5256,7 @@ fun ChatScreen(
                                                 current = viewModel.thinkingLevelForDisplay(thinkingLevelState),
                                                 showFastMode = composerFastVisible,
                                                 supportsFastMode = composerFastEligible,
-                                                fastMode = composerFastOn,
+                                                fastMode = composerFastEligible && composerFastOn,
                                                 onFastModeChange = viewModel::setFastModeEnabled,
                                                 allowOff = viewModel.canDisableThinking,
                                                 availableLevels = viewModel.availableThinkingLevels,

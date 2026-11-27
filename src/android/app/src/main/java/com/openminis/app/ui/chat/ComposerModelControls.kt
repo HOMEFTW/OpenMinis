@@ -86,7 +86,7 @@ internal fun ComposerModelControls(
             ComposerSelector(
                 label = modelLabel,
                 description = listOf(modelLabel, providerName, groupName).filter { it.isNotBlank() }.joinToString(" · "),
-                fastMode = fastMode,
+                fastMode = showFastMode && supportsFastMode && fastMode,
                 onClick = { openMenu = "model" },
             )
             DropdownMenu(
