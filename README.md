@@ -7,7 +7,9 @@
 
 OpenMinis 是原生移动端 AI Agent：连接你自己的模型服务，在手机上使用 Linux 沙箱、文件工作区、浏览器、技能和记忆。本 fork 保留原项目架构，仅增加 Android 端改动；它不是上游官方发行版。
 
-**[下载 Android 1.17.1 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.1/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.1) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+**[下载 Android 1.17.2 APK](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.2/app-debug.apk)** · [版本说明](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.2) · [上游项目说明](README.upstream.md) · [构建指南](docs/android-windows-build.md)
+
+**1.17.2 · 2026-11-27**：修复 Anthropic 兼容中转的模型发现，兼容多种列表格式，单条异常记录不再导致整份列表丢失；保留 GPT、DeepSeek 的已知能力信息。获取失败时显示原因，自定义 API Key 服务不再自动补入无关 Claude 模型。覆盖安装后，在对应服务商设置中点击“刷新模型列表”；详情见 [1.17.2 发布记录](docs/fixes/2026-11-27-release-1.17.2.md)。
 
 **1.17.1 · 2026-11-27**：修复公开构建中所有模型点击发送即报 Anthropic 配置错误；修复 Forge 面板加载时机并增加失败提示与重试；高速模式限定为 GPT 文本模型，切换到其他模型时关闭。补齐上游 1.15 的 Tailscale 出口网络维护修复，并重建原生库。保留四个内置插件、品牌与背景、会话链接及上下文设置；详情见 [1.17.1 发布记录](docs/fixes/2026-11-27-release-1.17.1.md)。
 
@@ -190,6 +192,8 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 ## 验证情况
 
+1.17.2 的模型发现修复通过 **9 个套件、97 项 JVM 定向回归**，全部通过，无跳过。升级版本后使用项目构建脚本重新打包，并核对 APK 签名、ZIP 完整性、对齐和版本。真实中转接口及手机尚未实测，详情见 [1.17.2 发布记录](docs/fixes/2026-11-27-release-1.17.2.md)。
+
 1.17.1 已通过 **83 项 Go 回归、201 项 JVM 定向回归和 5 项 Forge 前端测试**，全部通过，无跳过。发布包从隔离工作副本构建，签名、ZIP 完整性、对齐、版本、Forge 资源及新网络库入包检查均通过。详细结果见 [1.17.1 发布记录](docs/fixes/2026-11-27-release-1.17.1.md) 和 [Release](https://github.com/HOMEFTW/OpenMinis/releases/tag/1.17.1)。
 
 当前仍有已定位的流式 Markdown 缺陷：`#tag` 等非标题行存在高 CPU 循环路径，本次未修复。上游 Beta 功能及缺口见 [更新核对记录](docs/fixes/2026-11-27-upstream-alignment.md)，本版未全面同步 1.16 Beta。
@@ -198,7 +202,7 @@ Windows 在已配置 JDK、Android SDK 和 Git Bash 的 PowerShell 中运行：
 
 APK v2 签名、ZIP CRC、重复条目、16 KiB 原生库／4 字节 ZIP 对齐、包名与版本检查通过。签名证书与已发布 1.16.3 一致。四个 Forge 插件、283 个技能清单文件、前端资源和 Grok 背景均已核对入包；技能原始 SHA-256 与 Windows 重新检出的文件字节一致。
 
-当前安装包 SHA-256 见 [1.17.1 校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.1/app-debug.apk.sha256)。源码与 APK 对应同一 `1.17.1` 标签，GitHub 的 Source code 归档包含本次改动；原生子模块仍按构建指南初始化。上述 1.17.0 全量验收属于历史记录，详情见 [1.17.0 发布记录](docs/fixes/2026-11-02-release-1.17.0.md)。
+当前安装包 SHA-256 见 [1.17.2 校验文件](https://github.com/HOMEFTW/OpenMinis/releases/download/1.17.2/app-debug.apk.sha256)。源码与 APK 对应同一 `1.17.2` 标签，GitHub 的 Source code 归档包含本次改动；原生子模块仍按构建指南初始化。上述 1.17.0 全量验收属于历史记录，详情见 [1.17.0 发布记录](docs/fixes/2026-11-02-release-1.17.0.md)。
 
 Forge 前序验证还包含 19 项前端行为回归和 360 CSS px 手机尺寸浏览器检查，使用隔离存储与合成数据，详情见 [接入记录](docs/fixes/2026-11-02-forge-android.md)。这不替代 Android WebView 和真实模型服务验收。
 
@@ -208,6 +212,7 @@ Forge 前序验证还包含 19 项前端行为回归和 360 CSS px 手机尺寸�
 
 ## 更多说明
 
+- [1.17.2 发布与验收记录](docs/fixes/2026-11-27-release-1.17.2.md)
 - [1.17.1 发布与验收记录](docs/fixes/2026-11-27-release-1.17.1.md)
 - [1.17.0 发布与验收记录](docs/fixes/2026-11-02-release-1.17.0.md)
 - [上游 Android 1.15 稳定版同步](docs/fixes/2026-11-02-stable-115-sync.md)

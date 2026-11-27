@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 33
-        versionName = "1.17.1"
+        versionCode = 34
+        versionName = "1.17.2"
         buildConfigField("String", "RELEASE_REPO", "\"HOMEFTW/OpenMinis\"")
         buildConfigField("String", "UPDATE_CHANNEL", "\"stable\"")
         buildConfigField("boolean", "AUTO_UPDATE_CHECK", "true")

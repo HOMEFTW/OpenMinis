@@ -4,16 +4,21 @@ import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.openai.OpenAIModelsApi
+import com.openminis.app.provider.openai.OpenAIModelLimits
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import org.json.JSONObject
 
 object AnthropicModelsApi {
     private val client = OkHttpClient()
+
+    data class FetchResult(val models: List<LLMModel>, val error: String?)
 
     /**
      * Fetch models from Anthropic API.
@@ -36,19 +41,31 @@ object AnthropicModelsApi {
         // keeps the default UA. Threaded from ProviderRepository.refreshModels.
         customUserAgent: String? = null,
         netTag: String? = null,
-    ): List<LLMModel> = withContext(Dispatchers.IO) {
+    ): List<LLMModel> = fetchModelsDetailed(
+        apiKey, baseURL, isOAuth, context, forceRefresh, customUserAgent, netTag,
+    ).models
+
+    suspend fun fetchModelsDetailed(
+        apiKey: String,
+        baseURL: String? = null,
+        isOAuth: Boolean = false,
+        context: Context? = null,
+        forceRefresh: Boolean = false,
+        customUserAgent: String? = null,
+        netTag: String? = null,
+    ): FetchResult = withContext(Dispatchers.IO) {
         // Cache key: base URL included so the same API key across proxies doesn't
         // share cached model lists (vLLM vs api.anthropic.com can differ).
         val cacheKey = (baseURL ?: "") + "|" + apiKey + "|" + isOAuth
         if (context != null && !forceRefresh) {
-            AnthropicModelsCache.load(context, cacheKey)?.let { return@withContext it }
+            AnthropicModelsCache.load(context, cacheKey)?.let { return@withContext FetchResult(it, null) }
         }
 
         // Anthropic-compatible custom endpoints (e.g. DashScope/Bailian) often don't
         // expose `/v1/models`. On any failure for a custom endpoint, return empty so
         // the caller can fall through to the models.dev registry; only the official
         // api.anthropic.com is given the hardcoded fallback as a network-failure net.
-        val isCustomEndpoint = baseURL != null
+        val isCustomEndpoint = baseURL != null && !isOfficialAnthropic(baseURL)
 
         // Build candidate bases: start with the user-supplied base, then climb the
         // path up to 3 levels. Lets vendor-specific bases like
@@ -64,8 +81,8 @@ object AnthropicModelsApi {
             }
         }
 
-        var lastFailureCode: Int = -1
-        var lastFailureBody: String = ""
+        var firstError: String? = null
+        val attemptedURLs = mutableSetOf<String>()
         for ((idx, candidate) in candidateBases.withIndex()) {
             // idx == 0 is the user-supplied base, which arrives already resolved by
             // ProviderConfig.effectiveBaseURL (appendV1Suffix honored). Trust it as-is
@@ -74,6 +91,7 @@ object AnthropicModelsApi {
             // paths used purely for host-root discovery (e.g. deepseek.com/anthropic ->
             // host root /v1/models); those keep the /v1 auto-append.
             val url = buildURL(candidate, forceV1Discovery = idx > 0)
+            if (!attemptedURLs.add(url)) continue
             val requestBuilder = Request.Builder()
                 .url(url)
                 .header("anthropic-version", "2023-06-01")
@@ -84,7 +102,9 @@ object AnthropicModelsApi {
                 // OAuth: Bearer token + required beta header (mirrors iOS fetchModels(oauthToken:))
                 requestBuilder.header("Authorization", "Bearer $apiKey")
                 requestBuilder.header("anthropic-beta", "oauth-2025-04-20")
-            } else if (candidate != null) {
+            } else if (apiKey.isEmpty()) {
+                // Match the message path for keyless local compatible endpoints.
+            } else if (isCustomEndpoint) {
                 // Custom endpoint: Bearer auth
                 requestBuilder.header("Authorization", "Bearer $apiKey")
             } else {
@@ -95,86 +115,82 @@ object AnthropicModelsApi {
             val request = requestBuilder.build()
             android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url} isOAuth=$isOAuth")
 
-            val response: Response = try {
+            val (status, body) = try {
                 com.openminis.app.network.NetworkHttp.client(
                     netTag, com.openminis.app.network.EndpointCertificates.client(client, url),
-                ).newCall(request).execute()
+                ).newCall(request).execute().use { it.code to it.body?.string().orEmpty() }
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
+                if (firstError == null) firstError = e.message ?: e.javaClass.simpleName
                 continue
             }
-            val body = response.body?.string() ?: run {
-                android.util.Log.w("AnthropicModels", "Empty response body (level=$idx)")
-                ""
-            }
 
-            if (!response.isSuccessful) {
-                android.util.Log.e("AnthropicModels", "Fetch failed (level=$idx): ${response.code} ${body.take(200)}")
+            if (status !in 200..299) {
+                val error = "HTTP $status: ${OpenAIModelsApi.errorSnippet(body)}"
+                android.util.Log.e("AnthropicModels", "Fetch failed (level=$idx): $error")
                 // 401/403 almost always means the credential rotated; drop any stale
                 // cache entry so the next lookup hits the network again.
-                if (context != null && (response.code == 401 || response.code == 403)) {
+                if (context != null && (status == 401 || status == 403)) {
                     AnthropicModelsCache.invalidate(context, cacheKey)
                 }
-                lastFailureCode = response.code
-                lastFailureBody = body
+                if (firstError == null) firstError = error
                 continue
             }
 
+            val models = parseModels(body, isCustomEndpoint)
+            if (models.isEmpty()) {
+                if (firstError == null) firstError = "the response contains no usable models: ${OpenAIModelsApi.errorSnippet(body)}"
+                // Some gateways serve an HTML landing page with HTTP 200 at
+                // the messages base. Continue looking for their model catalog.
+                continue
+            }
             if (idx > 0) {
                 android.util.Log.i("AnthropicModels", "Parent-path fallback succeeded at level=$idx base=$candidate")
             }
-            android.util.Log.d("AnthropicModels", "Response ${response.code}, body length: ${body.length}")
-            return@withContext parseAndCache(body, isCustomEndpoint, context, cacheKey)
+            if (context != null) AnthropicModelsCache.save(context, cacheKey, models)
+            return@withContext FetchResult(models, null)
         }
 
-        // All candidate bases failed.
-        android.util.Log.e("AnthropicModels", "All ${candidateBases.size} fallback levels failed; lastCode=$lastFailureCode")
-        return@withContext if (isCustomEndpoint) emptyList() else LLMModel.allAnthropic
+        return@withContext FetchResult(
+            if (isCustomEndpoint) emptyList() else LLMModel.allAnthropic,
+            firstError ?: "the provider returned no models",
+        )
     }
 
-    private suspend fun parseAndCache(
+    private suspend fun parseModels(
         body: String,
         isCustomEndpoint: Boolean,
-        context: Context?,
-        cacheKey: String,
     ): List<LLMModel> {
-        val fallback: List<LLMModel> = if (isCustomEndpoint) emptyList() else LLMModel.allAnthropic
-        val models = try {
-            val json = JSONObject(body)
-            val data = json.optJSONArray("data") ?: return fallback
-            val parsed = mutableListOf<LLMModel>()
-            for (i in 0 until data.length()) {
-                val obj = data.getJSONObject(i)
-                val id = obj.getString("id")
-                val displayName = obj.optString("display_name", id)
-                // [T-android-claude-opus48-thinking-toggle] (Sow Sow 38845/38850)
-                // /v1/models returns no capability metadata, so without this the
-                // model lands with supportsReasoning=null and ChatViewModel hides
-                // the Deep Thinking toggle (gate is `== true`). Stamp it up front
-                // for Claude thinking models — same approach as OpenAIModelsApi
-                // hard-stamping gpt-5.x. enrichModels() below still overlays
-                // models.dev's `reasoning` when present (it prefers devModel.reasoning),
-                // but this guarantees the toggle for new models models.dev hasn't
-                // catalogued yet (e.g. Opus 4.8). Both OAuth and API-key direct
-                // Anthropic instances flow through here.
-                val reasoning = if (AnthropicProvider.supportsThinking(id)) true else null
-                val limits = com.openminis.app.provider.openai.OpenAIModelLimits.read(obj)
-                parsed.add(LLMModel(id, displayName, "Anthropic", supportsReasoning = reasoning,
-                    contextWindow = limits.context, maxOutputTokens = limits.output,
-                    limitsReportedByEndpoint = if (limits.context != null || limits.output != null) true else null))
+        // Compatible gateways may use the same catalog envelopes as OpenAI.
+        // The catalog format does not change the selected message protocol.
+        val data = OpenAIModelsApi.modelArray(body) ?: return emptyList()
+        val parsed = mutableListOf<LLMModel>()
+        for (i in 0 until data.length()) {
+            val obj = when (val raw = data.opt(i)) {
+                is JSONObject -> raw
+                is String -> JSONObject().put("id", raw)
+                else -> continue
             }
-            android.util.Log.i("AnthropicModels", "Parsed ${parsed.size} models: ${parsed.map { it.id }.joinToString()}")
-            if (parsed.isEmpty()) return fallback
-            ModelsDevApi.enrichModels(parsed, preserveProviderLimits = isCustomEndpoint)
-        } catch (_: Exception) {
-            return fallback
+            fun text(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
+                (obj.opt(key) as? String)?.trim()?.takeIf { it.isNotEmpty() }
+            }
+            val id = text("id", "model", "model_id", "name") ?: continue
+            val displayName = text("display_name", "name") ?: id
+            val defaults = LLMModel(id, displayName, if (isCustomEndpoint) "Custom" else "Anthropic")
+            val limits = OpenAIModelLimits.read(obj)
+            parsed.add(defaults.copy(
+                supportsReasoning = if (AnthropicProvider.supportsThinking(id)) true else defaults.supportsReasoning,
+                contextWindow = limits.context ?: defaults.contextWindow,
+                maxOutputTokens = limits.output ?: defaults.maxOutputTokens,
+                limitsReportedByEndpoint = if (limits.context != null || limits.output != null) true else null,
+            ))
         }
-
-        if (context != null) {
-            AnthropicModelsCache.save(context, cacheKey, models)
-        }
-        return models
+        return ModelsDevApi.enrichModels(parsed.distinctBy { it.id }, preserveProviderLimits = isCustomEndpoint)
     }
+
+    internal fun isOfficialAnthropic(baseURL: String): Boolean =
+        baseURL.toHttpUrlOrNull()?.host == "api.anthropic.com"
 
     /**
      * Build the /models endpoint.

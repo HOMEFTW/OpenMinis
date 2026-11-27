@@ -69,6 +69,17 @@ private const val MODALITY_BIT_VID_OUT = 1 shl 8
 class CodexDiscoveryAuthException(val status: Int) :
     Exception("Codex model discovery rejected the credential (HTTP $status)")
 
+/** A compatible protocol does not imply that a relay offers its vendor's models. */
+internal fun shouldSeedBuiltInModels(instance: ProviderInstance): Boolean {
+    if (instance.credentialType == ProviderCredential.oauth) return true
+    val custom = instance.customBaseURL?.takeIf { it.isNotBlank() } ?: return true
+    return when (instance.providerType) {
+        ProviderType.openAI, ProviderType.openAIResponses -> OpenAIModelsApi.isOfficialOpenAI(custom)
+        ProviderType.anthropic -> AnthropicModelsApi.isOfficialAnthropic(custom)
+        else -> true
+    }
+}
+
 /**
  * [T-provider-refresh-outlives-screen] (GH#265) Runs a provider's model-list
  * refresh in a scope that belongs to the repository, not to the screen that
@@ -699,23 +710,9 @@ class ProviderRepository(private val context: Context) {
         ensureConfigLoaded()
         val config = workingCopy()
         config.instances.add(instance)
-        // Seed built-in model entries ONLY when the seed is appropriate for this
-        // instance. Mirrors iOS ProviderConfigStore.addInstance:
-        //   - OAuth instances always get seeded (their /v1/models often requires
-        //     a manual token or isn't reachable, so the static list is the
-        //     baseline UX).
-        //   - API-key instances on a third-party OpenAI-compatible base URL
-        //     (e.g. xAI Grok https://api.x.ai, vLLM, Ollama, LiteLLM, DeepSeek
-        //     via OpenAI shim) MUST NOT inherit `LLMModel.allOpenAI` — that's
-        //     where the "Refresh on Grok returns GPT-5.5/5.3-codex" bug came
-        //     from. For these, leave entries empty and let refreshModels()
-        //     populate from the upstream /v1/models call.
-        //   - API-key instances on an official endpoint (no customBaseURL, or
-        //     a customBase that points at the canonical host) keep the seed so
-        //     UI isn't blank during the first refresh round-trip.
-        val shouldSeed = instance.credentialType == ProviderCredential.oauth ||
-            !isThirdPartyOpenAICompat(instance)
-        if (shouldSeed) {
+        // Official endpoints and OAuth retain their baseline catalog. Custom
+        // API-key gateways get only the models discovered from their endpoint.
+        if (shouldSeedBuiltInModels(instance)) {
             val entries = instance.providerType.builtInModels.map { model ->
                 ModelEntry(providerInstanceId = instance.id, baseModel = model)
             }
@@ -723,7 +720,7 @@ class ProviderRepository(private val context: Context) {
         } else {
             android.util.Log.i(
                 "ProviderRepo",
-                "[ModelList] addInstance: skip built-in seed for third-party OpenAI-compat base " +
+                "[ModelList] addInstance: skip built-in seed for third-party compatible base " +
                     "(label=${instance.label} base=${instance.effectiveBaseURL}) — " +
                     "models will populate from upstream /v1/models on refresh",
             )
@@ -816,19 +813,6 @@ class ProviderRepository(private val context: Context) {
             }
         }
         if (changed) saveConfig(config)
-    }
-
-    /**
-     * Whether [instance] points at a third-party OpenAI-compatible host
-     * (xAI Grok, vLLM, Ollama, LiteLLM, DeepSeek via OpenAI shim, etc.).
-     * For these instances we must never substitute `LLMModel.allOpenAI` as a
-     * fallback / seed — those are GPT-only IDs that don't exist upstream.
-     * Mirrors iOS `ProviderConfigStore.isThirdPartyOpenAICompat`.
-     */
-    private fun isThirdPartyOpenAICompat(instance: ProviderInstance): Boolean {
-        if (instance.providerType !in setOf(ProviderType.openAI, ProviderType.openAIResponses)) return false
-        val custom = instance.customBaseURL?.takeIf { it.isNotBlank() } ?: return false
-        return !OpenAIModelsApi.isOfficialOpenAI(custom)
     }
 
     fun updateInstance(instance: ProviderInstance): Unit = synchronized(configLock) {
@@ -2324,7 +2308,7 @@ class ProviderRepository(private val context: Context) {
 
     private fun addMissingBuiltInModels(instance: ProviderInstance): Unit = synchronized(configLock) {
         ensureConfigLoaded()
-        if (instance.credentialType != ProviderCredential.oauth && isThirdPartyOpenAICompat(instance)) return@synchronized
+        if (!shouldSeedBuiltInModels(instance)) return@synchronized
         if (instance.providerType == ProviderType.githubCopilot) return@synchronized
         val config = workingCopy()
         val have = config.modelEntries.filter { it.providerInstanceId == instance.id }.map { it.baseModel.id }.toSet()
@@ -2444,13 +2428,16 @@ class ProviderRepository(private val context: Context) {
             val models = try {
                 when (instance.providerType) {
                     ProviderType.deepSeek -> instance.providerType.builtInModels
-                    ProviderType.anthropic -> AnthropicModelsApi.fetchModels(
+                    ProviderType.anthropic -> AnthropicModelsApi.fetchModelsDetailed(
                         apiKey, baseURL,
                         isOAuth = instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth,
                         // [T-provider-custom-user-agent] models-list UA override.
                         customUserAgent = instance.customUserAgent,
                         netTag = netTag,
-                    )
+                    ).also { result ->
+                        result.error?.let(reportVendorError)
+                        usedBuiltIn = result.error != null && result.models.isNotEmpty()
+                    }.models
                     ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey, netTag = netTag)
                     // [T-provider-custom-user-agent] models-list UA override.
                     // [T-android-provider-type-parity] openAIResponses lists
